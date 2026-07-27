@@ -1,0 +1,13 @@
+{
+  "kind": "ssp-live-log",
+  "entrypoint": "main.py",
+  "duration_seconds": 60,
+  "progress_interval_seconds": 5,
+  "resources": {
+    "nodes": 1,
+    "gpus": 0,
+    "cpus": 1,
+    "memory_gib": 4,
+    "shm_gib": 1
+  }
+}

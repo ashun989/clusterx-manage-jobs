@@ -14,7 +14,7 @@ SMOKE = ROOT / "smoke-projects"
 class SmokeProjectTests(unittest.TestCase):
     def test_project_manifests(self):
         manifests = sorted(SMOKE.glob("*/project.json"))
-        self.assertEqual(len(manifests), 5)
+        self.assertEqual(len(manifests), 6)
         for path in manifests:
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertTrue((path.parent / data["entrypoint"]).is_file())
@@ -54,6 +54,35 @@ class SmokeProjectTests(unittest.TestCase):
         assert spec.loader
         spec.loader.exec_module(module)
         self.assertTrue(callable(module.run))
+
+    def test_live_log_project_flushes_and_persists_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result_file = Path(directory) / "result.json"
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    str(SMOKE / "ssp-live-log/main.py"),
+                    "--run-id",
+                    "local-live-log",
+                    "--steps",
+                    "2",
+                    "--interval-seconds",
+                    "0",
+                    "--result-file",
+                    str(result_file),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            events = [json.loads(line) for line in run.stdout.splitlines()]
+            self.assertEqual(
+                [event["event"] for event in events],
+                ["started", "progress", "progress", "completed"],
+            )
+            result = json.loads(result_file.read_text(encoding="utf-8"))
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["steps"], 2)
 
 
 if __name__ == "__main__":
