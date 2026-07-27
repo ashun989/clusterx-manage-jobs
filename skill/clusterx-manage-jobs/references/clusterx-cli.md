@@ -169,6 +169,16 @@ Before `run`, verify:
 Expected result includes a job schema/status such as `Queuing`. Record the job
 ID for later `get-job`, `log`, `stats`, or `stop` operations.
 
+## SSP log limitation
+
+With Clusterx 2026.7.1, `clusterx log <job-id>` fetches
+`trainingJobs/<job-id>/pods` before reading pod logs. Short completed SSP jobs
+may return HTTP 404 from this pods endpoint even when `get-job` reports
+`Succeeded`. Report the job status and the log retrieval failure separately;
+never invent missing output. For future smoke tests that require exact output,
+write a sanitized result file to approved shared storage or keep the task alive
+long enough to fetch logs while its pod still exists.
+
 ## Snapshot change history
 
 | Version | Change |

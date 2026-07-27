@@ -1,0 +1,43 @@
+{
+  "run_id": "20260727T083955Z",
+  "clusterx_version": "2026.7.1",
+  "overall_status": "passed_with_log_api_limitation",
+  "evidence": {
+    "submission": "all five jobs accepted",
+    "terminal_status": "all five jobs succeeded",
+    "result_contract": "each program exits non-zero on validation or cleanup failure",
+    "logs": "unavailable: SSP pods endpoint returned HTTP 404 after completion"
+  },
+  "jobs": [
+    {
+      "job_id": "cx-smoke-gpu-20260727t083955z",
+      "test": "gpu-matmul",
+      "status": "Succeeded",
+      "validation": "passed by process exit status"
+    },
+    {
+      "job_id": "cx-smoke-afs1-20260727t083955z",
+      "test": "afs-data-zengquansheng",
+      "status": "Succeeded",
+      "validation": "write/read/SHA-256/cleanup passed by process exit status"
+    },
+    {
+      "job_id": "cx-smoke-afs2-20260727t083955z",
+      "test": "afs-omnilab-shared",
+      "status": "Succeeded",
+      "validation": "write/read/SHA-256/cleanup passed by process exit status"
+    },
+    {
+      "job_id": "cx-smoke-aoss1-20260727t083955z",
+      "test": "aoss-zengquansheng",
+      "status": "Succeeded",
+      "validation": "write/read/SHA-256/cleanup passed by process exit status"
+    },
+    {
+      "job_id": "cx-smoke-aoss2-20260727t083955z",
+      "test": "aoss-xyz2-omni",
+      "status": "Succeeded",
+      "validation": "write/read/SHA-256/cleanup passed by process exit status"
+    }
+  ]
+}
