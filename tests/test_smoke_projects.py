@@ -84,6 +84,20 @@ class SmokeProjectTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["steps"], 2)
 
+    def test_skill_documents_ssp_runtime_limitations(self):
+        skill_root = ROOT / "skill" / "clusterx-manage-jobs"
+        skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        reference_text = (
+            skill_root / "references" / "clusterx-cli.md"
+        ).read_text(encoding="utf-8")
+
+        for text in (skill_text, reference_text):
+            self.assertIn("32 Unicode characters", text)
+            self.assertIn("nodes_ip", text)
+            self.assertIn("Running", text)
+            self.assertIn("Succeeded", text)
+            self.assertIn("HTTP 404", text)
+
 
 if __name__ == "__main__":
     unittest.main()

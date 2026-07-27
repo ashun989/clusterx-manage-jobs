@@ -42,21 +42,32 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 1. Collect the command, job name, queue, image, node count, GPUs, CPUs, memory,
    mounts, and any retry, include/exclude, RDMA, cluster, machine type, or
    privileged settings.
-2. Validate mounts. Accept the simple `TYPE:ID:PATH[:SUBDIR]` form or a JSON
+2. For SSP, require a non-empty job name of at most 32 Unicode characters.
+   Shorten it before previewing; the service rejects longer names before job
+   creation.
+3. Validate mounts. Accept the simple `TYPE:ID:PATH[:SUBDIR]` form or a JSON
    object. Keep JSON quoted as one shell argument.
-3. Build the `clusterx run` command without executing it.
-4. Pipe the preview through `scripts/redact.py`.
-5. Show the redacted command plus a concise resource and risk summary.
-6. Ask for explicit confirmation. Ask separately when
+4. Build the `clusterx run` command without executing it.
+5. Pipe the preview through `scripts/redact.py`.
+6. Show the redacted command plus a concise resource and risk summary.
+7. Ask for explicit confirmation. Ask separately when
    `--enable-privileged` is enabled.
-7. Execute only after confirmation. Capture the job ID and report the initial
+8. Execute only after confirmation. Capture the job ID and report the initial
    status without exposing credentials.
-8. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
+9. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
 
 ## Query and stop jobs
 
 - Execute `list`, `get-job`, `get-node`, `log`, and `stats` as read-only
   operations without confirmation unless another action is implied.
+- On SSP with Clusterx 2026.7.1, treat a pods-endpoint HTTP 404 from `log` as
+  a log-discovery failure, not proof that the job failed. Check `get-job`
+  separately. The same 404 can occur while a job is `Running` and after it is
+  `Succeeded`, even when the workload flushes output.
+- SSP job details may return empty `nodes` and `nodes_ip`, and `get-node` may
+  not provide a fallback. Never invent node or log data. For jobs requiring
+  observable progress, write sanitized status/results to approved shared
+  storage and state that this is a fallback rather than stdout/stderr.
 - Before `stop`, resolve and display the exact job ID/name and ask for explicit
   confirmation. Do not infer a destructive target from a partial name.
 - Redact command output before presenting it if it may contain configuration,
