@@ -1,0 +1,11 @@
+{
+  "kind": "gpu",
+  "entrypoint": "main.py",
+  "resources": {
+    "nodes": 1,
+    "gpus": 1,
+    "cpus": 4,
+    "memory_gib": 16,
+    "shm_gib": 8
+  }
+}

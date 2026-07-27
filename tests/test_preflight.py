@@ -24,13 +24,16 @@ class PreflightTests(unittest.TestCase):
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
             config = temp / "clusterx.yaml"
             config.write_text(
-                "\n".join(
-                    f"{key}: placeholder"
+                "default: ssp\n"
+                "ssp:\n"
+                + "\n".join(
+                    f"  {key}: placeholder"
                     for key in (
                         "cluster_type", "subscription", "resource_group", "region",
                         "workspace", "cluster", "ak_id", "ak_secret",
                     )
-                ),
+                )
+                + "\n",
                 encoding="utf-8",
             )
             config.chmod(0o600)
@@ -65,6 +68,38 @@ class PreflightTests(unittest.TestCase):
             payload = json.loads(run.stdout)
             self.assertFalse(payload["ok"])
             self.assertFalse(payload["checks"]["config"]["permissions_safe"])
+
+    def test_project_config_overrides_global(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            project = temp / "project"
+            nested = project / "src"
+            nested.mkdir(parents=True)
+            local_dir = project / ".clusterx"
+            local_dir.mkdir()
+            local = local_dir / "clusterx.yaml"
+            local.write_text(
+                "default: ssp\nssp:\n"
+                "  cluster_type: PT\n  subscription: x\n"
+                "  resource_group: x\n  region: x\n  workspace: x\n"
+                "  cluster: x\n  ak_id: x\n  ak_secret: x\n",
+                encoding="utf-8",
+            )
+            local.chmod(0o600)
+            binary = temp / "clusterx"
+            binary.write_text("#!/bin/sh\nprintf 'clusterx 1.0\\n'\n", encoding="utf-8")
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            env = os.environ.copy()
+            env["PATH"] = f"{temp}{os.pathsep}{env.get('PATH', '')}"
+            env["DEV_ENV"] = str(temp / "global")
+            run = subprocess.run(
+                [sys.executable, str(SCRIPT), "--cwd", str(nested), "--json"],
+                text=True, capture_output=True, env=env,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            payload = json.loads(run.stdout)
+            self.assertEqual(payload["checks"]["config"]["source"], "project")
+            self.assertEqual(payload["checks"]["config"]["path"], str(local))
 
 
 if __name__ == "__main__":

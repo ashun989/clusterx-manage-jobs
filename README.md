@@ -25,6 +25,7 @@
 - 为训练任务生成资源、镜像、挂载和命令预览，并在提交前要求确认。
 - 查询任务、节点、日志和统计信息；停止任务前解析并确认准确目标。
 - 对配置、命令、复杂挂载 JSON、HTTP 认证头和签名 URL 做脱敏。
+- 支持 `.dev-env` 全局配置与项目 `.clusterx/clusterx.yaml` 完整覆盖。
 - 从登记的权威飞书文档生成已脱敏候选版本和差异，审批后再更新 Skill。
 
 提交、停止任务和启用特权模式属于有状态或高风险操作，测试不会连接真实集群。
@@ -56,10 +57,14 @@ clusterx --help
 首次配置后，保护配置文件权限：
 
 ```bash
-chmod 600 ~/.config/clusterx.yaml
+chmod 600 /data/zengquansheng/.dev-env/clusterx/clusterx.yaml
 python skill/clusterx-manage-jobs/scripts/preflight.py \
+  --cwd /path/to/project \
   --tmpdir /path/shared/by/dev-machine-and-job
 ```
+
+项目需要独立配置时，创建完整的 `.clusterx/clusterx.yaml` 并设置为 `600`。
+Skill 按“显式配置、环境变量、项目配置、全局配置、原生默认路径”的顺序选择。
 
 不要把访问密钥、Token、Cookie、私钥、签名 URL 或真实挂载凭据提交到 Git。
 

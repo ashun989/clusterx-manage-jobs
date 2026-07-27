@@ -9,14 +9,15 @@ import os
 from pathlib import Path
 import re
 import shutil
-import stat
 import subprocess
-import sys
 
+from config_resolver import inspect_config, resolve_config
 from redact import redact
 
 
 REQUIRED_KEYS = {
+    "default",
+    "ssp",
     "cluster_type",
     "subscription",
     "resource_group",
@@ -45,9 +46,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config",
-        default=str(Path.home() / ".config" / "clusterx.yaml"),
-        help="Clusterx YAML path; values are never printed",
+        help="Explicit Clusterx YAML path; values are never printed",
     )
+    parser.add_argument("--cwd", help="Project directory used for local discovery")
     parser.add_argument("--tmpdir", help="Shared Clusterx command-script directory")
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args()
@@ -55,32 +56,50 @@ def main() -> int:
     result: dict[str, object] = {"ok": True, "checks": {}}
     checks: dict[str, object] = result["checks"]  # type: ignore[assignment]
 
-    binary = shutil.which("clusterx")
-    checks["clusterx"] = {"found": bool(binary), "path": binary}
-    if binary:
-        version = subprocess.run(
-            [binary, "--version"], text=True, capture_output=True, timeout=10
-        )
-        checks["clusterx"]["version_ok"] = version.returncode == 0  # type: ignore[index]
-        checks["clusterx"]["version"] = (  # type: ignore[index]
-            redact(version.stdout or version.stderr)
-        ).strip().splitlines()[:1]
-    else:
-        result["ok"] = False
-
-    config = Path(args.config).expanduser()
-    config_check: dict[str, object] = {"exists": config.is_file(), "path": str(config)}
+    selection = resolve_config(explicit=args.config, cwd=args.cwd)
+    config = selection.path
+    config_check = inspect_config(selection)
     checks["config"] = config_check
-    if config.is_file():
-        mode = stat.S_IMODE(config.stat().st_mode)
+    config_ok = bool(
+        config_check["exists"] and config_check["permissions_safe"]
+    )
+    if config_ok:
         keys = config_keys(config)
-        config_check["mode"] = oct(mode)
-        config_check["permissions_safe"] = mode & 0o077 == 0
         config_check["missing_keys"] = sorted(REQUIRED_KEYS - keys)
-        if not config_check["permissions_safe"] or config_check["missing_keys"]:
+        if config_check["missing_keys"]:
+            config_ok = False
             result["ok"] = False
     else:
         result["ok"] = False
+
+    binary = shutil.which("clusterx")
+    checks["clusterx"] = {"found": bool(binary), "path": binary}
+    if binary and config_ok:
+        env = os.environ.copy()
+        env["CLUSTERX_CFG_PATH"] = str(config)
+        try:
+            version = subprocess.run(
+                [binary, "--version"],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                env=env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            checks["clusterx"]["version_ok"] = False  # type: ignore[index]
+            checks["clusterx"]["version"] = [redact(str(exc))]  # type: ignore[index]
+            result["ok"] = False
+        else:
+            checks["clusterx"]["version_ok"] = version.returncode == 0  # type: ignore[index]
+            checks["clusterx"]["version"] = (  # type: ignore[index]
+                redact(version.stdout or version.stderr)
+            ).strip().splitlines()[:1]
+            if version.returncode != 0:
+                result["ok"] = False
+    elif not binary:
+        result["ok"] = False
+    else:
+        checks["clusterx"]["version_skipped"] = "configuration is unavailable or unsafe"  # type: ignore[index]
 
     if args.tmpdir:
         tmpdir = Path(args.tmpdir).expanduser()

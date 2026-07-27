@@ -12,7 +12,11 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 
 - For configuration, commands, parameters, mounts, or examples, read
   [references/clusterx-cli.md](references/clusterx-cli.md).
+- For global/project configuration discovery and precedence, read
+  [references/configuration.md](references/configuration.md).
 - For a preflight check, run `python scripts/preflight.py`.
+- Run Clusterx through `python scripts/clusterx_exec.py --cwd <project> --`
+  so project configuration overrides the persistent global configuration.
 - For command or JSON redaction, pipe the content to
   `python scripts/redact.py`; never pass secrets as script arguments.
 - For a user-requested Feishu update check, follow
@@ -20,16 +24,16 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 
 ## Check prerequisites
 
-1. Run `python scripts/preflight.py --tmpdir <configured-tmpdir>`.
+1. Run `python scripts/preflight.py --cwd <project> --tmpdir <configured-tmpdir>`.
 2. If `clusterx` is missing, do not download the signed wheel URL from an old
    document. Ask for a current internal wheel or package source and recommend
    an isolated Python/Conda environment.
 3. If configuration is missing, guide the user through `clusterx` interactive
    configuration or a protected persistent config. Never ask the user to paste
    secrets into chat when a local file can be edited instead.
-4. Run `clusterx --version`, `clusterx --help`, and the requested subcommand's
-   `--help`. Prefer the installed CLI over the reference snapshot and report
-   material differences.
+4. Run `clusterx_exec.py` with `--version`, `--help`, and the requested
+   subcommand's `--help`. Prefer the installed CLI over the reference snapshot
+   and report material differences.
 5. Require a shared `tmpdir` mounted at the same path on the development
    machine and job.
 
@@ -97,6 +101,8 @@ and `2` for a configuration, authentication, fetch, or parsing error.
 
 - Never reveal `ak_secret`, `secret_key`, `access_key`, signed URL credentials,
   Feishu tokens, or private configuration values.
+- Require the selected global or project configuration target to have no
+  group/other permissions. Never merge configs or create a temporary config.
 - Do not persist fetched raw documents. Persist only reviewed, sanitized,
   user-approved references.
 - Do not schedule automatic synchronization.

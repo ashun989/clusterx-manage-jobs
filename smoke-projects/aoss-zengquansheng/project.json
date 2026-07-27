@@ -1,0 +1,6 @@
+{
+  "kind": "PV_AOSS",
+  "entrypoint": "main.py",
+  "target_root": "/oss/zengquansheng",
+  "resources": {"nodes": 1, "gpus": 0, "cpus": 1, "memory_gib": 4, "shm_gib": 1}
+}
