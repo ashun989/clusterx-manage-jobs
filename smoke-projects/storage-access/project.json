@@ -1,6 +1,8 @@
 {
   "kind": "storage-access",
   "entrypoint": "main.py",
+  "target_source": "clusterx_config",
+  "target_scope": "all_mounts",
   "required_target_types": ["file", "object"],
   "resources": {"nodes": 1, "gpus": 0, "cpus": 1, "memory_gib": 4, "shm_gib": 1}
 }

@@ -61,6 +61,11 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
    creation.
 3. Validate mounts. Accept the simple `TYPE:ID:PATH[:SUBDIR]` form or a JSON
    object. Keep JSON quoted as one shell argument.
+   When a smoke manifest declares `target_source: clusterx_config`, resolve
+   the selected protected config, derive generic runtime targets from every
+   `PV_AFS` and `PV_AOSS` `mount_path`, and never ask the user to supply those
+   paths. Do not display the generated target arguments. Require at least one
+   configured mount of each type requested by the manifest.
 4. Build the `clusterx run` command without executing it.
 5. Pipe the preview through `scripts/redact.py`.
 6. Show the redacted command plus a concise resource and risk summary.
