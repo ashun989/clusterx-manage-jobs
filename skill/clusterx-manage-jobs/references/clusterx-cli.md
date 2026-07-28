@@ -164,7 +164,8 @@ Before `run`, verify:
 - CPU, memory, GPU, node count, retry, priority, and privileged mode match the
   user's request.
 - The job command is correctly quoted.
-- The preview is redacted and the user has confirmed submission.
+- The preview is redacted and the user explicitly requested submission. Do not
+  ask for a redundant confirmation when the command matches that request.
 
 Expected result includes a job schema/status such as `Queuing`. Record the job
 ID for later `get-job`, `log`, `stats`, or `stop` operations.

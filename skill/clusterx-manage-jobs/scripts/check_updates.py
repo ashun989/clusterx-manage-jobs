@@ -155,7 +155,10 @@ def main() -> int:
         "candidate": str(candidate_path),
         "diff": str(diff_path),
         "approved_reference": str(reference_path),
-        "note": "No skill files were modified; user approval is required.",
+        "note": (
+            "No skill files were modified; the sanitized candidate is staged "
+            "for the caller to review and apply when the user requested an update."
+        ),
     }
     report_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

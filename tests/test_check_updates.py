@@ -66,6 +66,8 @@ class CheckUpdatesTests(unittest.TestCase):
             self.assertNotIn("remote-secret", candidate)
             self.assertIn("<redacted>", candidate)
             self.assertEqual(reference.read_text(encoding="utf-8"), "old\n")
+            self.assertNotIn("user approval is required", report["note"])
+            self.assertIn("staged", report["note"])
 
     def test_rejects_invalid_source_id(self):
         run = subprocess.run(

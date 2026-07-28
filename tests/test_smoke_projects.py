@@ -98,6 +98,38 @@ class SmokeProjectTests(unittest.TestCase):
             self.assertIn("Succeeded", text)
             self.assertIn("HTTP 404", text)
 
+    def test_skill_uses_risk_based_confirmation(self):
+        skill_root = ROOT / "skill" / "clusterx-manage-jobs"
+        skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        reference_text = (
+            skill_root / "references" / "clusterx-cli.md"
+        ).read_text(encoding="utf-8")
+        normalized_skill = " ".join(skill_text.split())
+        normalized_reference = " ".join(reference_text.split())
+
+        self.assertIn(
+            "Do not ask for a redundant confirmation",
+            normalized_skill,
+        )
+        self.assertIn(
+            "execute it without another confirmation",
+            normalized_skill,
+        )
+        self.assertIn(
+            "Stop it directly",
+            normalized_skill,
+        )
+        self.assertIn(
+            "apply the reviewed, sanitized changes without asking for another confirmation",
+            normalized_skill,
+        )
+        self.assertIn(
+            "Do not ask for a redundant confirmation",
+            normalized_reference,
+        )
+        self.assertNotIn("Ask for explicit confirmation", skill_text)
+        self.assertNotIn("user approval is required", skill_text)
+
 
 if __name__ == "__main__":
     unittest.main()

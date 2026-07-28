@@ -22,6 +22,19 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 - For a user-requested Feishu update check, follow
   [Check documentation updates](#check-documentation-updates).
 
+## Act on user authorization
+
+- Treat an explicit user request as authorization for the actions and exact
+  targets it names. Do not ask for a redundant confirmation after showing a
+  preview or risk summary.
+- Ask only when required parameters are missing, the target is ambiguous, or
+  the next action materially expands the requested scope or risk. Examples
+  include choosing among partial job-name matches or adding privileged mode
+  when the user did not request it.
+- Continue through safe, in-scope steps without pausing. Authentication that
+  requires the user to complete an external login is an unavoidable pause, not
+  a confirmation step.
+
 ## Check prerequisites
 
 1. Run `python scripts/preflight.py --cwd <project> --tmpdir <configured-tmpdir>`.
@@ -50,11 +63,14 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 4. Build the `clusterx run` command without executing it.
 5. Pipe the preview through `scripts/redact.py`.
 6. Show the redacted command plus a concise resource and risk summary.
-7. Ask for explicit confirmation. Ask separately when
-   `--enable-privileged` is enabled.
-8. Execute only after confirmation. Capture the job ID and report the initial
-   status without exposing credentials.
-9. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
+7. If the user explicitly requested submission and the command matches that
+   request, execute it without another confirmation. If the user requested
+   only a preview, stop after the preview.
+8. Do not add `--enable-privileged` unless the user explicitly requested it.
+   Ask before adding it later because that expands the authorized risk.
+9. Capture the job ID and report the initial status without exposing
+   credentials.
+10. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
 
 ## Query and stop jobs
 
@@ -68,8 +84,10 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   not provide a fallback. Never invent node or log data. For jobs requiring
   observable progress, write sanitized status/results to approved shared
   storage and state that this is a fallback rather than stdout/stderr.
-- Before `stop`, resolve and display the exact job ID/name and ask for explicit
-  confirmation. Do not infer a destructive target from a partial name.
+- Before `stop`, resolve and display the exact job ID/name. Stop it directly
+  when the user explicitly requested that exact target. If a partial name has
+  no unique exact resolution, show the candidates and ask the user to choose;
+  never infer a destructive target.
 - Redact command output before presenting it if it may contain configuration,
   mount JSON, signed URLs, or environment variables.
 
@@ -95,15 +113,16 @@ or update the Clusterx skill documentation.
      --staging-dir /tmp/clusterx-skill-update
    ```
 
-5. Read the generated `report.json`, `candidate.md`, and `diff.patch`. Summarize
-   changes to versions, installation, configuration, commands, parameters,
-   defaults, mounts, and safety behavior.
-6. Do not modify this skill yet. Ask whether to accept all changes, selected
-   changes, or none.
-7. After explicit approval, update the reference and any affected workflow,
-   then update the source revision/hash in `sources.json`.
+5. Read the generated `report.json`, `candidate.md`, and `diff.patch`. Review
+   and summarize changes to versions, installation, configuration, commands,
+   parameters, defaults, mounts, and safety behavior.
+6. If the user asked only to check for changes, do not modify the skill. If the
+   user explicitly asked to sync, refresh, or update it, apply the reviewed,
+   sanitized changes without asking for another confirmation.
+7. Update the reference and any affected workflow, then update the source
+   revision/hash in `sources.json`.
 8. Run the skill validator and script tests. If validation fails, keep the
-   previously approved content.
+   previous content and report the failure.
 
 The checker returns `0` when no change exists, `10` when a candidate differs,
 and `2` for a configuration, authentication, fetch, or parsing error.
@@ -115,7 +134,9 @@ and `2` for a configuration, authentication, fetch, or parsing error.
 - Require the selected global or project configuration target to have no
   group/other permissions. Never merge configs or create a temporary config.
 - Do not persist fetched raw documents. Persist only reviewed, sanitized,
-  user-approved references.
+  user-requested references.
 - Do not schedule automatic synchronization.
-- Do not submit, stop, or enable privileged jobs without confirmation.
+- Do not submit or stop jobs unless the user requested that action and the
+  target is exact. Do not enable privileged mode unless the user explicitly
+  requested it.
 - Do not assume `/oss` capacity reported by FUSE is a real quota.
