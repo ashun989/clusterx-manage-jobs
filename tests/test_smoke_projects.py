@@ -14,38 +14,61 @@ SMOKE = ROOT / "smoke-projects"
 class SmokeProjectTests(unittest.TestCase):
     def test_project_manifests(self):
         manifests = sorted(SMOKE.glob("*/project.json"))
-        self.assertEqual(len(manifests), 6)
+        self.assertEqual(len(manifests), 3)
         for path in manifests:
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertTrue((path.parent / data["entrypoint"]).is_file())
             self.assertEqual(data["resources"]["nodes"], 1)
 
-    def test_storage_projects_write_verify_and_cleanup(self):
-        projects = [
-            "afs-data-zengquansheng",
-            "afs-omnilab-shared",
-            "aoss-zengquansheng",
-            "aoss-xyz2-omni",
-        ]
-        for project in projects:
-            with self.subTest(project=project), tempfile.TemporaryDirectory() as directory:
-                run = subprocess.run(
-                    [
-                        sys.executable,
-                        str(SMOKE / project / "main.py"),
-                        "--run-id",
-                        "local-test",
-                        "--target",
-                        directory,
-                    ],
-                    text=True,
-                    capture_output=True,
-                )
-                self.assertEqual(run.returncode, 0, run.stderr)
-                result = json.loads(run.stdout)
-                self.assertTrue(result["ok"])
-                self.assertTrue(result["cleanup"])
-                self.assertFalse((Path(directory) / ".clusterx-smoke").exists())
+    def test_combined_storage_project_write_verify_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            file_target = root / "file"
+            object_target = root / "object"
+            file_target.mkdir()
+            object_target.mkdir()
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    str(SMOKE / "storage-access" / "main.py"),
+                    "--run-id",
+                    "local-test",
+                    "--target",
+                    f"file:file-primary:{file_target}",
+                    "--target",
+                    f"object:object-primary:{object_target}",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            result = json.loads(run.stdout)
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                [target["storage_type"] for target in result["targets"]],
+                ["file", "object"],
+            )
+            self.assertTrue(
+                all(target["cleanup"] for target in result["targets"])
+            )
+            self.assertNotIn(str(root), run.stdout)
+            self.assertFalse((file_target / ".clusterx-smoke").exists())
+            self.assertFalse((object_target / ".clusterx-smoke").exists())
+
+    def test_smoke_projects_contain_no_private_storage_identifiers(self):
+        private_markers = (
+            "zengquansheng",
+            "omnilab",
+            "xyz2",
+            "/data/",
+            "/oss/",
+        )
+        for path in SMOKE.rglob("*"):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for marker in private_markers:
+                self.assertNotIn(marker, text, path)
 
     def test_gpu_module_imports_without_torch(self):
         path = SMOKE / "gpu-matmul/main.py"
@@ -80,6 +103,8 @@ class SmokeProjectTests(unittest.TestCase):
                 [event["event"] for event in events],
                 ["started", "progress", "progress", "completed"],
             )
+            self.assertNotIn(str(result_file), run.stdout)
+            self.assertTrue(events[-1]["result_persisted"])
             result = json.loads(result_file.read_text(encoding="utf-8"))
             self.assertTrue(result["ok"])
             self.assertEqual(result["steps"], 2)

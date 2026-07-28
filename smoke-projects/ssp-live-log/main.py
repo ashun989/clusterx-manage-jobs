@@ -59,7 +59,7 @@ def run(
         encoding="utf-8",
     )
     temporary.replace(result_file)
-    emit({"event": "completed", **result, "result_file": str(result_file)})
+    emit({"event": "completed", **result, "result_persisted": True})
     return result
 
 
@@ -85,7 +85,6 @@ def main() -> int:
                 "kind": "ssp-live-log",
                 "run_id": args.run_id,
                 "error_type": type(exc).__name__,
-                "error": str(exc),
             }
         )
         return 1

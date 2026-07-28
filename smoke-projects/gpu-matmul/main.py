@@ -72,7 +72,6 @@ def main() -> int:
             "kind": "gpu-matmul",
             "run_id": args.run_id,
             "error_type": type(exc).__name__,
-            "error": str(exc),
         }
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result["ok"] else 1
