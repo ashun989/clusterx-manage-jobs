@@ -34,6 +34,11 @@ PROXY_VARIABLES = (
     "NO_PROXY",
     "no_proxy",
 )
+FEISHU_EPHEMERAL_MEDIA_URL = re.compile(
+    r"https://internal-api-drive-stream\.feishu\.cn/"
+    r"space/api/box/stream/download/authcode/\?code=[^\s\"'<>)]*",
+    re.IGNORECASE,
+)
 
 
 def fail(message: str, code: int = 2) -> int:
@@ -62,6 +67,7 @@ def extract_document(payload: dict) -> tuple[str, object]:
 
 def normalize(content: str) -> str:
     content = redact(content).replace("\r\n", "\n").replace("\r", "\n")
+    content = FEISHU_EPHEMERAL_MEDIA_URL.sub("<feishu-media-url>", content)
     content = "\n".join(line.rstrip() for line in content.splitlines()).strip()
     return content + "\n"
 

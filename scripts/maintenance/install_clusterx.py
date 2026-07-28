@@ -19,7 +19,10 @@ import zipfile
 
 
 DEFAULT_MANIFEST = Path(__file__).with_name("sources.json")
-WHEEL_URL = re.compile(r"https://[^\s\"'<>]+?\.whl(?:\?[^\s\"'<>]*)?")
+WHEEL_URL = re.compile(r"https?://[^\s\"'<>]+?\.whl(?:\?[^\s\"'<>]*)?")
+ALLOWED_HTTP_WHEEL_ENDPOINTS = {
+    ("xceph-outside.pjlab.org.cn", 8060),
+}
 MAX_WHEEL_BYTES = 1024 * 1024 * 1024
 PROXY_VARIABLES = (
     "http_proxy",
@@ -105,15 +108,25 @@ def document_content(payload: dict) -> str:
 def extract_wheel_url(payload: dict) -> str:
     matches = WHEEL_URL.findall(document_content(payload))
     if len(matches) != 1:
-        raise ValueError("expected exactly one HTTPS wheel URL")
-    return matches[0].replace("&amp;", "&")
+        raise ValueError("expected exactly one HTTP(S) wheel URL")
+    url = matches[0].replace("&amp;", "&")
+    wheel_filename(url)
+    return url
 
 
 def wheel_filename(url: str) -> str:
     parsed = urlsplit(url)
     name = Path(unquote(parsed.path)).name
-    if parsed.scheme != "https" or not name.endswith(".whl"):
-        raise ValueError("wheel URL must be HTTPS and end in .whl")
+    if parsed.username or parsed.password:
+        raise ValueError("wheel URL must not contain user information")
+    if parsed.scheme == "http":
+        endpoint = (parsed.hostname or "", parsed.port or 80)
+        if endpoint not in ALLOWED_HTTP_WHEEL_ENDPOINTS:
+            raise ValueError("HTTP wheel URL endpoint is not trusted")
+    elif parsed.scheme != "https":
+        raise ValueError("wheel URL must use HTTPS or an approved HTTP endpoint")
+    if not name.endswith(".whl"):
+        raise ValueError("wheel URL must end in .whl")
     return name
 
 

@@ -1,7 +1,6 @@
 # Clusterx CLI reference
 
-Source snapshot: `使用 Clusterx CLI 工具提交训练任务至PT集群.pdf`,
-Clusterx 2026.7.1.
+Source snapshot: Feishu document revision 43, Clusterx 2026.7.28.
 
 This is a sanitized operational reference. Prefer the installed CLI's dynamic
 help when it differs from this snapshot.
@@ -48,7 +47,8 @@ Conditional or optional fields:
 | Field | Purpose |
 | --- | --- |
 | `rdma_name` | RDMA network; confirm against the selected cluster |
-| `queue` | Default target queue |
+| `queue` | Preferred default target queue |
+| `partition` | Deprecated compatibility alias for `queue` |
 | `storage_ak_id` | Separate storage account access-key ID |
 | `storage_ak_secret` | Separate storage account secret |
 | `image` | Default container image |
@@ -99,8 +99,12 @@ The positional argument is the command to run. Snapshot options include:
 | `--cluster-name`, `-C` | Override configured cluster | config |
 | `--machine-type` | Machine specification | unset |
 | `--enable-privileged` | Host-root privileged mode | `False` |
+| `--sp-block` | A3 logical supernode chip count | unset |
 | `--image` | Container image URL | config/default |
 | `--mount` | Volume mount specification | config/default |
+| `--shm-size-gib` | Shared memory in GiB | `64` |
+| `--storage-ak-id` | Storage access-key ID | config/default |
+| `--storage-ak-secret` | Storage access-key secret | config/default |
 
 Example shape:
 
@@ -115,6 +119,36 @@ clusterx run \
 
 Do not copy example credentials, signed URLs, queue names, images, resource IDs,
 or endpoints from documentation into a real job.
+
+### A3 logical supernodes
+
+`--sp-block S` requests an A3 Ascend logical supernode. Use it only when the
+selected cluster and queue provide A3 resources. Let `N` be chips per node and
+`M` be the node count:
+
+- `S`, `N`, and `M` must be positive integers.
+- For one node, `S` must equal `N`.
+- For multiple nodes, `S` must be a multiple of `N` and divide `N × M`.
+
+Do not add `--sp-block` to ordinary GPU jobs or infer A3 availability from the
+option merely appearing in dynamic help.
+
+## SSP Prometheus statistics
+
+Clusterx 2026.7.28 adds queue- and job-level SSP metrics:
+
+```bash
+clusterx stats --scope queue --metric all
+clusterx stats --scope job --job <exact-job-name> --metric all
+```
+
+The supported scopes are `workspace`, `cluster`, `queue`, and `job`.
+`--minutes` selects the positive lookback window and defaults to `5`;
+`--step` defaults to `30` seconds and is reserved for range queries. Job scope
+requires `--job`. The metric set depends on scope; inspect `stats --help`
+before querying. Current metrics include CPU and memory utilization, GPU count,
+utilization, memory utilization, total/per-device power, memory bandwidth
+utilization, temperature, and `all`.
 
 ## Storage mounts
 
@@ -172,7 +206,7 @@ ID for later `get-job`, `log`, `stats`, or `stop` operations.
 
 ## SSP log limitation
 
-With Clusterx 2026.7.1, `clusterx log <job-id>` fetches
+With Clusterx 2026.7.28, `clusterx log <job-id>` fetches
 `trainingJobs/<job-id>/pods` before reading pod logs. This endpoint may return
 HTTP 404 both while an SSP job is `Running` and after `get-job` reports
 `Succeeded`, even when the workload flushes stdout. Keeping the task alive does
@@ -201,3 +235,4 @@ preview.
 | 2026.6.11 | Distinguished D/PT clusters and endpoints |
 | 2026.6.12 | Added SSP GPU utilization, memory, power, and temperature stats |
 | 2026.7.1 | Added JSON volume mounts for PV_AOSS and other complex volumes |
+| 2026.7.28 | Added queue/job SSP metrics and A3 `--sp-block` scheduling |

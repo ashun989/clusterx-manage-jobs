@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 from config_resolver import inspect_config, resolve_config
+from redact import redact
 
 
 def main() -> int:
@@ -51,7 +52,16 @@ def main() -> int:
     )
     env = os.environ.copy()
     env["CLUSTERX_CFG_PATH"] = str(selection.path)
-    return subprocess.run([binary, *clusterx_args], env=env).returncode
+    completed = subprocess.run(
+        [binary, *clusterx_args],
+        env=env,
+        text=True,
+        capture_output=True,
+        errors="replace",
+    )
+    sys.stdout.write(redact(completed.stdout))
+    sys.stderr.write(redact(completed.stderr))
+    return completed.returncode
 
 
 if __name__ == "__main__":

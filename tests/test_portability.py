@@ -140,6 +140,33 @@ class PortabilityTests(unittest.TestCase):
             self.assertEqual(result["name"], "clusterx")
             self.assertEqual(result["requires_python"], ">=3.10")
 
+    def test_installer_allows_only_approved_plain_http_endpoint(self):
+        spec = importlib.util.spec_from_file_location(
+            "clusterx_install_http_helper",
+            INSTALLER,
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader
+        spec.loader.exec_module(module)
+
+        approved = (
+            "http://xceph-outside.pjlab.org.cn:8060/"
+            "clusterx-2026.7.28-py3-none-any.whl?temporary=signature"
+        )
+        payload = {
+            "data": {"document": {"content": f"Install {approved}"}}
+        }
+        self.assertEqual(module.extract_wheel_url(payload), approved)
+        self.assertEqual(
+            module.wheel_filename(approved),
+            "clusterx-2026.7.28-py3-none-any.whl",
+        )
+
+        with self.assertRaisesRegex(ValueError, "not trusted"):
+            module.wheel_filename(
+                "http://packages.example/clusterx-1-py3-none-any.whl"
+            )
+
     def test_installer_fetches_source_without_proxy(self):
         spec = importlib.util.spec_from_file_location(
             "clusterx_install_fetch_helper",

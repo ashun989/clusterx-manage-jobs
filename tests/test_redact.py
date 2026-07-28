@@ -34,6 +34,17 @@ class RedactTests(unittest.TestCase):
         self.assertNotIn("SECRET", result)
         self.assertEqual(result.count("<redacted>"), 2)
 
+    def test_clusterx_mount_metadata_inside_json_string(self):
+        source = (
+            r'{"stdout":"{\"metadata\":{\"items\":['
+            r'{\"key\":\"access_key\",\"value\":\"ACCESS\"},'
+            r'{\"key\":\"secret_key\",\"value\":\"SECRET\"}]}}"}'
+        )
+        result = redact_module.redact(source)
+        self.assertNotIn("ACCESS", result)
+        self.assertNotIn("SECRET", result)
+        self.assertEqual(result.count("<redacted>"), 2)
+
     def test_url_headers_and_private_key(self):
         source = (
             "https://user:pass@example.test/a?X-Amz-Signature=signed&safe=yes\n"

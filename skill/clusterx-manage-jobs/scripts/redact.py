@@ -118,6 +118,14 @@ def redact(text: str) -> str:
         lambda match: f"{match.group(1)}{match.group(2)}<redacted>{match.group(2)}",
         text,
     )
+    # The same metadata can be embedded in a JSON string, where every quote is
+    # escaped. Redact before the generic assignment patterns see only literals.
+    text = re.sub(
+        rf'(?is)(\\"key\\"\s*:\s*\\"(?:{keys})\\"\s*,\s*'
+        r'\\"value\\"\s*:\s*\\")(.*?)(\\")',
+        lambda match: f"{match.group(1)}<redacted>{match.group(3)}",
+        text,
+    )
 
     # JSON, YAML, shell assignments, and CLI key/value forms.
     patterns = (
