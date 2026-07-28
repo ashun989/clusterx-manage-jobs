@@ -19,6 +19,15 @@ class SmokeProjectTests(unittest.TestCase):
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertTrue((path.parent / data["entrypoint"]).is_file())
             self.assertEqual(data["resources"]["nodes"], 1)
+        storage = json.loads(
+            (SMOKE / "storage-access/project.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(storage["target_source"], "clusterx_config")
+        self.assertEqual(storage["target_scope"], "all_mounts")
+        self.assertEqual(
+            set(storage["required_target_types"]),
+            {"file", "object"},
+        )
 
     def test_combined_storage_project_write_verify_and_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:

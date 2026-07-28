@@ -120,7 +120,7 @@ printf '%s\n' 'access_token=example' |
 
 ```text
 使用 $clusterx-manage-jobs，根据 smoke-projects/storage-access/project.json
-生成一个同时验证文件存储和对象存储的任务；挂载和运行时路径由我提供。
+提交一个同时验证当前 Clusterx 配置中全部文件存储和对象存储挂载的任务。
 ```
 
 任务清单只描述资源需求，Skill 会根据已安装 CLI 的动态帮助生成实际命令。
