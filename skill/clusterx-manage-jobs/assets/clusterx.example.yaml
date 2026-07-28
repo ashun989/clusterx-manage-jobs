@@ -1,0 +1,41 @@
+default: ssp
+ssp:
+  cluster_type: PT
+  subscription: "<subscription-id>"
+  resource_group: "<resource-group>"
+  region: "<region>"
+  workspace: "<workspace>"
+  cluster: "<cluster>"
+  ak_id: "<access-key-id>"
+  ak_secret: "<access-key-secret>"
+  queue: "<queue>"
+  rdma_name: "<rdma-network>"
+  image: "<container-image>"
+  tmpdir: "<shared-command-directory>"
+  mount:
+    - type: PV_AFS
+      id: "<file-storage-volume-id-1>"
+      mount_path: "<file-storage-mount-path-1>"
+    - type: PV_AFS
+      id: "<file-storage-volume-id-2>"
+      mount_path: "<file-storage-mount-path-2>"
+    - type: PV_AOSS
+      name: "<object-storage-volume-name-1>"
+      endpoint: "<object-storage-endpoint-1>"
+      mount_path: "<object-storage-mount-path-1>"
+      metadata:
+        items:
+          - key: access_key
+            value: "<object-storage-access-key-1>"
+          - key: secret_key
+            value: "<object-storage-secret-key-1>"
+    - type: PV_AOSS
+      name: "<object-storage-volume-name-2>"
+      endpoint: "<object-storage-endpoint-2>"
+      mount_path: "<object-storage-mount-path-2>"
+      metadata:
+        items:
+          - key: access_key
+            value: "<object-storage-access-key-2>"
+          - key: secret_key
+            value: "<object-storage-secret-key-2>"

@@ -8,24 +8,31 @@ Clusterx 本身通过 `CLUSTERX_CFG_PATH` 读取指定配置。使用本 Skill �
 1. 包装器的 `--config`；
 2. 环境变量 `CLUSTERX_CFG_PATH`；
 3. 从当前工作目录向上找到的最近 `.clusterx/clusterx.yaml`；
-4. `${DEV_ENV:-/data/zengquansheng/.dev-env}/clusterx/clusterx.yaml`；
+4. 显式设置 `DEV_ENV` 时的 `${DEV_ENV}/clusterx/clusterx.yaml`；
 5. 原生默认路径 `~/.config/clusterx.yaml`。
 
 项目配置完整替换全局配置，不做字段合并，也不生成包含密钥的临时文件。
+可从 `assets/clusterx.example.yaml` 复制一份无密钥 SSP 模板，在本机填写
+占位符后设置为 `600`。不要把填写后的配置加入 Git。
+
+模板中的 `mount` 演示一份完整的多挂载配置：两个 `PV_AFS` 文件存储和两个
+`PV_AOSS` 对象存储。按实际需求删除多余条目；文件存储填写 `id` 和
+`mount_path`，对象存储填写 `name`、`endpoint`、`mount_path` 以及受保护的
+`metadata.items` 凭据。不要把真实挂载 ID、内部 endpoint、路径或凭据写回模板。
 
 ## 全局配置
 
-将跨项目共用的持久化配置保存到：
+默认将跨项目共用的持久化配置保存到：
 
 ```text
-/data/zengquansheng/.dev-env/clusterx/clusterx.yaml
+~/.config/clusterx.yaml
 ```
 
-现有开发机 bootstrap 会将其链接到 `~/.config/clusterx.yaml`。文件及链接
-最终目标必须仅允许所有者访问：
+如团队开发环境显式设置了 `DEV_ENV`，也可保存到
+`${DEV_ENV}/clusterx/clusterx.yaml`。文件及链接最终目标必须仅允许所有者访问：
 
 ```bash
-chmod 600 /data/zengquansheng/.dev-env/clusterx/clusterx.yaml
+chmod 600 ~/.config/clusterx.yaml
 ```
 
 ## 项目配置
@@ -44,15 +51,15 @@ chmod 600 /data/zengquansheng/.dev-env/clusterx/clusterx.yaml
 先检查配置：
 
 ```bash
-python scripts/preflight.py --cwd <project-dir> --tmpdir <shared-tmpdir>
+python3 scripts/preflight.py --cwd <project-dir> --tmpdir <shared-tmpdir>
 ```
 
 通过统一包装器调用 Clusterx：
 
 ```bash
-python scripts/clusterx_exec.py --cwd <project-dir> -- list
-python scripts/clusterx_exec.py --cwd <project-dir> -- run <arguments>
-python scripts/clusterx_exec.py --cwd <project-dir> -- log <job-id>
+python3 scripts/clusterx_exec.py --cwd <project-dir> -- list
+python3 scripts/clusterx_exec.py --cwd <project-dir> -- run <arguments>
+python3 scripts/clusterx_exec.py --cwd <project-dir> -- log <job-id>
 ```
 
 包装器只报告配置来源和路径，不输出配置值。

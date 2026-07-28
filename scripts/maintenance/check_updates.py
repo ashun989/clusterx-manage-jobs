@@ -8,18 +8,32 @@ from datetime import datetime, timezone
 import difflib
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 
-from redact import redact
+
+ROOT = Path(__file__).resolve().parents[2]
+SKILL_SCRIPTS = ROOT / "skill/clusterx-manage-jobs/scripts"
+sys.path.insert(0, str(SKILL_SCRIPTS))
+from redact import redact  # noqa: E402
 
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_MANIFEST = SKILL_DIR / "references" / "sources.json"
+DEFAULT_MANIFEST = Path(__file__).with_name("sources.json")
 SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+PROXY_VARIABLES = (
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+)
 
 
 def fail(message: str, code: int = 2) -> int:
@@ -57,6 +71,11 @@ def main() -> int:
     parser.add_argument("--source", required=True)
     parser.add_argument("--staging-dir", required=True)
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
+    parser.add_argument(
+        "--keep-proxy",
+        action="store_true",
+        help="inherit proxy variables instead of connecting directly",
+    )
     args = parser.parse_args()
 
     if not SAFE_ID.fullmatch(args.source):
@@ -79,15 +98,23 @@ def main() -> int:
     lark_cli = shutil.which("lark-cli")
     if not lark_cli:
         return fail("lark-cli is not installed")
+    environment = None
+    if not args.keep_proxy:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in PROXY_VARIABLES
+        }
 
     auth = subprocess.run(
         [lark_cli, "auth", "status"],
         text=True,
         capture_output=True,
         timeout=30,
+        env=environment,
     )
     if auth.returncode != 0:
-        return fail("Feishu authentication is unavailable; run lark-cli auth login --recommend")
+        return fail("Feishu authentication is unavailable; run lark-cli auth login")
 
     fetch = subprocess.run(
         [
@@ -106,6 +133,7 @@ def main() -> int:
         text=True,
         capture_output=True,
         timeout=180,
+        env=environment,
     )
     if fetch.returncode != 0:
         return fail("Feishu document fetch failed: " + redact(fetch.stderr).strip())
@@ -126,7 +154,9 @@ def main() -> int:
     except OSError:
         current = ""
     current_normalized = current.replace("\r\n", "\n").replace("\r", "\n")
-    changed = current_normalized != candidate
+    approved_source_sha256 = source.get("approved_source_sha256")
+    changed = digest != approved_source_sha256
+    reference_differs = current_normalized != candidate
 
     staging = Path(args.staging_dir).resolve() / args.source
     staging.mkdir(parents=True, exist_ok=True)
@@ -151,13 +181,15 @@ def main() -> int:
         "title": source.get("title"),
         "revision_id": revision_id,
         "sha256": digest,
+        "approved_source_sha256": approved_source_sha256,
+        "reference_differs": reference_differs,
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "candidate": str(candidate_path),
         "diff": str(diff_path),
         "approved_reference": str(reference_path),
         "note": (
-            "No skill files were modified; the sanitized candidate is staged "
-            "for the caller to review and apply when the user requested an update."
+            "Change status compares the sanitized source fingerprint with the "
+            "last approved source; no skill files were modified."
         ),
     }
     report_path.write_text(

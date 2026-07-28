@@ -7,18 +7,21 @@ import argparse
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
+import sys
 
 from config_resolver import inspect_config, resolve_config
 from redact import redact
 
 
+TESTED_CLUSTERX_VERSION = "2026.7.1"
+MINIMUM_PYTHON = (3, 10)
 REQUIRED_KEYS = {
     "default",
     "ssp",
-    "cluster_type",
     "subscription",
     "resource_group",
     "region",
@@ -55,6 +58,14 @@ def main() -> int:
 
     result: dict[str, object] = {"ok": True, "checks": {}}
     checks: dict[str, object] = result["checks"]  # type: ignore[assignment]
+    python_supported = sys.version_info >= MINIMUM_PYTHON
+    checks["python"] = {
+        "version": platform.python_version(),
+        "minimum": ".".join(str(part) for part in MINIMUM_PYTHON),
+        "supported": python_supported,
+    }
+    if not python_supported:
+        result["ok"] = False
 
     selection = resolve_config(explicit=args.config, cwd=args.cwd)
     config = selection.path
@@ -91,9 +102,15 @@ def main() -> int:
             result["ok"] = False
         else:
             checks["clusterx"]["version_ok"] = version.returncode == 0  # type: ignore[index]
-            checks["clusterx"]["version"] = (  # type: ignore[index]
-                redact(version.stdout or version.stderr)
-            ).strip().splitlines()[:1]
+            version_lines = redact(version.stdout or version.stderr).strip().splitlines()[:1]
+            checks["clusterx"]["version"] = version_lines  # type: ignore[index]
+            version_text = version_lines[0] if version_lines else ""
+            checks["clusterx"]["tested_version"] = TESTED_CLUSTERX_VERSION  # type: ignore[index]
+            checks["clusterx"]["compatibility"] = (  # type: ignore[index]
+                "tested"
+                if TESTED_CLUSTERX_VERSION in version_text
+                else "unverified; inspect live help"
+            )
             if version.returncode != 0:
                 result["ok"] = False
     elif not binary:

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "clusterx-main",
+      "title": "Clusterx CLI 工具提交训练任务至 PT 集群",
+      "url": "https://aicarrier.feishu.cn/docx/BJyHdJuszoDBhoxhqfncrTDInjc",
+      "reference_path": "../../skill/clusterx-manage-jobs/references/clusterx-cli.md",
+      "approved_revision_id": 39,
+      "approved_source_sha256": "8d44b113b6660e1262e8737a0166e416d354a412ba0b2187455779cb54745b78",
+      "approved_at": "2026-07-28T09:04:01Z"
+    }
+  ]
+}
