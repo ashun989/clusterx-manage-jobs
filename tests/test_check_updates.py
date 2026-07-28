@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import os
 from pathlib import Path
 import stat
@@ -10,9 +11,23 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/maintenance/check_updates.py"
+SPEC = importlib.util.spec_from_file_location("clusterx_check_updates", SCRIPT)
+check_updates = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader
+SPEC.loader.exec_module(check_updates)
 
 
 class CheckUpdatesTests(unittest.TestCase):
+    def test_ephemeral_feishu_media_urls_do_not_change_fingerprint(self):
+        prefix = (
+            "https://internal-api-drive-stream.feishu.cn/"
+            "space/api/box/stream/download/authcode/?code="
+        )
+        first = check_updates.normalize(f"![]({prefix}temporary-one)\n")
+        second = check_updates.normalize(f"![]({prefix}temporary-two)\n")
+        self.assertEqual(first, second)
+        self.assertEqual(first, "![](<feishu-media-url>)\n")
+
     def test_fetch_is_sanitized_and_reports_change(self):
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)

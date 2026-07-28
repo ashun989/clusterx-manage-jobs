@@ -16,7 +16,8 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   [references/configuration.md](references/configuration.md).
 - For a preflight check, run `python3 scripts/preflight.py`.
 - Run Clusterx through `python3 scripts/clusterx_exec.py --cwd <project> --`
-  so project configuration overrides the persistent global configuration.
+  so project configuration overrides the persistent global configuration and
+  Clusterx stdout/stderr are redacted before they are returned.
 - For command or JSON redaction, pipe the content to
   `python3 scripts/redact.py`; never pass secrets as script arguments.
 
@@ -46,7 +47,7 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
    and fill it locally. Never ask the user to paste secrets into chat.
 4. Run `clusterx_exec.py` with `--version`, `--help`, and the requested
    subcommand's `--help`. Prefer the installed CLI over the reference snapshot
-   and report material differences. Version 2026.7.1 is tested; treat other
+   and report material differences. Version 2026.7.28 is tested; treat other
    versions as unverified rather than unsupported.
 5. Require a shared `tmpdir` mounted at the same path on the development
    machine and job.
@@ -54,8 +55,8 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 ## Submit a job
 
 1. Collect the command, job name, queue, image, node count, GPUs, CPUs, memory,
-   mounts, and any retry, include/exclude, RDMA, cluster, machine type, or
-   privileged settings.
+   mounts, and any retry, include/exclude, RDMA, cluster, machine type,
+   `sp-block`, or privileged settings.
 2. For SSP, require a non-empty job name of at most 32 Unicode characters.
    Shorten it before previewing; the service rejects longer names before job
    creation.
@@ -67,7 +68,7 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
    paths. Do not display the generated target arguments. Require at least one
    configured mount of each type requested by the manifest.
 4. Build the `clusterx run` command without executing it.
-5. Pipe the preview through `scripts/redact.py`.
+5. Pipe previews built outside the wrapper through `scripts/redact.py`.
 6. Show the redacted command plus a concise resource and risk summary.
 7. If the user explicitly requested submission and the command matches that
    request, execute it without another confirmation. If the user requested
@@ -82,7 +83,10 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 
 - Execute `list`, `get-job`, `get-node`, `log`, and `stats` as read-only
   operations without confirmation unless another action is implied.
-- On SSP with Clusterx 2026.7.1, treat a pods-endpoint HTTP 404 from `log` as
+- For SSP Prometheus statistics, use `--scope queue` for configured queue
+  summaries and `--scope job --job <exact-job-name>` for a workload. Read live
+  help for the supported metrics and keep queue/job identifiers out of reports.
+- On SSP with Clusterx 2026.7.28, treat a pods-endpoint HTTP 404 from `log` as
   a log-discovery failure, not proof that the job failed. Check `get-job`
   separately. The same 404 can occur while a job is `Running` and after it is
   `Succeeded`, even when the workload flushes output.
@@ -94,8 +98,8 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   when the user explicitly requested that exact target. If a partial name has
   no unique exact resolution, show the candidates and ask the user to choose;
   never infer a destructive target.
-- Redact command output before presenting it if it may contain configuration,
-  mount JSON, signed URLs, or environment variables.
+- Use the wrapper's redacted output when presenting command results. Pass any
+  text obtained outside the wrapper through `scripts/redact.py`.
 
 ## Safety rules
 

@@ -152,6 +152,42 @@ class ConfigResolverTests(unittest.TestCase):
                 [str(config), "log", "job-1"],
             )
 
+    def test_wrapper_redacts_clusterx_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            project = temp / "project"
+            self._config(project / ".clusterx/clusterx.yaml")
+            binary = temp / "clusterx"
+            binary.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'{\"key\":\"access_key\",\"value\":\"ACCESS\"}'\n"
+                "printf '%s\\n' 'ak_secret=SECRET' >&2\n",
+                encoding="utf-8",
+            )
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            env = os.environ.copy()
+            env["PATH"] = f"{temp}{os.pathsep}{env.get('PATH', '')}"
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "clusterx_exec.py"),
+                    "--cwd",
+                    str(project),
+                    "--",
+                    "run",
+                    "true",
+                ],
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertNotIn("ACCESS", run.stdout)
+            self.assertNotIn("SECRET", run.stderr)
+            self.assertIn("<redacted>", run.stdout)
+            self.assertIn("<redacted>", run.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

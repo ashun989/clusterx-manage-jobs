@@ -17,7 +17,7 @@ from config_resolver import inspect_config, resolve_config
 from redact import redact
 
 
-TESTED_CLUSTERX_VERSION = "2026.7.1"
+TESTED_CLUSTERX_VERSION = "2026.7.28"
 MINIMUM_PYTHON = (3, 10)
 REQUIRED_KEYS = {
     "default",

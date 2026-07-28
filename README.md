@@ -3,7 +3,7 @@
 用于安全管理 PT/SSP 集群 Clusterx 训练任务的 Codex Skill 项目。
 仅限具备内部 Clusterx 访问资格的公司用户使用。
 
-当前 Skill 发布版本为 `0.1.0`。已验证 Clusterx CLI `2026.7.1`；
+当前 Skill 发布版本为 `0.1.1`。已验证 Clusterx CLI `2026.7.28`；
 其他版本可使用，但应以安装后的动态帮助为准并视为尚未验证。
 
 ## 项目结构
@@ -48,7 +48,7 @@ cp -a skill/clusterx-manage-jobs \
 检查软链接目标下是否仍能直接看到 `SKILL.md`。
 
 Clusterx CLI 只能在 Linux 集群开发机上使用，要求 Python 3.10 或更新版本。
-2026.7.1 是本项目已验证版本；其他版本应以安装后动态帮助为准。
+2026.7.28 是本项目已验证版本；其他版本应以安装后动态帮助为准。
 
 Clusterx CLI 是独立的运行时前置条件，不随 Skill 分发。请通过公司内部当前
 Clusterx 分发渠道安装到隔离的 venv/Conda 环境，再安装和使用本 Skill。
@@ -107,6 +107,9 @@ python3 \
 printf '%s\n' 'access_token=example' |
   python3 skill/clusterx-manage-jobs/scripts/redact.py
 ```
+
+统一包装器会自动脱敏 Clusterx 的 stdout/stderr；不要绕过包装器直接展示
+`clusterx run` 的调试输出，因为当前 CLI 会打印包含挂载配置的 job spec。
 
 ## 安装后快速体验
 

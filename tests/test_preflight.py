@@ -19,7 +19,7 @@ class PreflightTests(unittest.TestCase):
             binary = temp / "clusterx"
             binary.write_text(
                 "#!/bin/sh\n"
-                "printf '%s\\n' 'clusterx 2026.7.1 access_token=leaked'\n",
+                "printf '%s\\n' 'clusterx 2026.7.28 access_token=leaked'\n",
                 encoding="utf-8",
             )
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)

@@ -132,6 +132,20 @@ class SmokeProjectTests(unittest.TestCase):
             self.assertIn("Succeeded", text)
             self.assertIn("HTTP 404", text)
 
+    def test_skill_documents_2026_7_28_features(self):
+        skill_root = ROOT / "skill" / "clusterx-manage-jobs"
+        skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        reference_text = (
+            skill_root / "references" / "clusterx-cli.md"
+        ).read_text(encoding="utf-8")
+        combined = f"{skill_text}\n{reference_text}"
+
+        self.assertIn("2026.7.28", combined)
+        self.assertIn("--sp-block", reference_text)
+        self.assertIn("--scope queue", combined)
+        self.assertIn("--scope job", combined)
+        self.assertIn("--job <exact-job-name>", combined)
+
     def test_skill_uses_risk_based_confirmation(self):
         skill_root = ROOT / "skill" / "clusterx-manage-jobs"
         skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
