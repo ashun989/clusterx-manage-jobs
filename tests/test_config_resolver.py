@@ -76,7 +76,7 @@ class ConfigResolverTests(unittest.TestCase):
             temp = Path(directory)
             selection = resolver.resolve_config(
                 cwd=temp,
-                environ={"DEV_ENV": str(temp / "missing")},
+                environ={},
                 home=temp / "home",
             )
             self.assertEqual(selection.source, "native")
@@ -88,6 +88,31 @@ class ConfigResolverTests(unittest.TestCase):
                 resolver.ConfigSelection(unsafe, "explicit")
             )
             self.assertFalse(inspection["permissions_safe"])
+
+    def test_dev_env_is_used_only_when_explicitly_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            global_config = self._config(
+                temp / "dev/clusterx/clusterx.yaml"
+            )
+            native_home = temp / "home"
+            selection = resolver.resolve_config(
+                cwd=temp,
+                environ={},
+                home=native_home,
+            )
+            self.assertEqual(selection.source, "native")
+            self.assertEqual(
+                selection.path,
+                native_home / ".config/clusterx.yaml",
+            )
+            selection = resolver.resolve_config(
+                cwd=temp,
+                environ={"DEV_ENV": str(temp / "dev")},
+                home=native_home,
+            )
+            self.assertEqual(selection.source, "global")
+            self.assertEqual(selection.path, global_config)
 
     def test_wrapper_sets_config_and_preserves_arguments(self):
         with tempfile.TemporaryDirectory() as directory:

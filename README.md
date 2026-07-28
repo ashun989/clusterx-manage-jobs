@@ -1,6 +1,10 @@
 # Clusterx Manage Jobs Skill
 
 用于安全管理 PT/SSP 集群 Clusterx 训练任务的 Codex Skill 项目。
+仅限具备内部 Clusterx 访问资格的公司用户使用。
+
+当前 Skill 发布版本为 `0.1.0`。已验证 Clusterx CLI `2026.7.1`；
+其他版本可使用，但应以安装后的动态帮助为准并视为尚未验证。
 
 ## 项目结构
 
@@ -17,7 +21,7 @@
 ```
 
 安装或分发时只复制 `skill/clusterx-manage-jobs`；仓库根目录保存项目说明、
-测试和开发配置，不属于 Skill 安装包。
+测试、维护工具、文档来源和安装后的 smoke 示例，不属于 Skill 安装包。
 
 ## 功能说明
 
@@ -26,7 +30,6 @@
 - 查询任务、节点、日志和统计信息；用户已明确指定准确目标时直接停止任务。
 - 对配置、命令、复杂挂载 JSON、HTTP 认证头和签名 URL 做脱敏。
 - 支持 `.dev-env` 全局配置与项目 `.clusterx/clusterx.yaml` 完整覆盖。
-- 从登记的权威飞书文档生成已脱敏候选版本和差异；明确要求更新时审阅后直接应用。
 
 Skill 将用户的明确请求视为对应操作的授权，不做重复确认；目标含糊、参数缺失
 或执行过程新增特权模式等风险升级时才询问。测试不会连接真实集群。
@@ -44,13 +47,17 @@ cp -a skill/clusterx-manage-jobs \
 开发期间也可以把安装路径软链接到源码目录；仓库移动或目录重构后，应同步
 检查软链接目标下是否仍能直接看到 `SKILL.md`。
 
-Clusterx CLI 只能在集群开发机上使用。请从可信的内部软件源获取当前版本，
-不要复用文档中的过期签名下载链接。建议在隔离的 conda 环境安装 CLI；若明确
-需要在 base 环境验证，请先确认：
+Clusterx CLI 只能在 Linux 集群开发机上使用，要求 Python 3.10 或更新版本。
+2026.7.1 是本项目已验证版本；其他版本应以安装后动态帮助为准。
+
+Clusterx CLI 是独立的运行时前置条件，不随 Skill 分发。请通过公司内部当前
+Clusterx 分发渠道安装到隔离的 venv/Conda 环境，再安装和使用本 Skill。
+Skill 本身不会访问飞书或代为安装 Clusterx。
+
+安装后验证：
 
 ```bash
-conda activate base
-python --version
+python3 --version
 clusterx --version
 clusterx --help
 ```
@@ -58,24 +65,34 @@ clusterx --help
 首次配置后，保护配置文件权限：
 
 ```bash
-chmod 600 /data/zengquansheng/.dev-env/clusterx/clusterx.yaml
-python skill/clusterx-manage-jobs/scripts/preflight.py \
+mkdir -p ~/.config
+cp skill/clusterx-manage-jobs/assets/clusterx.example.yaml \
+  ~/.config/clusterx.yaml
+chmod 600 ~/.config/clusterx.yaml
+```
+
+在本机编辑配置占位符，不要把真实密钥粘贴到聊天中。然后执行：
+
+```bash
+python3 skill/clusterx-manage-jobs/scripts/preflight.py \
   --cwd /path/to/project \
   --tmpdir /path/shared/by/dev-machine-and-job
 ```
 
 项目需要独立配置时，创建完整的 `.clusterx/clusterx.yaml` 并设置为 `600`。
-Skill 按“显式配置、环境变量、项目配置、全局配置、原生默认路径”的顺序选择。
+Skill 按“显式配置、环境变量、项目配置、显式 `DEV_ENV` 全局配置、原生默认
+路径”的顺序选择。
 
 不要把访问密钥、Token、Cookie、私钥、签名 URL 或真实挂载凭据提交到 Git。
 
 ## 开发与测试
 
-测试仅使用临时目录和模拟的 `clusterx`/`lark-cli`：
+运行时 Skill 不依赖 `lark-cli`。仓库测试仅使用临时目录和模拟的
+`clusterx`/`lark-cli`：
 
 ```bash
-conda run -n base python -m unittest discover -s tests -v
-python \
+python3 -m unittest discover -s tests -v
+python3 \
   /path/to/skill-creator/scripts/quick_validate.py \
   skill/clusterx-manage-jobs
 ```
@@ -88,5 +105,66 @@ python \
 
 ```bash
 printf '%s\n' 'access_token=example' |
-  python skill/clusterx-manage-jobs/scripts/redact.py
+  python3 skill/clusterx-manage-jobs/scripts/redact.py
 ```
+
+## 安装后快速体验
+
+`smoke-projects` 不进入 Skill 安装包；它用于从本仓库快速验证安装好的 Skill。
+可直接对 Codex 提出：
+
+```text
+使用 $clusterx-manage-jobs，根据 smoke-projects/gpu-matmul/project.json
+提交 GPU smoke test，并持续查询到终态。
+```
+
+```text
+使用 $clusterx-manage-jobs，根据 smoke-projects/storage-access/project.json
+生成一个同时验证文件存储和对象存储的任务；挂载和运行时路径由我提供。
+```
+
+任务清单只描述资源需求，Skill 会根据已安装 CLI 的动态帮助生成实际命令。
+
+## 发布 Skill
+
+维护者可生成只包含 Skill 目录的归档及 SHA-256：
+
+```bash
+python3 scripts/package_skill.py --output-dir dist
+cd dist
+sha256sum -c clusterx-manage-jobs.tar.gz.sha256
+```
+
+打包器会拒绝任何包含 `lark-cli`、飞书认证流程、来源清单或维护脚本的 Skill。
+
+## 开发者维护
+
+只有维护 Skill 静态参考的开发者需要安装 `lark-cli` 并拥有权威飞书文档权限。
+维护脚本默认移除代理环境变量后直接访问飞书；只有确实需要代理时才传
+`--keep-proxy`。
+
+从权威飞书文档读取当前签名 wheel、临时下载、校验并安装到指定隔离环境：
+
+```bash
+python3 scripts/maintenance/install_clusterx.py \
+  --python /path/to/venv/bin/python
+```
+
+脚本不会保存签名 URL，下载的 wheel 在安装结束后随临时目录删除。
+
+检查文档更新时运行：
+
+```bash
+python3 scripts/maintenance/check_updates.py \
+  --source clusterx-main \
+  --staging-dir /tmp/clusterx-skill-update
+```
+
+审阅生成的 `report.json`、`candidate.md` 和 `diff.patch` 后，更新
+`skill/clusterx-manage-jobs/references/clusterx-cli.md` 以及
+`scripts/maintenance/sources.json` 中的 revision、脱敏源 SHA-256 和审核时间。
+`changed` 根据脱敏后的源文档指纹判断；`reference_differs` 仅表示飞书原文与
+人工整理的 reference 文本不同。最后运行完整测试与打包校验。
+
+不要提交原始飞书文档、签名 URL 或 wheel。本仓库按 [LICENSE](LICENSE)
+所述仅限公司内部授权使用。

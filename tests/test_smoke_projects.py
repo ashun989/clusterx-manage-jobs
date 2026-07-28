@@ -145,10 +145,6 @@ class SmokeProjectTests(unittest.TestCase):
             normalized_skill,
         )
         self.assertIn(
-            "apply the reviewed, sanitized changes without asking for another confirmation",
-            normalized_skill,
-        )
-        self.assertIn(
             "Do not ask for a redundant confirmation",
             normalized_reference,
         )

@@ -58,12 +58,11 @@ def resolve_config(
     if local is not None:
         return ConfigSelection(local, "project")
 
-    dev_env = Path(
-        env.get("DEV_ENV", "/data/zengquansheng/.dev-env")
-    ).expanduser()
-    persistent = dev_env / "clusterx" / "clusterx.yaml"
-    if persistent.exists() or persistent.is_symlink():
-        return ConfigSelection(persistent, "global")
+    if env.get("DEV_ENV"):
+        dev_env = Path(env["DEV_ENV"]).expanduser()
+        persistent = dev_env / "clusterx" / "clusterx.yaml"
+        if persistent.exists() or persistent.is_symlink():
+            return ConfigSelection(persistent, "global")
 
     home_dir = Path.home() if home is None else Path(home).expanduser()
     return ConfigSelection(home_dir / ".config" / "clusterx.yaml", "native")

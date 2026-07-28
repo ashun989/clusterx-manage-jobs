@@ -18,7 +18,8 @@ class PreflightTests(unittest.TestCase):
             temp = Path(directory)
             binary = temp / "clusterx"
             binary.write_text(
-                "#!/bin/sh\nprintf '%s\\n' 'clusterx 1.0 access_token=leaked'\n",
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'clusterx 2026.7.1 access_token=leaked'\n",
                 encoding="utf-8",
             )
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
@@ -29,7 +30,7 @@ class PreflightTests(unittest.TestCase):
                 + "\n".join(
                     f"  {key}: placeholder"
                     for key in (
-                        "cluster_type", "subscription", "resource_group", "region",
+                        "subscription", "resource_group", "region",
                         "workspace", "cluster", "ak_id", "ak_secret",
                     )
                 )
@@ -50,7 +51,13 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertNotIn("leaked", run.stdout)
-            self.assertTrue(json.loads(run.stdout)["ok"])
+            payload = json.loads(run.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["checks"]["python"]["supported"])
+            self.assertEqual(
+                payload["checks"]["clusterx"]["compatibility"],
+                "tested",
+            )
 
     def test_missing_binary_and_unsafe_config_fail(self):
         with tempfile.TemporaryDirectory() as directory:
