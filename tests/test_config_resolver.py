@@ -188,6 +188,100 @@ class ConfigResolverTests(unittest.TestCase):
             self.assertIn("<redacted>", run.stdout)
             self.assertIn("<redacted>", run.stderr)
 
+    def test_wrapper_rejects_shell_command_strings_before_clusterx(self):
+        unsafe_commands = [
+            ["bash", "-lc", "cd /workspace && python train.py"],
+            ["/bin/bash", "-c", "python train.py"],
+            ["sh", "-e", "-c", "python train.py"],
+            ["dash", "-ec", "python train.py"],
+            ["zsh", "-lc", "python train.py"],
+            ["ksh", "-c", "python train.py"],
+        ]
+        for command in unsafe_commands:
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as directory:
+                    temp = Path(directory)
+                    project = temp / "project"
+                    self._config(project / ".clusterx/clusterx.yaml")
+                    invoked = temp / "invoked"
+                    binary = temp / "clusterx"
+                    binary.write_text(
+                        "#!/bin/sh\n"
+                        "touch \"$WRAPPER_INVOKED\"\n",
+                        encoding="utf-8",
+                    )
+                    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+                    env = os.environ.copy()
+                    env["PATH"] = (
+                        f"{temp}{os.pathsep}{env.get('PATH', '')}"
+                    )
+                    env["WRAPPER_INVOKED"] = str(invoked)
+                    run = subprocess.run(
+                        [
+                            sys.executable,
+                            str(SCRIPTS / "clusterx_exec.py"),
+                            "--cwd",
+                            str(project),
+                            "--",
+                            "run",
+                            "-J",
+                            "test-job",
+                            *command,
+                        ],
+                        text=True,
+                        capture_output=True,
+                        env=env,
+                    )
+                    self.assertEqual(run.returncode, 2)
+                    self.assertFalse(invoked.exists())
+                    self.assertIn("absolute runner script", run.stderr)
+                    self.assertIn("-e KEY=VALUE", run.stderr)
+
+    def test_wrapper_allows_direct_runner_script(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            project = temp / "project"
+            self._config(project / ".clusterx/clusterx.yaml")
+            output = temp / "output"
+            binary = temp / "clusterx"
+            binary.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$@\" > \"$WRAPPER_OUTPUT\"\n",
+                encoding="utf-8",
+            )
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            env = os.environ.copy()
+            env["PATH"] = f"{temp}{os.pathsep}{env.get('PATH', '')}"
+            env["WRAPPER_OUTPUT"] = str(output)
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "clusterx_exec.py"),
+                    "--cwd",
+                    str(project),
+                    "--",
+                    "run",
+                    "-e",
+                    "MAX_STEPS=3",
+                    "bash",
+                    "/workspace/run.sh",
+                ],
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(
+                output.read_text(encoding="utf-8").splitlines(),
+                [
+                    "run",
+                    "-e",
+                    "MAX_STEPS=3",
+                    "bash",
+                    "/workspace/run.sh",
+                ],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

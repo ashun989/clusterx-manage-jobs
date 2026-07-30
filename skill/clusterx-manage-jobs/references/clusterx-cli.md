@@ -114,11 +114,20 @@ clusterx run \
   -q <queue> \
   --image <registry/image:tag> \
   --mount '<mount-spec>' \
-  bash -c '<training-command>'
+  -e MAX_STEPS=3 \
+  bash /absolute/path/to/runner.sh
 ```
 
 Do not copy example credentials, signed URLs, queue names, images, resource IDs,
 or endpoints from documentation into a real job.
+
+Clusterx 2026.7.28 converts the positional command tokens to a string with
+`" ".join(cmd)` before writing its shared launch script. It does not shell-quote
+individual arguments, so command-string forms such as `bash -c`, `bash -lc`,
+`sh -c`, and their absolute-path equivalents lose the command boundary and can
+fail before the runner starts. The Skill wrapper rejects these forms. Put
+compound setup in a reviewable runner script, invoke that script by absolute
+path, and pass environment settings with repeated `-e KEY=VALUE` options.
 
 ### A3 logical supernodes
 
@@ -197,7 +206,8 @@ Before `run`, verify:
 - The target queue, cluster, machine type, RDMA name, and image are current.
 - CPU, memory, GPU, node count, retry, priority, and privileged mode match the
   user's request.
-- The job command is correctly quoted.
+- The job invokes an absolute runner script and does not use a shell
+  command-string mode such as `bash -c` or `bash -lc`.
 - The preview is redacted and the user explicitly requested submission. Do not
   ask for a redundant confirmation when the command matches that request.
 

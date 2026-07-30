@@ -67,17 +67,23 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
    `PV_AFS` and `PV_AOSS` `mount_path`, and never ask the user to supply those
    paths. Do not display the generated target arguments. Require at least one
    configured mount of each type requested by the manifest.
-4. Build the `clusterx run` command without executing it.
-5. Pipe previews built outside the wrapper through `scripts/redact.py`.
-6. Show the redacted command plus a concise resource and risk summary.
-7. If the user explicitly requested submission and the command matches that
+4. Invoke a runner by absolute path, such as
+   `bash /absolute/path/to/runner.sh`, and pass runtime settings through
+   repeated `-e KEY=VALUE` options. Never use `bash -c`, `bash -lc`, or the
+   corresponding command-string mode of another shell: Clusterx 2026.7.28
+   joins command arguments without preserving shell quoting, and the wrapper
+   rejects these unsafe forms before submission.
+5. Build the `clusterx run` command without executing it.
+6. Pipe previews built outside the wrapper through `scripts/redact.py`.
+7. Show the redacted command plus a concise resource and risk summary.
+8. If the user explicitly requested submission and the command matches that
    request, execute it without another confirmation. If the user requested
    only a preview, stop after the preview.
-8. Do not add `--enable-privileged` unless the user explicitly requested it.
+9. Do not add `--enable-privileged` unless the user explicitly requested it.
    Ask before adding it later because that expands the authorized risk.
-9. Capture the job ID and report the initial status without exposing
+10. Capture the job ID and report the initial status without exposing
    credentials.
-10. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
+11. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
 
 ## Query and stop jobs
 
