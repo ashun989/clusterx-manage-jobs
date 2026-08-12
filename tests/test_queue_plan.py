@@ -3,6 +3,7 @@ import io
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
+import types
 import unittest
 from unittest import mock
 
@@ -59,6 +60,15 @@ def gpu_metric(workload_id, hostname, pod, gpu_uuid, device, metric, value):
         },
         "value": [0, str(value)],
     }
+
+
+def fake_prometheus_stats(cache_path, *query_tokens):
+    module = types.ModuleType("clusterx.launcher.ssp.prometheus_stats")
+    module.build_cache_path = mock.Mock(return_value=cache_path)
+    module.get_query_token = mock.Mock(
+        side_effect=[{"query_token": token} for token in query_tokens]
+    )
+    return module
 
 
 class StepClock:
@@ -304,13 +314,10 @@ class QueuePlanTests(unittest.TestCase):
             }
             client = Client()
 
-        with mock.patch(
-            "clusterx.launcher.ssp.prometheus_stats.build_cache_path",
-            return_value=Path("/tmp/token.json"),
-        ), mock.patch(
-            "clusterx.launcher.ssp.prometheus_stats.get_query_token",
-            return_value={"query_token": "token"},
-        ):
+        prometheus_stats = fake_prometheus_stats(Path("/tmp/token.json"), "token")
+        with mock.patch.dict(sys.modules, {
+            "clusterx.launcher.ssp.prometheus_stats": prometheus_stats,
+        }):
             rows = m._query_gpu_utilization(
                 Cluster(), "queue", "cluster", 17
             )
@@ -349,18 +356,17 @@ class QueuePlanTests(unittest.TestCase):
             }
             client = Client()
 
-        with mock.patch(
-            "clusterx.launcher.ssp.prometheus_stats.build_cache_path",
-            return_value=Path("/tmp/nonexistent-queue-plan-token.json"),
-        ), mock.patch(
-            "clusterx.launcher.ssp.prometheus_stats.get_query_token",
-            side_effect=[{"query_token": "old"}, {"query_token": "new"}],
-        ) as get_token:
+        prometheus_stats = fake_prometheus_stats(
+            Path("/tmp/nonexistent-queue-plan-token.json"), "old", "new"
+        )
+        with mock.patch.dict(sys.modules, {
+            "clusterx.launcher.ssp.prometheus_stats": prometheus_stats,
+        }):
             self.assertEqual(
                 m._query_gpu_utilization(Cluster(), "queue", "cluster", 5), []
             )
         self.assertEqual(Cluster.client.tokens, ["old", "new"])
-        self.assertEqual(get_token.call_count, 2)
+        self.assertEqual(prometheus_stats.get_query_token.call_count, 2)
 
     def test_gpu_utilization_maps_aid_and_training_jobs_per_card(self):
         m = self.module
