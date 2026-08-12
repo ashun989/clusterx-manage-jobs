@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import itertools
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -126,33 +127,48 @@ def solve_candidates(
     jobs: dict[str, dict[str, Any]],
     target: Target,
     *,
+    candidate_scope: str = "fragmented",
     max_states: int = MAX_EXACT_STATES,
 ) -> tuple[list[dict[str, Any]], str]:
     already = [name for name, node in nodes.items() if _fits(node, target, set())]
     if len(already) >= target.nodes:
         return [], "not-needed"
 
-    fragments = [
+    fragmented = [
         name
         for name, node in nodes.items()
-        if node["jobs"] and node["allocated_gpu"] < node["total_gpu"]
+        if node["jobs"] and 0 < node["allocated_gpu"] < node["total_gpu"]
     ]
+    full = [
+        name
+        for name, node in nodes.items()
+        if node["jobs"] and node["total_gpu"] > 0
+        and node["allocated_gpu"] >= node["total_gpu"]
+    ]
+    if candidate_scope == "fragmented":
+        eligible = fragmented
+    elif candidate_scope == "full":
+        eligible = full
+    elif candidate_scope == "all":
+        eligible = sorted(set(fragmented + full))
+    else:
+        raise ValueError(f"unsupported candidate scope: {candidate_scope}")
+    eligible = [name for name in eligible if name not in already]
     need = target.nodes - len(already)
-    if need <= 0 or len(fragments) < need:
+    if need <= 0 or not eligible:
         return [], "exact"
 
-    state_count = 1
-    for value in range(need, min(len(fragments), target.nodes + need) + 1):
-        state_count *= max(1, len(fragments) - value + 1)
-        if state_count > max_states:
-            break
+    max_group_size = min(need, len(eligible))
+    state_count = sum(
+        math.comb(len(eligible), size) for size in range(1, max_group_size + 1)
+    )
 
     candidates: list[dict[str, Any]] = []
     optimality = "exact" if state_count <= max_states else "heuristic"
     if optimality == "exact":
         examined = 0
-        for size in range(need, len(fragments) + 1):
-            for group in itertools.combinations(fragments, size):
+        for size in range(1, max_group_size + 1):
+            for group in itertools.combinations(eligible, size):
                 examined += 1
                 if examined > max_states:
                     optimality = "heuristic"
@@ -161,25 +177,29 @@ def solve_candidates(
                 candidate = _candidate(group, nodes, jobs, target)
                 if len(candidate["freed_nodes"]) >= target.nodes:
                     candidates.append(candidate)
-            if optimality == "heuristic" or candidates:
+            if optimality == "heuristic":
                 break
 
     if optimality == "heuristic":
-        chosen: list[str] = []
-        remaining = sorted(
-            fragments,
-            key=lambda name: (
-                nodes[name]["allocated_gpu"],
-                len(nodes[name]["jobs"]),
-                name,
-            ),
-        )
-        while remaining:
-            chosen.append(remaining.pop(0))
-            candidate = _candidate(chosen, nodes, jobs, target)
-            if len(candidate["freed_nodes"]) >= target.nodes:
-                candidates = [candidate]
-                break
+        heuristic_keys: list[Callable[[dict[str, Any]], tuple[Any, ...]]] = [
+            lambda c: (c["gpus"], c["job_count"], c["users"], c["jobs"]),
+            lambda c: (c["job_count"], c["gpus"], c["users"], c["jobs"]),
+            lambda c: (c["users"], c["gpus"], c["job_count"], c["jobs"]),
+        ]
+        for key in heuristic_keys:
+            chosen: list[str] = []
+            remaining = sorted(eligible)
+            while remaining and len(chosen) < max_group_size:
+                next_node = min(
+                    remaining,
+                    key=lambda name: key(_candidate([*chosen, name], nodes, jobs, target)),
+                )
+                chosen.append(next_node)
+                remaining.remove(next_node)
+                candidate = _candidate(chosen, nodes, jobs, target)
+                if len(candidate["freed_nodes"]) >= target.nodes:
+                    candidates.append(candidate)
+                    break
 
     if not candidates:
         return [], optimality
@@ -325,11 +345,14 @@ def collect_snapshot(
 
 
 def build_report(
-    snapshot: dict[str, Any], target: Target, queue: str, cluster_name: str
+    snapshot: dict[str, Any], target: Target, queue: str, cluster_name: str,
+    candidate_scope: str = "fragmented",
 ) -> dict[str, Any]:
     nodes = snapshot["nodes"]
     jobs = snapshot["jobs"]
-    suggestions, optimality = solve_candidates(nodes, jobs, target)
+    suggestions, optimality = solve_candidates(
+        nodes, jobs, target, candidate_scope=candidate_scope
+    )
     for suggestion in suggestions:
         suggestion["job_details"] = [
             {
@@ -362,6 +385,11 @@ def build_report(
         for name, node in sorted(nodes.items())
         if node["jobs"] and node["allocated_gpu"] < node["total_gpu"]
     ]
+    full_nodes = sum(
+        bool(node["jobs"]) and node["total_gpu"] > 0
+        and node["allocated_gpu"] >= node["total_gpu"]
+        for node in nodes.values()
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -380,6 +408,7 @@ def build_report(
             "free_gpu": sum(n["total_gpu"] - n["allocated_gpu"] for n in nodes.values()),
             "currently_schedulable_nodes": free_nodes,
             "fragmented_nodes": len(fragmented),
+            "full_nodes": full_nodes,
             "running_jobs": len(jobs),
         },
         "analysis": {
@@ -390,6 +419,7 @@ def build_report(
                 + (["memory"] if target.memory_gib is not None else [])
             ),
             "optimality": optimality,
+            "candidate_scope": candidate_scope,
         },
         "fragmented_nodes": fragmented,
         "suggestions": suggestions,
@@ -409,15 +439,17 @@ def render_text(report: dict[str, Any]) -> str:
         ),
         (
             f"Currently schedulable nodes: {summary['currently_schedulable_nodes']}; "
-            f"fragmented nodes: {summary['fragmented_nodes']}"
+            f"fragmented nodes: {summary['fragmented_nodes']}; "
+            f"full nodes: {summary['full_nodes']}"
         ),
+        f"Candidate scope: {report['analysis']['candidate_scope']}",
     ]
     lines.extend(f"Warning: {warning}" for warning in report.get("warnings", []))
     if not report["analysis"]["needs_repacking"]:
         lines.append("Result: enough nodes are already schedulable; no job coordination is needed.")
         return "\n".join(lines) + "\n"
     if not report["suggestions"]:
-        lines.append("Result: no eligible fragmented-node suggestion satisfies the target.")
+        lines.append("Result: no eligible candidate suggestion satisfies the target.")
         return "\n".join(lines) + "\n"
     labels = {"min-gpu": "minimum coordinated GPU", "min-jobs": "minimum jobs", "min-users": "minimum users"}
     for index, suggestion in enumerate(report["suggestions"], 1):
@@ -481,8 +513,10 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
         "Nodes",
         f"{summary['total_nodes']} total · "
         f"[green]{schedulable} schedulable[/] · "
-        f"[yellow]{summary['fragmented_nodes']} fragmented[/]",
+        f"[yellow]{summary['fragmented_nodes']} fragmented[/] · "
+        f"[red]{summary['full_nodes']} full[/]",
     )
+    overview.add_row("Candidates", str(report["analysis"]["candidate_scope"]))
     overview.add_row("Status", status)
     console.print(Panel(overview, title="[bold]ClusterX Queue Packing[/]", border_style="cyan"))
     for warning in report.get("warnings", []):
@@ -521,7 +555,7 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
         return True
     suggestions = report.get("suggestions") or []
     if not suggestions:
-        console.print("[bold red]No eligible fragmented-node suggestion satisfies the target.[/]")
+        console.print("[bold red]No eligible candidate suggestion satisfies the target.[/]")
         return True
 
     labels = {
@@ -592,6 +626,12 @@ def parse_args() -> argparse.Namespace:
         default="all",
         help="Suggestion strategy to display (default: all)",
     )
+    parser.add_argument(
+        "--candidate-scope",
+        choices=("fragmented", "full", "all"),
+        default="fragmented",
+        help="Nodes whose jobs may be coordination candidates (default: fragmented)",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json", help="Print schema-versioned JSON instead of a terminal report")
     parser.add_argument("--out", type=Path, help="Also save the complete JSON report to this path")
     args = parser.parse_args()
@@ -634,7 +674,9 @@ def main() -> int:
             )
             warnings.append("Job set changed during the first collection; report uses one retry")
         target = Target(args.nodes, args.gpus_per_node, args.cpus_per_node, args.memory_per_node_gib)
-        report = build_report(snapshot, target, str(queue), str(cluster_name))
+        report = build_report(
+            snapshot, target, str(queue), str(cluster_name), args.candidate_scope
+        )
         report["warnings"].extend(warnings)
         report["analysis"]["requested_strategy"] = args.strategy
         if args.strategy != "all":

@@ -99,7 +99,10 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   `--memory-per-node-gib` only when the target workload specifies them. Treat
   every suggestion as a coordination candidate, not authorization to stop
   anything. Use `--strategy all|min-gpu|min-jobs|min-users`; default to
-  `all`.
+  `all`. Use `--candidate-scope fragmented|full|all`; default to `fragmented`
+  for backward-compatible fragment cleanup. A `full` node is any occupied node
+  whose allocated GPUs equal or exceed its GPU capacity, including nodes shared
+  by multiple jobs.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
   pagination, filter, and ordering options when the result set is large. Treat
   Worker fields as runtime observations and do not infer missing nodes.

@@ -89,6 +89,9 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_p
   --cwd /path/to/project --nodes 2 --strategy all
 ```
 
+默认只分析碎片节点；如需让已占满 GPU 的节点任务也参与只读候选优化，增加
+`--candidate-scope all`。也可使用 `--candidate-scope full` 仅比较完整节点。
+
 首次配置后，保护配置文件权限：
 
 ```bash

@@ -184,8 +184,16 @@ only the Prometheus load lookback window, not allocation or candidate solving.
 When multiple strategies resolve to the same job set, the report deduplicates
 the plan and explicitly lists every other strategy for which it is also optimal.
 
-Only jobs placed on fragmented nodes are candidates. Exact search is used up
-to 100,000 states, then a deterministic result marked `heuristic` is returned.
+`--candidate-scope` controls which occupied nodes may contribute jobs to a
+plan. It defaults to `fragmented`, preserving fragment-only analysis. Use
+`full` for GPU-saturated nodes or `all` to compare both populations in one
+optimization. A full node may be occupied by one job or shared by multiple
+jobs. Jobs remain indivisible: selecting any placement charges the job's total
+GPU allocation and evaluates every node released by that job.
+
+Only jobs placed on nodes selected by `--candidate-scope` are candidates.
+Exact search is used up to 100,000 states, then deterministic results marked
+`heuristic` are returned.
 Missing Worker mappings, truncated node inventory, allocation mismatches, or a
 changing job snapshot cause a safe failure rather than a partial suggestion.
 If a node's allocated GPU count is greater than the GPU resources attributable

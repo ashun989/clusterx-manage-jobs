@@ -102,6 +102,55 @@ class QueuePlanTests(unittest.TestCase):
             args = self.module.parse_args()
         self.assertEqual(args.gpus_per_node, 8)
         self.assertEqual(args.strategy, "all")
+        self.assertEqual(args.candidate_scope, "fragmented")
+
+    def test_full_scope_includes_shared_full_node(self):
+        m = self.module
+        jobs = {"a": job("a", "u1", 4), "b": job("b", "u2", 4)}
+        nodes = {"n1": node(
+            "n1", 8, {"a": {"gpu": 4}, "b": {"gpu": 4}}
+        )}
+        plans, optimality = m.solve_candidates(
+            nodes, jobs, m.Target(1, 8), candidate_scope="full"
+        )
+        self.assertEqual(optimality, "exact")
+        self.assertEqual(set(plans[0]["jobs"]), {"a", "b"})
+        self.assertEqual(plans[0]["freed_nodes"], ["n1"])
+
+    def test_all_scope_compares_fragmented_and_full_job_plans(self):
+        m = self.module
+        jobs = {
+            **{name: job(name, name, 1) for name in "abcd"},
+            "multi": job("multi", "shared", 16),
+        }
+        nodes = {
+            "f1": node("f1", 2, {"a": {"gpu": 1}, "b": {"gpu": 1}}),
+            "f2": node("f2", 2, {"c": {"gpu": 1}, "d": {"gpu": 1}}),
+            "n1": node("n1", 8, {"multi": {"gpu": 8}}),
+            "n2": node("n2", 8, {"multi": {"gpu": 8}}),
+        }
+        plans, _ = m.solve_candidates(
+            nodes, jobs, m.Target(2, 8), candidate_scope="all"
+        )
+        by_strategy = {plan["strategy"]: plan for plan in plans}
+        self.assertEqual(set(by_strategy["min-gpu"]["jobs"]), set("abcd"))
+        self.assertEqual(by_strategy["min-gpu"]["gpus"], 4)
+        self.assertEqual(by_strategy["min-jobs"]["jobs"], ["multi"])
+        self.assertEqual(
+            by_strategy["min-jobs"]["also_optimal_for"], ["min-users"]
+        )
+
+    def test_report_exposes_candidate_scope_and_full_node_count(self):
+        m = self.module
+        jobs = {"a": job("a", "u", 8)}
+        jobs["a"]["placements"] = [{"node": "n1", "gpu": 8}]
+        nodes = {"n1": node("n1", 8, {"a": {"gpu": 8}})}
+        report = m.build_report(
+            {"nodes": nodes, "jobs": jobs}, m.Target(1, 8),
+            "queue", "cluster", "full",
+        )
+        self.assertEqual(report["analysis"]["candidate_scope"], "full")
+        self.assertEqual(report["summary"]["full_nodes"], 1)
 
     def test_duplicate_plan_records_all_optimal_strategies(self):
         m = self.module

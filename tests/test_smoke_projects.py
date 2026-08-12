@@ -192,6 +192,7 @@ class SmokeProjectTests(unittest.TestCase):
             "requirements.txt",
             "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs",
             "--strategy all",
+            "--candidate-scope all",
             "使用 $clusterx-manage-jobs",
         ):
             self.assertIn(marker, readme)
