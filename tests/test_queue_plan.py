@@ -249,9 +249,43 @@ class QueuePlanTests(unittest.TestCase):
         output = stream.getvalue()
         self.assertIn("ClusterX Queue Packing", output)
         self.assertIn("Fragmented nodes", output)
+        self.assertIn("Search diagnostics", output)
         self.assertIn("Plan 1", output)
-        self.assertIn("min-jobs rank 1", output)
+        self.assertIn("min-jobs · Jobs", output)
+        self.assertIn("Memory GiB", output)
         self.assertIn("\x1b[", output)
+
+    def test_rich_report_keeps_all_placements_at_common_widths(self):
+        from rich.console import Console
+
+        m = self.module
+        job_name = "distributed-job-with-complete-placement-details"
+        jobs = {"multi": job("multi", "long-user-name", 192)}
+        jobs["multi"]["job_name"] = job_name
+        jobs["multi"]["placements"] = [
+            {"node": f"node-{i:02d}", "gpu": 8, "cpu": 16, "memory_gib": 64}
+            for i in range(24)
+        ]
+        nodes = {
+            f"node-{i:02d}": node(f"node-{i:02d}", 8, {"multi": {"gpu": 8}})
+            for i in range(24)
+        }
+        report = m.build_report(
+            {"nodes": nodes, "jobs": jobs}, m.Target(4, 8),
+            "queue", "cluster", "full", alternatives=1,
+        )
+        for width in (80, 120, 160):
+            stream = io.StringIO()
+            console = Console(file=stream, force_terminal=False, width=width)
+            self.assertTrue(m.render_rich(report, console=console))
+            output = stream.getvalue()
+            for i in range(24):
+                self.assertIn(f"node-{i:02d}", output)
+            self.assertNotIn("…", output)
+        plain = m.render_text(report)
+        self.assertIn(job_name, plain)
+        for i in range(24):
+            self.assertIn(f"node-{i:02d}: 8 GPU, 16 CPU, 64 GiB memory", plain)
 
     def test_min_jobs_strategy_is_accepted(self):
         with mock.patch.object(

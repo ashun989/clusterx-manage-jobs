@@ -591,6 +591,15 @@ def render_text(report: dict[str, Any]) -> str:
             f"full nodes: {summary['full_nodes']}"
         ),
         f"Candidate scope: {report['analysis']['candidate_scope']}",
+        (
+            "Search: "
+            f"{report['analysis']['optimality']}; "
+            f"{report['analysis']['search_elapsed_seconds']:.3f}s / "
+            f"{report['analysis']['search_budget_seconds']:g}s; "
+            f"{report['analysis']['states_examined']} / "
+            f"{report['analysis']['estimated_states']} states; "
+            f"switch={report['analysis']['switch_reason']}"
+        ),
     ]
     lines.extend(f"Warning: {warning}" for warning in report.get("warnings", []))
     if not report["analysis"]["needs_repacking"]:
@@ -611,7 +620,7 @@ def render_text(report: dict[str, Any]) -> str:
                 "",
                 f"Plan {index} ({display_strategy} rank {suggestion['rank']}, {qualifier}, {suggestion['optimality']}):",
                 f"  Coordination candidate: {suggestion['gpus']} GPU, {_count_label(suggestion['job_count'], 'job')}, {_count_label(suggestion['users'], 'user')}",
-                f"  Freed nodes: {', '.join(suggestion['freed_nodes'][:target['nodes']])}",
+                f"  Freed nodes ({len(suggestion['freed_nodes'])}): {', '.join(suggestion['freed_nodes'])}",
             ]
         )
         if suggestion["rank"] > 1:
@@ -623,6 +632,12 @@ def render_text(report: dict[str, Any]) -> str:
             lines.append(f"  Comparison: {comparison}")
         for job in suggestion["job_details"]:
             lines.append(f"  - {job['user']}: {job['job_name']} ({job['total_gpu']} GPU total)")
+            for placement in job["placements"]:
+                lines.append(
+                    f"      {placement['node']}: {placement.get('gpu', 0)} GPU, "
+                    f"{placement.get('cpu', 0)} CPU, "
+                    f"{placement.get('memory_gib', 0)} GiB memory"
+                )
     lines.append("\nRead-only report: no job was stopped or modified.")
     return "\n".join(lines) + "\n"
 
@@ -632,7 +647,9 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
     try:
         from rich import box
         from rich.console import Console
+        from rich.console import Group
         from rich.panel import Panel
+        from rich.rule import Rule
         from rich.table import Table
         from rich.text import Text
     except ImportError:
@@ -647,28 +664,42 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
         "READY" if target_met else "FRAGMENTED",
         style="bold green" if target_met else "bold yellow",
     )
-    overview = Table.grid(padding=(0, 2))
-    overview.add_column(style="bold cyan")
-    overview.add_column()
-    overview.add_row("Queue", str(report["queue"]))
-    overview.add_row("Target", f"{target['nodes']} × {target['gpus_per_node']} GPU")
+    overview = Table.grid(expand=True, padding=(0, 2))
+    for _ in range(4):
+        overview.add_column(ratio=1, overflow="fold")
     overview.add_row(
-        "GPU",
-        f"[red]{summary['allocated_gpu']} allocated[/] / "
-        f"[green]{summary['free_gpu']} free[/] / {summary['total_gpu']} total",
+        "[bold cyan]Queue[/]", str(report["queue"]),
+        "[bold cyan]Target[/]", f"{target['nodes']} × {target['gpus_per_node']} GPU",
     )
     overview.add_row(
-        "Nodes",
-        f"{summary['total_nodes']} total · "
-        f"[green]{schedulable} schedulable[/] · "
-        f"[yellow]{summary['fragmented_nodes']} fragmented[/] · "
-        f"[red]{summary['full_nodes']} full[/]",
+        "[bold cyan]Candidates[/]", str(report["analysis"]["candidate_scope"]),
+        "[bold cyan]Status[/]", status,
     )
-    overview.add_row("Candidates", str(report["analysis"]["candidate_scope"]))
-    overview.add_row("Status", status)
+    overview.add_row(
+        "[bold cyan]GPU[/]",
+        f"[red]{summary['allocated_gpu']} allocated[/] · [green]{summary['free_gpu']} free[/] · {summary['total_gpu']} total",
+        "[bold cyan]Nodes[/]",
+        f"{summary['total_nodes']} total · [green]{schedulable} schedulable[/] · [yellow]{summary['fragmented_nodes']} fragmented[/] · {summary['full_nodes']} full",
+    )
     console.print(Panel(overview, title="[bold]ClusterX Queue Packing[/]", border_style="cyan"))
     for warning in report.get("warnings", []):
         console.print(f"[bold yellow]Warning:[/] {warning}")
+
+    analysis = report["analysis"]
+    search = Table.grid(expand=True, padding=(0, 2))
+    search.add_column(style="bold cyan")
+    search.add_column(ratio=1)
+    search.add_column(style="bold cyan")
+    search.add_column(ratio=1)
+    search.add_row(
+        "Mode", f"[yellow]{analysis['optimality']}[/]" if analysis["optimality"] == "heuristic" else f"[green]{analysis['optimality']}[/]",
+        "Switch", str(analysis["switch_reason"]),
+    )
+    search.add_row(
+        "Time", f"{analysis['search_elapsed_seconds']:.3f}s / {analysis['search_budget_seconds']:g}s",
+        "States", f"{analysis['states_examined']} examined / {analysis['estimated_states']} estimated",
+    )
+    console.print(Panel(search, title="[bold]Search diagnostics[/]", border_style="blue"))
 
     fragments = report.get("fragmented_nodes") or []
     if fragments:
@@ -678,24 +709,25 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
             header_style="bold magenta",
             row_styles=("", "dim"),
         )
-        table.add_column("Node", style="cyan", no_wrap=True)
+        table.add_column("Node", style="cyan", overflow="fold")
         table.add_column("GPU", justify="right")
         table.add_column("Free", justify="right", style="green")
         table.add_column("GPU util", justify="right")
-        table.add_column("Users / jobs", overflow="fold")
+        table.add_column("User", overflow="fold")
+        table.add_column("Job", overflow="fold")
+        table.add_column("Job GPU", justify="right")
         for fragment in fragments:
             jobs = fragment.get("jobs") or []
-            occupants = ", ".join(
-                f"{item['user']}/{item['job_name']}:{item['gpu']}G" for item in jobs
-            )
             gpu_util = (fragment.get("metrics") or {}).get("gpu-util")
-            table.add_row(
-                str(fragment["node"]),
-                f"{fragment['allocated_gpu']}/{fragment['total_gpu']}",
-                str(fragment["free_gpu"]),
-                "-" if gpu_util is None else f"{gpu_util:.1f}%",
-                occupants or "-",
-            )
+            for row, item in enumerate(jobs or [{}]):
+                table.add_row(
+                    str(fragment["node"]) if row == 0 else "",
+                    f"{fragment['allocated_gpu']}/{fragment['total_gpu']}" if row == 0 else "",
+                    str(fragment["free_gpu"]) if row == 0 else "",
+                    ("-" if gpu_util is None else f"{gpu_util:.1f}%") if row == 0 else "",
+                    str(item.get("user", "-")), str(item.get("job_name", "-")),
+                    str(item.get("gpu", 0)),
+                )
         console.print(table)
 
     if target_met:
@@ -706,53 +738,61 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
         console.print("[bold red]No eligible candidate suggestion satisfies the target.[/]")
         return True
 
-    labels = {
-        "min-gpu": "coordinated GPU",
-        "min-jobs": "jobs",
-        "min-users": "users",
-    }
-    for index, suggestion in enumerate(suggestions, 1):
-        display_strategy = suggestion.get("display_strategy", suggestion["strategy"])
-        if suggestion["rank"] == 1:
-            qualifier = "Minimum" if suggestion["optimality"] == "exact" else "Lowest found"
-        else:
-            qualifier = "Alternative" if suggestion["optimality"] == "exact" else "Alternative found"
-        plan = Table(
-            title=f"Plan {index} · {display_strategy} rank {suggestion['rank']} · {qualifier} · {suggestion['optimality']}",
-            box=box.SIMPLE_HEAVY,
-            header_style="bold blue",
-        )
-        plan.add_column("User", style="cyan")
-        plan.add_column("Job")
-        plan.add_column("GPU", justify="right", style="yellow")
-        plan.add_column("Placement", style="dim")
-        for job in suggestion["job_details"]:
-            placement = ", ".join(
-                f"{item['node']}:{item['gpu']}G" for item in job["placements"]
+    labels = {"min-gpu": "Coordinated GPU", "min-jobs": "Jobs", "min-users": "Users"}
+    colors = {"min-gpu": "cyan", "min-jobs": "blue", "min-users": "magenta"}
+    plan_index = 0
+    for strategy in ("min-gpu", "min-jobs", "min-users"):
+        group = [item for item in suggestions if item["strategy"] == strategy]
+        if not group:
+            continue
+        color = colors[strategy]
+        console.print(Rule(f"[bold {color}]{strategy} · {labels[strategy]}[/]", style=color))
+        for suggestion in group:
+            plan_index += 1
+            display_strategy = suggestion["strategy"]
+            if suggestion["rank"] == 1:
+                qualifier = "Minimum" if suggestion["optimality"] == "exact" else "Lowest found"
+            else:
+                qualifier = "Alternative" if suggestion["optimality"] == "exact" else "Alternative found"
+            summary_grid = Table.grid(expand=True, padding=(0, 2))
+            summary_grid.add_column(style="bold")
+            summary_grid.add_column(ratio=1)
+            summary_grid.add_row(
+                "Candidate",
+                f"[yellow]{suggestion['gpus']} GPU[/] · {_count_label(suggestion['job_count'], 'job')} · {_count_label(suggestion['users'], 'user')} · {len(suggestion['freed_nodes'])} nodes releasable",
             )
-            plan.add_row(
-                str(job["user"]), str(job["job_name"]),
-                str(job["total_gpu"]), placement,
-            )
-        console.print(
-            f"[bold]Coordination candidate:[/] [yellow]{suggestion['gpus']} GPU[/], "
-            f"{_count_label(suggestion['job_count'], 'job')}, "
-            f"{_count_label(suggestion['users'], 'user')}\n"
-            f"[bold]Freed nodes:[/] [green]"
-            + ", ".join(suggestion["freed_nodes"][:target["nodes"]])
-            + "[/]"
-        )
-        if suggestion["rank"] > 1:
-            delta = suggestion["delta_from_best"]
-            comparison = (
-                f"Tied on {labels[display_strategy]}" if delta == 0
-                else f"+{delta} {labels[display_strategy]} versus best"
-            )
-            console.print(
-                f"[bold]Comparison:[/] [magenta]{comparison}[/]"
-            )
-        console.print(plan)
-    console.print("[dim]Read-only report: no job was stopped or modified.[/]")
+            if suggestion["rank"] > 1:
+                delta = suggestion["delta_from_best"]
+                comparison = f"Tied on {labels[display_strategy]}" if delta == 0 else f"+{delta} {labels[display_strategy]} versus best"
+                summary_grid.add_row("Comparison", f"[magenta]{comparison}[/]")
+            summary_grid.add_row("Freed nodes", "[green]" + ", ".join(suggestion["freed_nodes"]) + "[/]")
+
+            jobs_table = Table(box=box.SIMPLE, expand=True, header_style=f"bold {color}")
+            jobs_table.add_column("User", overflow="fold")
+            jobs_table.add_column("Job", overflow="fold", ratio=2)
+            jobs_table.add_column("Total GPU", justify="right")
+            for job in suggestion["job_details"]:
+                jobs_table.add_row(str(job["user"]), str(job["job_name"]), str(job["total_gpu"]))
+
+            placement_table = Table(box=box.SIMPLE, expand=True, header_style="bold green")
+            placement_table.add_column("Job", overflow="fold")
+            placement_table.add_column("Node", overflow="fold", ratio=2)
+            placement_table.add_column("GPU", justify="right")
+            placement_table.add_column("CPU", justify="right")
+            placement_table.add_column("Memory GiB", justify="right")
+            for job in suggestion["job_details"]:
+                for placement in job["placements"]:
+                    placement_table.add_row(
+                        str(job["job_name"]), str(placement["node"]),
+                        str(placement.get("gpu", 0)), str(placement.get("cpu", 0)),
+                        str(placement.get("memory_gib", 0)),
+                    )
+            console.print(Panel(
+                Group(summary_grid, jobs_table, placement_table),
+                title=f"[bold {color}]Plan {plan_index} · Rank {suggestion['rank']} · {qualifier} · {suggestion['optimality']}[/]",
+                border_style=color,
+            ))
+    console.print(Panel("[bold green]Read-only report:[/] no job was stopped or modified.", border_style="green"))
     return True
 
 

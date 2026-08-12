@@ -177,6 +177,11 @@ resources; otherwise the conclusion is GPU-only. Default output is a terminal
 report; use `--json` for JSON stdout or `--out <path>` to save schema version 1.
 The default terminal report uses Rich colored tables when `requirements.txt`
 is installed and falls back to plain text otherwise.
+The Rich report is grouped into queue overview, search diagnostics, fragmented
+node occupancy, and per-strategy plan cards. Each plan keeps separate job and
+placement tables; node, job, CPU, memory, and GPU details are folded to the
+terminal width rather than truncated. Plain-text fallback carries the same
+search, job, freed-node, and placement information.
 `--gpus-per-node` defaults to `8`; pass it explicitly for other node shapes.
 `--strategy` defaults to `all`; select `min-gpu`, `min-jobs`, or `min-users`
 to show only that recommendation. `--minutes` defaults to `5` and controls
