@@ -69,6 +69,7 @@ python3 scripts/clusterx_exec.py --cwd <project-dir> -- log <job-id>
 ```bash
 python3 scripts/queue_plan.py --nodes 2
 python3 scripts/queue_plan.py --cwd <project-dir> --nodes 2 --strategy min-gpu
+python3 scripts/queue_plan.py --nodes 2 --strategy min-workloads
 python3 scripts/queue_plan.py --nodes 2 --candidate-scope all
 python3 scripts/queue_plan.py --nodes 2 --alternatives 3 --search-seconds 10
 ```

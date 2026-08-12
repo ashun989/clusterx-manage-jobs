@@ -169,19 +169,21 @@ full-node job cannot schedule:
 python3 scripts/queue_plan.py --cwd <project> --nodes 2
 ```
 
-The command joins running jobs, users, requested resources, runtime Workers,
-and queue nodes. It reports occupied nodes plus independently ranked candidates
-for minimum coordinated GPUs, jobs, and users. It never calls a stop API. Pass
+The command joins the queue node inventory with the same per-node Pod workload
+API used by the SSP console. It attributes training jobs, development instances
+(`aid`), inference workloads, users, workspaces, and requested resources. It
+reports occupied nodes plus independently ranked candidates for minimum
+coordinated GPUs, workloads, and users. It never calls a stop API. Pass
 `--cpus-per-node` and `--memory-per-node-gib` to include those requested
 resources; otherwise the conclusion is GPU-only. Default output is a terminal
-report; use `--json` for JSON stdout or `--out <path>` to save schema version 1.
+report; use `--json` for JSON stdout or `--out <path>` to save schema version 2.
 The default terminal report uses Rich colored tables when `requirements.txt`
 is installed and falls back to plain text otherwise.
 The Rich report is grouped into queue overview, search diagnostics, fragmented
-node occupancy, and per-strategy plan cards. Each plan keeps separate job and
-placement tables; node, job, CPU, memory, and GPU details are folded to the
+node occupancy, and per-strategy plan cards. Each plan keeps separate workload
+and placement tables; node, workload, type, CPU, memory, and GPU details are folded to the
 terminal width rather than truncated. Plain-text fallback carries the same
-search, job, freed-node, and placement information.
+search, workload, freed-node, and placement information.
 Complete options:
 
 | Option | Meaning | Default / validation |
@@ -195,25 +197,25 @@ Complete options:
 | `--config` | Explicit protected Clusterx YAML | Config discovery when omitted |
 | `--cwd` | Config discovery starting directory | Current directory |
 | `--minutes` | Prometheus lookback window only | `5`, positive integer |
-| `--strategy` | `all`, `min-gpu`, `min-jobs`, or `min-users` | `all` |
+| `--strategy` | `all`, `min-gpu`, `min-workloads`, `min-users`; `min-jobs` is a compatibility alias | `all` |
 | `--candidate-scope` | `fragmented`, `full`, or `all` occupied nodes | `fragmented` |
 | `--alternatives` | Maximum ranked plans per strategy, including rank 1 | `3`, integer from `1` through `10` |
 | `--search-seconds` | Local solver time budget | `10`, positive number |
 | `--json` | Write schema-versioned JSON to stdout instead of terminal UI | Disabled |
 | `--out` | Also save the complete JSON report | Unset |
 
-`--candidate-scope` controls which occupied nodes may contribute jobs to a
+`--candidate-scope` controls which occupied nodes may contribute workloads to a
 plan. It defaults to `fragmented`, preserving fragment-only analysis. Use
 `full` for GPU-saturated nodes or `all` to compare both populations in one
-optimization. A full node may be occupied by one job or shared by multiple
-jobs. Jobs remain indivisible: selecting any placement charges the job's total
-GPU allocation and evaluates every node released by that job.
+optimization. A full node may be occupied by one workload or shared by multiple
+workloads. Workloads remain indivisible: selecting any placement charges the
+workload's total GPU allocation and evaluates every node released by it.
 
 `--alternatives` defaults to `3` and accepts `1` through `10`. It returns that
-many ranked, distinct job sets per selected strategy; `--strategy all` groups
-results independently under `min-gpu`, `min-jobs`, and `min-users` without
+many ranked, distinct workload sets per selected strategy; `--strategy all` groups
+results independently under `min-gpu`, `min-workloads`, and `min-users` without
 cross-strategy deduplication, so the default can display up to nine plan cards.
-The same job set may appear in more than one strategy group with a separate
+The same workload set may appear in more than one strategy group with a separate
 rank. Exact ranks use `Minimum` / `Alternative`;
 heuristic ranks use `Lowest found` / `Alternative found`.
 
@@ -222,7 +224,7 @@ measures the first 1,000 states, estimates whether enumeration fits within 80%
 of the budget, and reserves 20% for heuristic fallback. JSON analysis reports
 the budget, elapsed time, estimated and examined states, and switch reason.
 
-Only jobs placed on nodes selected by `--candidate-scope` are candidates.
+Only workloads placed on nodes selected by `--candidate-scope` are candidates.
 Exact search is controlled by the measured time budget rather than a fixed
 state threshold. Larger searches use deterministic, multi-start job/node
 heuristics followed by redundant-job pruning. Exact plans
@@ -230,11 +232,11 @@ are labeled `Minimum`; heuristic plans are labeled `Lowest found` and do not
 claim global optimality. Suggestions expose `strategy`, `rank`, `primary_cost`,
 and `delta_from_best`.
 
-Schema version 1 has this top-level shape (values abbreviated):
+Schema version 2 has this top-level shape (values abbreviated):
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "generated_at": "<UTC ISO-8601>",
   "queue": "<queue>",
   "cluster": "<cluster>",
@@ -252,7 +254,8 @@ Schema version 1 has this top-level shape (values abbreviated):
     "currently_schedulable_nodes": 0,
     "fragmented_nodes": 5,
     "full_nodes": 50,
-    "running_jobs": 48
+    "running_workloads": 48,
+    "workload_counts": {"trainingJob": 40, "aid": 8}
   },
   "analysis": {
     "needs_repacking": true,
@@ -271,14 +274,19 @@ Schema version 1 has this top-level shape (values abbreviated):
     "allocated_gpu": 7,
     "total_gpu": 8,
     "free_gpu": 1,
-    "jobs": [{
-      "job_id": "<job-id>",
-      "job_name": "<job-name>",
+    "workloads": [{
+      "workload_id": "<workload-id>",
+      "workload_name": "<workload-name>",
+      "type": "aid",
+      "actionable": true,
       "user": "<user>",
+      "workspace": "<workspace>",
       "gpu": 1,
       "cpu": 8,
       "memory_gib": 32.0
     }],
+    "unattributed": {"gpu": 0, "cpu": 0, "memory_gib": 0},
+    "attribution_excess": {"gpu": 0, "cpu": 0, "memory_gib": 0},
     "metrics": {"gpu-util": 53.4}
   }],
   "suggestions": [{
@@ -289,14 +297,17 @@ Schema version 1 has this top-level shape (values abbreviated):
     "optimality": "heuristic",
     "target_nodes": ["<node>"],
     "freed_nodes": ["<node>"],
-    "jobs": ["<job-id>"],
+    "workloads": ["<workload-id>"],
     "gpus": 32,
-    "job_count": 1,
+    "workload_count": 1,
     "users": 1,
-    "job_details": [{
-      "job_id": "<job-id>",
-      "job_name": "<job-name>",
+    "workload_details": [{
+      "workload_id": "<workload-id>",
+      "workload_name": "<workload-name>",
+      "type": "trainingJob",
+      "actionable": true,
       "user": "<user>",
+      "workspace": "<workspace>",
       "total_gpu": 32,
       "placements": [{
         "node": "<node>",
@@ -315,11 +326,12 @@ Schema version 1 has this top-level shape (values abbreviated):
 exceed 80% of the budget, `exact-deadline` when exact enumeration reaches that
 deadline, `not-needed` when enough nodes are already schedulable, or
 `no-eligible-candidates` when the selected scope contains no candidate nodes.
-Missing Worker mappings, truncated node inventory, allocation mismatches, or a
-changing job snapshot cause a safe failure rather than a partial suggestion.
-If a node's allocated GPU count is greater than the GPU resources attributable
-to visible running Workers, that node is not claimed as fully releasable. This
-conservative rule may leave a fragmented node out of every suggestion.
+Missing Pod mappings, truncated node inventory, or a changing node-allocation
+snapshot cause a safe failure rather than a partial suggestion. Node allocation
+is the capacity source of truth. Positive allocation-to-Pod differences are
+reported as unattributed and never claimed as releasable. If Pod attribution
+exceeds node allocation, the affected node is excluded for that resource and a
+warning is emitted.
 
 Configuration discovery starts from the current directory when `--cwd` is
 omitted. Exit status `0` means the report completed (including "no suggestion"

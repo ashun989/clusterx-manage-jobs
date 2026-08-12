@@ -15,7 +15,7 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 - For global/project configuration discovery and precedence, read
   [references/configuration.md](references/configuration.md).
 - For a preflight check, run `python3 scripts/preflight.py`.
-- For queue packing, per-user/per-job node allocation, GPU fragmentation, or
+- For queue packing, per-user/per-workload node allocation, GPU fragmentation, or
   full-node scheduling analysis, run `python3 scripts/queue_plan.py`. This is a
   read-only report and must never stop jobs. Install `requirements.txt` for
   colored Rich tables; retain the built-in plain-text fallback when unavailable.
@@ -98,11 +98,16 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   `--gpus-per-node` defaults to 8. Add `--cpus-per-node` and
   `--memory-per-node-gib` only when the target workload specifies them. Treat
   every suggestion as a coordination candidate, not authorization to stop
-  anything. Use `--strategy all|min-gpu|min-jobs|min-users`; default to
-  `all`. Use `--candidate-scope fragmented|full|all`; default to `fragmented`
+  anything. Use `--strategy all|min-gpu|min-workloads|min-users`; default to
+  `all`; `min-jobs` remains a deprecated compatibility alias for
+  `min-workloads`. Use `--candidate-scope fragmented|full|all`; default to `fragmented`
   for backward-compatible fragment cleanup. A `full` node is any occupied node
   whose allocated GPUs equal or exceed its GPU capacity, including nodes shared
-  by multiple jobs.
+  by multiple workloads. Queue packing reads the same node Pod workload
+  inventory as the SSP console, so training jobs, development instances
+  (`aid`), inference workloads, and unknown workload types are attributed and
+  may be coordination candidates. Node allocation remains the capacity source
+  of truth; unattributed resources are displayed but never claimed as releasable.
   Use `--alternatives N` (default `3`, range `1` to `10`) for ranked plans per
   strategy. Use `--search-seconds S` (default `10`) to bound only local solving;
   exact search calibrates itself from measured state throughput and reserves

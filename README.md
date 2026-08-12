@@ -3,7 +3,7 @@
 用于安全管理 PT/SSP 集群 Clusterx 训练任务的 Codex Skill 项目。
 仅限具备内部 Clusterx 访问资格的公司用户使用。
 
-当前 Skill 发布版本为 `0.1.3`。已验证 Clusterx CLI `2026.8.11`；
+当前 Skill 发布版本为 `0.2.0`。已验证 Clusterx CLI `2026.8.11`；
 其他版本可使用，但应以安装后的动态帮助为准并视为尚未验证。
 
 ## 项目结构
@@ -28,7 +28,7 @@
 - 检查 `clusterx` 命令、配置文件权限、必填配置项和共享 `tmpdir`。
 - 为训练任务生成资源、镜像、挂载和脱敏命令预览；用户已明确要求提交时直接执行。
 - 查询任务、节点、日志和统计信息；用户已明确指定准确目标时直接停止任务。
-- 汇总队列节点上的用户与任务资源，诊断 GPU 碎片并生成只读的完整节点释放候选。
+- 汇总队列节点上的训练任务、开发机及其他工作负载，诊断 GPU 碎片并生成只读的完整节点释放候选。
 - 对配置、命令、复杂挂载 JSON、HTTP 认证头和签名 URL 做脱敏。
 - 提交前拒绝 Clusterx 无法安全保留参数边界的 `bash/sh -c/-lc` 写法，
   要求直接调用 runner 脚本。
@@ -96,6 +96,10 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_p
 默认使用 `--search-seconds 10`，根据当前机器实测状态吞吐在精确搜索和启发式
 搜索之间切换。
 
+队列分析使用与网页“查看负载”相同的节点 Pod 数据，可显示并归因开发机
+（`aid`）、训练任务（`trainingJob`）及其他工作负载。`--strategy min-workloads`
+用于最小化需要协调的工作负载数量；旧参数 `--strategy min-jobs` 保留为兼容别名。
+
 首次配置后，保护配置文件权限：
 
 ```bash
@@ -152,11 +156,11 @@ printf '%s\n' 'access_token=example' |
 
 ```text
 使用 $clusterx-manage-jobs，分析当前队列申请 2 个完整 8 卡节点的资源整理方案，
-展示最少 GPU、最少作业和最少用户的候选，每种策略最多给 3 个方案，不要停止作业。
+展示最少 GPU、最少工作负载和最少用户的候选，每种策略最多给 3 个方案，不要停止工作负载。
 ```
 
 ```text
-使用 $clusterx-manage-jobs，汇总当前队列每个碎片节点上的用户、作业、GPU
+使用 $clusterx-manage-jobs，汇总当前队列每个碎片节点上的用户、工作负载类型、GPU
 占用和最近 10 分钟负载。
 ```
 

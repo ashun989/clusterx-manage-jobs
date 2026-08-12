@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Callable, Iterable
@@ -20,7 +21,7 @@ from config_resolver import inspect_config, resolve_config
 from redact import redact
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CALIBRATION_STATES = 1_000
 
 
@@ -58,17 +59,28 @@ def normalize_nodes(raw_nodes: Iterable[dict[str, Any]]) -> dict[str, dict[str, 
             "total_cpu": resources.get("CPU", (0, 0))[1],
             "allocated_memory_gib": resources.get("MEMORY", (0, 0))[0],
             "total_memory_gib": resources.get("MEMORY", (0, 0))[1],
+            "id": str(raw.get("id") or ""),
+            "host_ip": str(raw.get("host_ip") or ""),
             "jobs": {},
+            "unattributed": {"gpu": 0, "cpu": 0, "memory_gib": 0},
+            "attribution_excess": {"gpu": 0, "cpu": 0, "memory_gib": 0},
         }
     return nodes
 
 
 def _fits(node: dict[str, Any], target: Target, stopped: set[str]) -> bool:
-    released = {"gpu": 0, "cpu": 0, "memory_gib": 0}
+    excess = node.get("attribution_excess") or {}
+    if float(excess.get("gpu", 0)) > 0:
+        return False
+    if target.cpus is not None and float(excess.get("cpu", 0)) > 0:
+        return False
+    if target.memory_gib is not None and float(excess.get("memory_gib", 0)) > 0:
+        return False
+    released = {"gpu": 0.0, "cpu": 0.0, "memory_gib": 0.0}
     for job_id, placement in node["jobs"].items():
         if job_id in stopped:
             for key in released:
-                released[key] += int(placement.get(key, 0))
+                released[key] += float(placement.get(key, 0))
     free_gpu = node["total_gpu"] - node["allocated_gpu"] + released["gpu"]
     if free_gpu < target.gpus:
         return False
@@ -91,6 +103,7 @@ def _job_cost(job_ids: set[str], jobs: dict[str, dict[str, Any]]) -> dict[str, i
     return {
         "gpus": sum(int(jobs[j]["total_gpu"]) for j in job_ids),
         "job_count": len(job_ids),
+        "workload_count": len(job_ids),
         "users": len({str(jobs[j]["user"]) for j in job_ids}),
     }
 
@@ -233,7 +246,9 @@ def _rank_candidates(
     ranked = sorted(unique.values(), key=key)[:alternatives]
     if not ranked:
         return []
-    primary_field = {"min-gpu": "gpus", "min-jobs": "job_count", "min-users": "users"}[strategy]
+    primary_field = {
+        "min-gpu": "gpus", "min-workloads": "workload_count", "min-users": "users"
+    }[strategy]
     best_cost = int(ranked[0][primary_field])
     return [
         {
@@ -276,12 +291,17 @@ def solve_candidates(
     fragmented = [
         name
         for name, node in nodes.items()
-        if node["jobs"] and 0 < node["allocated_gpu"] < node["total_gpu"]
+        if node["jobs"] and node["allocated_gpu"] < node["total_gpu"]
+        and (
+            node["allocated_gpu"] > 0
+            or (target.cpus is not None and node["allocated_cpu"] > 0 and not _fits(node, target, set()))
+            or (target.memory_gib is not None and node["allocated_memory_gib"] > 0 and not _fits(node, target, set()))
+        )
     ]
     full = [
         name
         for name, node in nodes.items()
-        if node["jobs"] and node["total_gpu"] > 0
+        if node["jobs"] and node["allocated_gpu"] > 0 and node["total_gpu"] > 0
         and node["allocated_gpu"] >= node["total_gpu"]
     ]
     if candidate_scope == "fragmented":
@@ -307,7 +327,7 @@ def solve_candidates(
 
     keys: list[tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]]]] = [
         ("min-gpu", lambda c: (c["gpus"], c["job_count"], c["users"], c["jobs"])),
-        ("min-jobs", lambda c: (c["job_count"], c["gpus"], c["users"], c["jobs"])),
+        ("min-workloads", lambda c: (c["workload_count"], c["gpus"], c["users"], c["jobs"])),
         ("min-users", lambda c: (c["users"], c["gpus"], c["job_count"], c["jobs"])),
     ]
     top_by_strategy: dict[str, dict[tuple[str, ...], dict[str, Any]]] = {
@@ -368,32 +388,67 @@ def solve_candidates(
     return selected, optimality
 
 
-def _convert_job(cluster: Any, raw: dict[str, Any]) -> dict[str, Any] | None:
-    schema = cluster._convert_to_job_schema(raw)
-    if str(schema.status.value).lower() != "running":
-        return None
-    return {
-        "job_id": str(schema.job_id),
-        "job_name": schema.job_name or str(schema.job_id),
-        "user": str(schema.user or "unknown"),
-        "queue": str(schema.partition or ""),
-        "gpus_per_node": int(schema.gpus_per_node),
-        "cpus_per_node": int(schema.cpus_per_node),
-        "memory_per_node_gib": int(str(schema.memory).removesuffix("Gi") or 0),
-        "num_nodes": int(schema.num_nodes),
-        "total_gpu": int(schema.gpus_per_node) * int(schema.num_nodes),
+def _resource_number(value: Any, *, memory: bool = False) -> float:
+    """Parse SSP pod CPU/memory values, including mCPU and binary units."""
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*(m|[KMGTPE]i?B?)?\s*", str(value), re.I)
+    if not match:
+        raise ValueError(f"unsupported resource value: {value!r}")
+    number = float(match.group(1))
+    unit = (match.group(2) or "").lower()
+    if not memory:
+        return number / 1000 if unit == "m" else number
+    factors = {
+        "": 1 / 1024**3, "b": 1 / 1024**3,
+        "k": 1000 / 1024**3, "kb": 1000 / 1024**3,
+        "m": 1000**2 / 1024**3, "mb": 1000**2 / 1024**3,
+        "g": 1000**3 / 1024**3, "gb": 1000**3 / 1024**3,
+        "t": 1000**4 / 1024**3, "tb": 1000**4 / 1024**3,
+        "ki": 1024 / 1024**3, "kib": 1024 / 1024**3,
+        "mi": 1024**2 / 1024**3, "mib": 1024**2 / 1024**3,
+        "gi": 1, "gib": 1, "ti": 1024, "tib": 1024,
     }
+    if unit not in factors:
+        raise ValueError(f"unsupported memory unit: {value!r}")
+    return number * factors[unit]
 
 
-def _list_workers(cluster: Any, job_id: str) -> list[dict[str, Any]]:
-    workers: list[dict[str, Any]] = []
-    token: str | None = None
+def _clean_number(value: float) -> int | float:
+    return int(round(value)) if math.isclose(value, round(value), abs_tol=1e-9) else round(value, 6)
+
+
+def _node_signature(raw_nodes: Iterable[dict[str, Any]]) -> tuple[Any, ...]:
+    normalized = normalize_nodes(raw_nodes)
+    return tuple(
+        (name, node["state"], node["allocated_gpu"], node["allocated_cpu"],
+         node["allocated_memory_gib"])
+        for name, node in sorted(normalized.items())
+    )
+
+
+def _list_node_pods(cluster: Any, cluster_name: str, queue: str, node_id: str) -> list[dict[str, Any]]:
+    path = (
+        f"/subscriptions/{cluster.client.subscription}/"
+        f"resourceGroups/{cluster.client.resource_group}/"
+        f"regions/{cluster.client.region}/clusters/{cluster_name}/pods"
+    )
+    pods: list[dict[str, Any]] = []
+    skip = 0
     while True:
-        response = cluster.list_job_workers(job_id, page_size=100, page_token=token)
-        workers.extend(response.get("workers") or [])
-        token = response.get("next_page_token")
-        if not token:
-            return workers
+        response = cluster.client._make_management_request(
+            "GET", path,
+            params={"node_id": node_id, "queue_name": queue,
+                    "page_size": 100, "skip": skip},
+        )
+        page = response.get("pods") or []
+        pods.extend(page)
+        total = int(response.get("total_size") or len(pods))
+        if not page or len(pods) >= total:
+            return pods
+        skip += len(page)
 
 
 def collect_snapshot(
@@ -409,62 +464,83 @@ def collect_snapshot(
         raise RuntimeError("queue node response is truncated; refusing partial analysis")
     nodes = normalize_nodes(nodes_list)
 
-    def read_jobs() -> list[dict[str, Any]]:
-        response = cluster.client.list_training_jobs(
-            filter_str='state="RUNNING"', page_size=1000
-        )
-        result = []
-        for raw in response.get("training_jobs") or response.get("trainingJobs") or []:
-            job = _convert_job(cluster, raw)
-            if job and job["queue"] == queue:
-                result.append(job)
-        return result
-
-    before = read_jobs()
-    jobs = {job["job_id"]: job for job in before}
-    worker_map: dict[str, list[dict[str, Any]]] = {}
+    pod_map: dict[str, list[dict[str, Any]]] = {}
     failures: list[str] = []
     with ThreadPoolExecutor(max_workers=16) as pool:
-        futures = {pool.submit(_list_workers, cluster, job): job for job in jobs}
+        futures = {
+            pool.submit(_list_node_pods, cluster, cluster_name, queue, node["id"]): name
+            for name, node in nodes.items()
+            if (node["allocated_gpu"] or node["allocated_cpu"] or node["allocated_memory_gib"])
+        }
         for future in as_completed(futures):
-            job_id = futures[future]
+            node_name = futures[future]
             try:
-                worker_map[job_id] = future.result()
+                pod_map[node_name] = future.result()
             except Exception:
-                failures.append(job_id)
+                failures.append(node_name)
     if failures:
-        raise RuntimeError(f"worker mapping failed for {len(failures)} running jobs")
-    after = read_jobs()
-    if {j["job_id"] for j in before} != {j["job_id"] for j in after}:
-        raise RuntimeError("running job set changed during collection; retry the command")
+        raise RuntimeError(f"pod workload mapping failed for {len(failures)} occupied nodes")
 
-    acn_to_node = {name: name for name in nodes}
+    after_nodes = cluster.client.list_queue_nodes(
+        cluster=cluster_name, queue=queue, page_size=100, is_bound=True
+    ).get("nodes") or []
+    if _node_signature(nodes_list) != _node_signature(after_nodes):
+        raise RuntimeError("queue node allocation changed during collection; retry the command")
+
+    jobs: dict[str, dict[str, Any]] = {}
     hostname_to_node: dict[str, str] = {}
-    for job_id, workers in worker_map.items():
-        job = jobs[job_id]
-        observed = 0
-        placements: list[dict[str, Any]] = []
-        for worker in workers:
-            if str(worker.get("phase", "")).upper() != "RUNNING":
-                continue
-            node_name = str((worker.get("acn") or {}).get("name") or "")
-            if node_name not in acn_to_node:
-                raise RuntimeError(f"worker node is absent from queue inventory for job {job_id}")
-            host_ip = str(worker.get("host_ip") or "")
-            if host_ip:
-                hostname_to_node["host-" + host_ip.replace(".", "-")] = node_name
-            resource = worker.get("resource") or {}
+    for node_name, node in nodes.items():
+        if node["host_ip"]:
+            hostname_to_node["host-" + node["host_ip"].replace(".", "-")] = node_name
+        attributed = {"gpu": 0.0, "cpu": 0.0, "memory_gib": 0.0}
+        for pod in pod_map.get(node_name, []):
+            workload = pod.get("workload") or {}
+            workload_id = str(workload.get("uid") or workload.get("id") or "")
+            if not workload_id:
+                raise RuntimeError(f"pod workload identity is missing on node {node_name}")
+            resource = pod.get("resource") or {}
             placement = {
-                "gpu": int(resource.get("accelerate_device_count") or 0),
-                "cpu": int(resource.get("cpu_count") or 0),
-                "memory_gib": int(resource.get("memory_gib") or 0),
+                "gpu": _clean_number(float(resource.get("accelerate_device_count") or 0)),
+                "cpu": _clean_number(_resource_number(resource.get("cpu"))),
+                "memory_gib": _clean_number(_resource_number(resource.get("memory"), memory=True)),
             }
-            nodes[node_name]["jobs"][job_id] = placement
-            placements.append({"node": node_name, **placement})
-            observed += placement["gpu"]
-        job["placements"] = placements
-        if observed != job["total_gpu"]:
-            raise RuntimeError(f"GPU allocation mismatch for job {job_id}")
+            for key in attributed:
+                attributed[key] += float(placement[key])
+            existing = node["jobs"].setdefault(
+                workload_id, {"gpu": 0, "cpu": 0, "memory_gib": 0}
+            )
+            for key in existing:
+                existing[key] = _clean_number(float(existing[key]) + float(placement[key]))
+            ownership = pod.get("ownership") or {}
+            workspace = pod.get("workspace") or {}
+            item = jobs.setdefault(workload_id, {
+                "job_id": workload_id,
+                "job_name": str(workload.get("display_name") or workload.get("name") or workload_id),
+                "user": str(ownership.get("creator_name") or "unknown"),
+                "type": str(workload.get("type") or "unknown"),
+                "workspace": str(workspace.get("name") or ""),
+                "actionable": True,
+                "total_gpu": 0,
+                "placements": [],
+            })
+            item["placements"].append({"node": node_name, "pod": str(pod.get("name") or ""), **placement})
+
+        allocated = {
+            "gpu": float(node["allocated_gpu"]), "cpu": float(node["allocated_cpu"]),
+            "memory_gib": float(node["allocated_memory_gib"]),
+        }
+        for key in allocated:
+            delta = allocated[key] - attributed[key]
+            if delta > 1e-6:
+                node["unattributed"][key] = _clean_number(delta)
+            elif delta < -1e-6:
+                node["attribution_excess"][key] = _clean_number(-delta)
+                warnings.append(
+                    f"Pod-attributed {key} exceeds node allocation on {node_name}; "
+                    "the node is excluded when that resource is required"
+                )
+    for item in jobs.values():
+        item["total_gpu"] = _clean_number(sum(float(p["gpu"]) for p in item["placements"]))
 
     try:
         metric_rows = cluster.stats_prometheus(
@@ -501,15 +577,20 @@ def build_report(
         clock=clock, search_stats=search_stats,
     )
     for suggestion in suggestions:
-        suggestion["job_details"] = [
+        suggestion["workloads"] = suggestion.pop("jobs")
+        suggestion.pop("job_count", None)
+        suggestion["workload_details"] = [
             {
-                "job_id": job_id,
-                "job_name": jobs[job_id]["job_name"],
-                "user": jobs[job_id]["user"],
-                "total_gpu": jobs[job_id]["total_gpu"],
-                "placements": jobs[job_id]["placements"],
+                "workload_id": workload_id,
+                "workload_name": jobs[workload_id]["job_name"],
+                "type": jobs[workload_id].get("type", "trainingJob"),
+                "actionable": jobs[workload_id].get("actionable", True),
+                "user": jobs[workload_id]["user"],
+                "workspace": jobs[workload_id].get("workspace", ""),
+                "total_gpu": jobs[workload_id]["total_gpu"],
+                "placements": jobs[workload_id]["placements"],
             }
-            for job_id in suggestion["jobs"]
+            for workload_id in suggestion["workloads"]
         ]
     free_nodes = sum(_fits(node, target, set()) for node in nodes.values())
     fragmented = [
@@ -518,25 +599,43 @@ def build_report(
             "allocated_gpu": node["allocated_gpu"],
             "total_gpu": node["total_gpu"],
             "free_gpu": node["total_gpu"] - node["allocated_gpu"],
-            "jobs": [
+            "workloads": [
                 {
-                    "job_id": job_id,
-                    "job_name": jobs[job_id]["job_name"],
-                    "user": jobs[job_id]["user"],
-                    **node["jobs"][job_id],
+                    "workload_id": workload_id,
+                    "workload_name": jobs[workload_id]["job_name"],
+                    "type": jobs[workload_id].get("type", "trainingJob"),
+                    "actionable": jobs[workload_id].get("actionable", True),
+                    "user": jobs[workload_id]["user"],
+                    "workspace": jobs[workload_id].get("workspace", ""),
+                    **node["jobs"][workload_id],
                 }
-                for job_id in sorted(node["jobs"])
+                for workload_id in sorted(node["jobs"])
             ],
+            "unattributed": node.get("unattributed", {}),
+            "attribution_excess": node.get("attribution_excess", {}),
             "metrics": node.get("metrics", {}),
         }
         for name, node in sorted(nodes.items())
-        if node["jobs"] and node["allocated_gpu"] < node["total_gpu"]
+        if (
+            0 < node["allocated_gpu"] < node["total_gpu"]
+            or (
+                node["allocated_gpu"] < node["total_gpu"]
+                and not _fits(node, target, set())
+                and (
+                    (target.cpus is not None and node["allocated_cpu"] > 0)
+                    or (target.memory_gib is not None and node["allocated_memory_gib"] > 0)
+                )
+            )
+        )
     ]
     full_nodes = sum(
-        bool(node["jobs"]) and node["total_gpu"] > 0
-        and node["allocated_gpu"] >= node["total_gpu"]
+        node["total_gpu"] > 0 and node["allocated_gpu"] >= node["total_gpu"]
         for node in nodes.values()
     )
+    type_counts: dict[str, int] = {}
+    for workload in jobs.values():
+        kind = str(workload.get("type", "unknown"))
+        type_counts[kind] = type_counts.get(kind, 0) + 1
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -556,7 +655,8 @@ def build_report(
             "currently_schedulable_nodes": free_nodes,
             "fragmented_nodes": len(fragmented),
             "full_nodes": full_nodes,
-            "running_jobs": len(jobs),
+            "running_workloads": len(jobs),
+            "workload_counts": dict(sorted(type_counts.items())),
         },
         "analysis": {
             "needs_repacking": free_nodes < target.nodes,
@@ -603,12 +703,12 @@ def render_text(report: dict[str, Any]) -> str:
     ]
     lines.extend(f"Warning: {warning}" for warning in report.get("warnings", []))
     if not report["analysis"]["needs_repacking"]:
-        lines.append("Result: enough nodes are already schedulable; no job coordination is needed.")
+        lines.append("Result: enough nodes are already schedulable; no workload coordination is needed.")
         return "\n".join(lines) + "\n"
     if not report["suggestions"]:
         lines.append("Result: no eligible candidate suggestion satisfies the target.")
         return "\n".join(lines) + "\n"
-    labels = {"min-gpu": "coordinated GPU", "min-jobs": "jobs", "min-users": "users"}
+    labels = {"min-gpu": "coordinated GPU", "min-workloads": "workloads", "min-users": "users"}
     for index, suggestion in enumerate(report["suggestions"], 1):
         display_strategy = suggestion.get("display_strategy", suggestion["strategy"])
         if suggestion["rank"] == 1:
@@ -619,7 +719,7 @@ def render_text(report: dict[str, Any]) -> str:
             [
                 "",
                 f"Plan {index} ({display_strategy} rank {suggestion['rank']}, {qualifier}, {suggestion['optimality']}):",
-                f"  Coordination candidate: {suggestion['gpus']} GPU, {_count_label(suggestion['job_count'], 'job')}, {_count_label(suggestion['users'], 'user')}",
+                f"  Coordination candidate: {suggestion['gpus']} GPU, {_count_label(suggestion['workload_count'], 'workload')}, {_count_label(suggestion['users'], 'user')}",
                 f"  Freed nodes ({len(suggestion['freed_nodes'])}): {', '.join(suggestion['freed_nodes'])}",
             ]
         )
@@ -630,15 +730,18 @@ def render_text(report: dict[str, Any]) -> str:
                 else f"+{delta} {labels[display_strategy]} vs best"
             )
             lines.append(f"  Comparison: {comparison}")
-        for job in suggestion["job_details"]:
-            lines.append(f"  - {job['user']}: {job['job_name']} ({job['total_gpu']} GPU total)")
-            for placement in job["placements"]:
+        for workload in suggestion["workload_details"]:
+            lines.append(
+                f"  - {workload['user']}: {workload['workload_name']} "
+                f"[{workload['type']}] ({workload['total_gpu']} GPU total)"
+            )
+            for placement in workload["placements"]:
                 lines.append(
                     f"      {placement['node']}: {placement.get('gpu', 0)} GPU, "
                     f"{placement.get('cpu', 0)} CPU, "
                     f"{placement.get('memory_gib', 0)} GiB memory"
                 )
-    lines.append("\nRead-only report: no job was stopped or modified.")
+    lines.append("\nRead-only report: no workload was stopped or modified.")
     return "\n".join(lines) + "\n"
 
 
@@ -714,10 +817,16 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
         table.add_column("Free", justify="right", style="green")
         table.add_column("GPU util", justify="right")
         table.add_column("User", overflow="fold")
-        table.add_column("Job", overflow="fold")
-        table.add_column("Job GPU", justify="right")
+        table.add_column("Workload", overflow="fold")
+        table.add_column("GPU", justify="right")
         for fragment in fragments:
-            jobs = fragment.get("jobs") or []
+            jobs = list(fragment.get("workloads") or [])
+            unattributed = fragment.get("unattributed") or {}
+            if any(float(unattributed.get(key, 0)) > 0 for key in ("gpu", "cpu", "memory_gib")):
+                jobs.append({
+                    "user": "-", "workload_name": "unattributed", "type": "unknown",
+                    **unattributed,
+                })
             gpu_util = (fragment.get("metrics") or {}).get("gpu-util")
             for row, item in enumerate(jobs or [{}]):
                 table.add_row(
@@ -725,7 +834,8 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
                     f"{fragment['allocated_gpu']}/{fragment['total_gpu']}" if row == 0 else "",
                     str(fragment["free_gpu"]) if row == 0 else "",
                     ("-" if gpu_util is None else f"{gpu_util:.1f}%") if row == 0 else "",
-                    str(item.get("user", "-")), str(item.get("job_name", "-")),
+                    str(item.get("user", "-")),
+                    f"{item.get('workload_name', '-')} [{item.get('type', 'unknown')}]",
                     str(item.get("gpu", 0)),
                 )
         console.print(table)
@@ -738,10 +848,10 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
         console.print("[bold red]No eligible candidate suggestion satisfies the target.[/]")
         return True
 
-    labels = {"min-gpu": "Coordinated GPU", "min-jobs": "Jobs", "min-users": "Users"}
-    colors = {"min-gpu": "cyan", "min-jobs": "blue", "min-users": "magenta"}
+    labels = {"min-gpu": "Coordinated GPU", "min-workloads": "Workloads", "min-users": "Users"}
+    colors = {"min-gpu": "cyan", "min-workloads": "blue", "min-users": "magenta"}
     plan_index = 0
-    for strategy in ("min-gpu", "min-jobs", "min-users"):
+    for strategy in ("min-gpu", "min-workloads", "min-users"):
         group = [item for item in suggestions if item["strategy"] == strategy]
         if not group:
             continue
@@ -759,7 +869,7 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
             summary_grid.add_column(ratio=1)
             summary_grid.add_row(
                 "Candidate",
-                f"[yellow]{suggestion['gpus']} GPU[/] · {_count_label(suggestion['job_count'], 'job')} · {_count_label(suggestion['users'], 'user')} · {len(suggestion['freed_nodes'])} nodes releasable",
+                f"[yellow]{suggestion['gpus']} GPU[/] · {_count_label(suggestion['workload_count'], 'workload')} · {_count_label(suggestion['users'], 'user')} · {len(suggestion['freed_nodes'])} nodes releasable",
             )
             if suggestion["rank"] > 1:
                 delta = suggestion["delta_from_best"]
@@ -769,21 +879,25 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
 
             jobs_table = Table(box=box.SIMPLE, expand=True, header_style=f"bold {color}")
             jobs_table.add_column("User", overflow="fold")
-            jobs_table.add_column("Job", overflow="fold", ratio=2)
+            jobs_table.add_column("Workload", overflow="fold", ratio=2)
+            jobs_table.add_column("Type", overflow="fold")
             jobs_table.add_column("Total GPU", justify="right")
-            for job in suggestion["job_details"]:
-                jobs_table.add_row(str(job["user"]), str(job["job_name"]), str(job["total_gpu"]))
+            for workload in suggestion["workload_details"]:
+                jobs_table.add_row(
+                    str(workload["user"]), str(workload["workload_name"]),
+                    str(workload["type"]), str(workload["total_gpu"]),
+                )
 
             placement_table = Table(box=box.SIMPLE, expand=True, header_style="bold green")
-            placement_table.add_column("Job", overflow="fold")
+            placement_table.add_column("Workload", overflow="fold")
             placement_table.add_column("Node", overflow="fold", ratio=2)
             placement_table.add_column("GPU", justify="right")
             placement_table.add_column("CPU", justify="right")
             placement_table.add_column("Memory GiB", justify="right")
-            for job in suggestion["job_details"]:
-                for placement in job["placements"]:
+            for workload in suggestion["workload_details"]:
+                for placement in workload["placements"]:
                     placement_table.add_row(
-                        str(job["job_name"]), str(placement["node"]),
+                        str(workload["workload_name"]), str(placement["node"]),
                         str(placement.get("gpu", 0)), str(placement.get("cpu", 0)),
                         str(placement.get("memory_gib", 0)),
                     )
@@ -792,7 +906,7 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
                 title=f"[bold {color}]Plan {plan_index} · Rank {suggestion['rank']} · {qualifier} · {suggestion['optimality']}[/]",
                 border_style=color,
             ))
-    console.print(Panel("[bold green]Read-only report:[/] no job was stopped or modified.", border_style="green"))
+    console.print(Panel("[bold green]Read-only report:[/] no workload was stopped or modified.", border_style="green"))
     return True
 
 
@@ -812,15 +926,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minutes", type=int, default=5, help="Prometheus lookback only (default: 5)")
     parser.add_argument(
         "--strategy",
-        choices=("all", "min-gpu", "min-jobs", "min-users"),
+        choices=("all", "min-gpu", "min-workloads", "min-jobs", "min-users"),
         default="all",
-        help="Suggestion strategy to display (default: all)",
+        help="Suggestion strategy; min-jobs is a deprecated alias for min-workloads",
     )
     parser.add_argument(
         "--candidate-scope",
         choices=("fragmented", "full", "all"),
         default="fragmented",
-        help="Nodes whose jobs may be coordination candidates (default: fragmented)",
+        help="Nodes whose workloads may be coordination candidates (default: fragmented)",
     )
     parser.add_argument(
         "--alternatives", type=int, default=3,
@@ -845,6 +959,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--alternatives must be between 1 and 10")
     if args.search_seconds <= 0:
         parser.error("--search-seconds must be positive")
+    if args.strategy == "min-jobs":
+        args.strategy = "min-workloads"
     return args
 
 
@@ -869,12 +985,12 @@ def main() -> int:
                 cluster, str(queue), str(cluster_name), minutes=args.minutes
             )
         except RuntimeError as error:
-            if "running job set changed" not in str(error):
+            if "queue node allocation changed" not in str(error):
                 raise
             snapshot, warnings = collect_snapshot(
                 cluster, str(queue), str(cluster_name), minutes=args.minutes
             )
-            warnings.append("Job set changed during the first collection; report uses one retry")
+            warnings.append("Node allocation changed during the first collection; report uses one retry")
         target = Target(args.nodes, args.gpus_per_node, args.cpus_per_node, args.memory_per_node_gib)
         report = build_report(
             snapshot, target, str(queue), str(cluster_name), args.candidate_scope,

@@ -34,6 +34,18 @@ def job(job_id, user, gpu):
             "total_gpu": gpu, "placements": []}
 
 
+def raw_node(name, gpu=0, cpu=0, memory=0):
+    return {
+        "id": f"/clusters/c/nodes/{name}", "name": name,
+        "host_ip": "10.0.0.1", "state": "RUNNING",
+        "summary_data": [
+            {"resource_type": "DEVICE", "allocated": gpu, "total": 8, "unit": "device"},
+            {"resource_type": "CPU", "allocated": cpu, "total": 112, "unit": "core"},
+            {"resource_type": "MEMORY", "allocated": memory, "total": 1920, "unit": "GiB"},
+        ],
+    }
+
+
 class StepClock:
     def __init__(self, step=0.01):
         self.value = 0.0
@@ -65,7 +77,7 @@ class QueuePlanTests(unittest.TestCase):
         self.assertEqual(optimality, "exact")
         by_strategy = {plan["strategy"]: plan for plan in plans if plan["rank"] == 1}
         self.assertEqual(by_strategy["min-gpu"]["gpus"], 3)
-        self.assertEqual(by_strategy["min-jobs"]["job_count"], 2)
+        self.assertEqual(by_strategy["min-workloads"]["workload_count"], 2)
         self.assertEqual(by_strategy["min-users"]["users"], 1)
 
     def test_existing_free_nodes_need_no_pause(self):
@@ -84,6 +96,19 @@ class QueuePlanTests(unittest.TestCase):
                   "gpu": {"gpu": 1, "cpu": 16}}, cpu=96)}
         plans, _ = m.solve_candidates(nodes, jobs, m.Target(1, 8, cpus=64))
         self.assertEqual(set(plans[0]["jobs"]), {"cpu", "gpu"})
+
+    def test_cpu_only_node_can_be_repacked_for_cpu_target(self):
+        m = self.module
+        jobs = {"cpu": job("cpu", "u", 0)}
+        jobs["cpu"]["placements"] = [{"node": "n1", "gpu": 0, "cpu": 80}]
+        nodes = {"n1": node("n1", 0, {"cpu": {"gpu": 0, "cpu": 80}}, cpu=80)}
+        plans, _ = m.solve_candidates(nodes, jobs, m.Target(1, 8, cpus=64))
+        self.assertTrue(plans)
+        self.assertEqual(plans[0]["jobs"], ["cpu"])
+        report = m.build_report(
+            {"nodes": nodes, "jobs": jobs}, m.Target(1, 8, cpus=64), "q", "c"
+        )
+        self.assertEqual(report["fragmented_nodes"][0]["node"], "n1")
 
     def test_multinode_job_cost_counts_whole_job(self):
         m = self.module
@@ -157,6 +182,64 @@ class QueuePlanTests(unittest.TestCase):
         self.assertNotIn("stop_training_job", source)
         self.assertNotIn("clusterx stop", source)
 
+    def test_resource_parser_supports_cpu_and_memory_units(self):
+        m = self.module
+        self.assertEqual(m._resource_number("500m"), 0.5)
+        self.assertEqual(m._resource_number("240.0GiB", memory=True), 240)
+        self.assertEqual(m._resource_number("1024MiB", memory=True), 1)
+
+    def test_development_workloads_are_collected_and_releasable(self):
+        m = self.module
+        raw = raw_node("fragmented-node", gpu=2, cpu=56, memory=960)
+        pods = []
+        for index, gpu in enumerate((0, 1, 0, 1)):
+            resource = {"cpu": "14.0", "memory": "240.0GiB"}
+            if gpu:
+                resource["accelerate_device_count"] = gpu
+            pods.append({
+                "name": f"dev-{index}-0", "resource": resource,
+                "workload": {"uid": f"aid-{index}", "name": f"dev-{index}", "type": "aid"},
+                "workspace": {"name": "workspace"},
+                "ownership": {"creator_name": f"user-{index}"},
+            })
+
+        class Client:
+            subscription = "s"
+            resource_group = "r"
+            region = "z"
+
+            def list_queue_nodes(self, **kwargs):
+                return {"nodes": [raw], "total_size": 1}
+
+            def _make_management_request(self, *args, **kwargs):
+                return {"pods": pods, "total_size": len(pods)}
+
+        class Cluster:
+            client = Client()
+
+            def stats_prometheus(self, **kwargs):
+                raise RuntimeError("not available")
+
+        snapshot, warnings = m.collect_snapshot(Cluster(), "queue", "cluster")
+        self.assertEqual(len(snapshot["jobs"]), 4)
+        self.assertEqual(sum(w["total_gpu"] for w in snapshot["jobs"].values()), 2)
+        report = m.build_report(snapshot, m.Target(1, 8), "queue", "cluster")
+        fragment = report["fragmented_nodes"][0]
+        self.assertEqual(fragment["node"], "fragmented-node")
+        self.assertEqual(len(fragment["workloads"]), 4)
+        self.assertEqual({w["type"] for w in fragment["workloads"]}, {"aid"})
+        self.assertTrue(report["suggestions"])
+        self.assertEqual(report["summary"]["workload_counts"], {"aid": 4})
+        self.assertTrue(warnings)
+
+    def test_unattributed_load_is_visible_but_not_releasable(self):
+        m = self.module
+        nodes = {"n1": node("n1", 2, {})}
+        nodes["n1"]["unattributed"] = {"gpu": 2, "cpu": 0, "memory_gib": 0}
+        report = m.build_report({"nodes": nodes, "jobs": {}}, m.Target(1, 8), "q", "c")
+        self.assertEqual(report["fragmented_nodes"][0]["unattributed"]["gpu"], 2)
+        self.assertEqual(report["suggestions"], [])
+
     def test_gpus_per_node_defaults_to_eight(self):
         with mock.patch.object(sys, "argv", ["queue_plan.py", "--nodes", "2"]):
             args = self.module.parse_args()
@@ -197,7 +280,7 @@ class QueuePlanTests(unittest.TestCase):
         by_strategy = {plan["strategy"]: plan for plan in plans if plan["rank"] == 1}
         self.assertEqual(set(by_strategy["min-gpu"]["jobs"]), set("abcd"))
         self.assertEqual(by_strategy["min-gpu"]["gpus"], 4)
-        self.assertEqual(by_strategy["min-jobs"]["jobs"], ["multi"])
+        self.assertEqual(by_strategy["min-workloads"]["jobs"], ["multi"])
         self.assertEqual(by_strategy["min-users"]["jobs"], ["multi"])
 
     def test_report_exposes_candidate_scope_and_full_node_count(self):
@@ -221,7 +304,7 @@ class QueuePlanTests(unittest.TestCase):
         self.assertEqual(len(plans), 3)
         self.assertEqual(
             [plan["strategy"] for plan in plans],
-            ["min-gpu", "min-jobs", "min-users"],
+            ["min-gpu", "min-workloads", "min-users"],
         )
         self.assertTrue(all(plan["rank"] == 1 for plan in plans))
         self.assertTrue(all("also_strategies" not in plan for plan in plans))
@@ -230,7 +313,7 @@ class QueuePlanTests(unittest.TestCase):
         report = m.build_report(
             {"nodes": nodes, "jobs": jobs}, m.Target(2, 8), "queue", "cluster")
         text = m.render_text(report)
-        self.assertIn("min-jobs rank 1", text)
+        self.assertIn("min-workloads rank 1", text)
 
     def test_rich_report_contains_tables_and_color(self):
         from rich.console import Console
@@ -251,7 +334,7 @@ class QueuePlanTests(unittest.TestCase):
         self.assertIn("Fragmented nodes", output)
         self.assertIn("Search diagnostics", output)
         self.assertIn("Plan 1", output)
-        self.assertIn("min-jobs · Jobs", output)
+        self.assertIn("min-workloads · Workloads", output)
         self.assertIn("Memory GiB", output)
         self.assertIn("\x1b[", output)
 
@@ -292,7 +375,7 @@ class QueuePlanTests(unittest.TestCase):
             sys, "argv", ["queue_plan.py", "--nodes", "2", "--strategy", "min-jobs"]
         ):
             args = self.module.parse_args()
-        self.assertEqual(args.strategy, "min-jobs")
+        self.assertEqual(args.strategy, "min-workloads")
 
     def test_alternatives_returns_ranked_plans_per_strategy(self):
         m = self.module
@@ -305,7 +388,7 @@ class QueuePlanTests(unittest.TestCase):
             nodes, jobs, m.Target(1, 8), alternatives=3
         )
         self.assertEqual(optimality, "exact")
-        for strategy in ("min-gpu", "min-jobs", "min-users"):
+        for strategy in ("min-gpu", "min-workloads", "min-users"):
             group = [plan for plan in plans if plan["strategy"] == strategy]
             self.assertEqual([plan["rank"] for plan in group], [1, 2, 3])
             self.assertEqual(group[0]["delta_from_best"], 0)
