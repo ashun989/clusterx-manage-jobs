@@ -96,6 +96,10 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_p
 默认使用 `--search-seconds 10`，根据当前机器实测状态吞吐在精确搜索和启发式
 搜索之间切换。
 
+汇总表默认显示 `--minutes` 窗口内每个 workload 的 GPU 算力、显存平均利用率
+及单卡范围。需要定位具体卡时增加 `--show-gpu-details`；JSON 始终保留逐卡
+数据。利用率仅供观察，不参与释放方案排序。
+
 队列分析使用与网页“查看负载”相同的节点 Pod 数据，可显示并归因开发机
 （`aid`）、训练任务（`trainingJob`）及其他工作负载。`--strategy min-workloads`
 用于最小化需要协调的工作负载数量；旧参数 `--strategy min-jobs` 保留为兼容别名。

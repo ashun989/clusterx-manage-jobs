@@ -112,6 +112,11 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   strategy. Use `--search-seconds S` (default `10`) to bound only local solving;
   exact search calibrates itself from measured state throughput and reserves
   time for a heuristic fallback.
+  The default workload summaries include the last `--minutes` window's per-GPU
+  compute and memory utilization average plus the per-card range. Add
+  `--show-gpu-details` to expand a deduplicated per-card terminal table; JSON
+  always includes per-card telemetry. Utilization is observational and must
+  never affect capacity attribution, candidate ranking, or stopping decisions.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
   pagination, filter, and ordering options when the result set is large. Treat
   Worker fields as runtime observations and do not infer missing nodes.

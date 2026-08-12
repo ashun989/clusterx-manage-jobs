@@ -213,6 +213,9 @@ class SmokeProjectTests(unittest.TestCase):
             "cross-strategy deduplication",
             "min-workloads",
             "unattributed",
+            "--show-gpu-details",
+            '"gpu_utilization"',
+            "reported_gpu_count",
         ):
             self.assertIn(marker, cli_reference)
         self.assertNotIn("plus deduplicated candidates", cli_reference)

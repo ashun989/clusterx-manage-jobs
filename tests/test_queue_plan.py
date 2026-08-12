@@ -3,6 +3,7 @@ import io
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
+import types
 import unittest
 from unittest import mock
 
@@ -45,6 +46,29 @@ def raw_node(name, gpu=0, cpu=0, memory=0):
             {"resource_type": "MEMORY", "allocated": memory, "total": 1920, "unit": "GiB"},
         ],
     }
+
+
+def gpu_metric(workload_id, hostname, pod, gpu_uuid, device, metric, value):
+    return {
+        "metric": {
+            "label_resource_compute_sensecore_cn_workload_uid": workload_id,
+            "Hostname": hostname,
+            "exported_pod": pod,
+            "UUID": gpu_uuid,
+            "gpu": str(device),
+            "queue_plan_metric": metric,
+        },
+        "value": [0, str(value)],
+    }
+
+
+def fake_prometheus_stats(cache_path, *query_tokens):
+    module = types.ModuleType("clusterx.launcher.ssp.prometheus_stats")
+    module.build_cache_path = mock.Mock(return_value=cache_path)
+    module.get_query_token = mock.Mock(
+        side_effect=[{"query_token": token} for token in query_tokens]
+    )
+    return module
 
 
 class StepClock:
@@ -272,6 +296,213 @@ class QueuePlanTests(unittest.TestCase):
         snapshot, _ = m.collect_snapshot(Cluster(), "queue", "cluster")
         self.assertEqual(snapshot["jobs"]["shared"]["create_time"], "2026-08-12T10:00:00Z")
 
+    def test_gpu_utilization_query_combines_compute_and_memory_once(self):
+        m = self.module
+
+        class Client:
+            def __init__(self):
+                self.queries = []
+
+            def query_prometheus(self, token, query):
+                self.queries.append((token, query))
+                return {"status": "success", "data": {"result": [{"metric": {}}]}}
+
+        class Cluster:
+            cfg = {
+                "workspace": 'workspace"escaped', "subscription": "subscription",
+                "resource_group": "group", "region": "region",
+            }
+            client = Client()
+
+        prometheus_stats = fake_prometheus_stats(Path("/tmp/token.json"), "token")
+        with mock.patch.dict(sys.modules, {
+            "clusterx.launcher.ssp.prometheus_stats": prometheus_stats,
+        }):
+            rows = m._query_gpu_utilization(
+                Cluster(), "queue", "cluster", 17
+            )
+        self.assertEqual(rows, [{"metric": {}}])
+        self.assertEqual(len(Cluster.client.queries), 1)
+        token, query = Cluster.client.queries[0]
+        self.assertEqual(token, "token")
+        self.assertIn("gpu_util", query)
+        self.assertIn("gpu_memory_used", query)
+        self.assertIn("gpu_memory_total", query)
+        self.assertEqual(query.count("[17m]"), 3)
+        self.assertIn('workspace\\"escaped', query)
+        self.assertIn(m.GPU_COMPUTE_UTIL, query)
+        self.assertIn(m.GPU_MEMORY_UTIL, query)
+
+    def test_gpu_utilization_query_refreshes_rejected_token_once(self):
+        m = self.module
+
+        class AuthError(Exception):
+            response = type("Response", (), {"status_code": 403})()
+
+        class Client:
+            def __init__(self):
+                self.tokens = []
+
+            def query_prometheus(self, token, query):
+                self.tokens.append(token)
+                if len(self.tokens) == 1:
+                    raise AuthError("expired")
+                return {"status": "success", "data": {"result": []}}
+
+        class Cluster:
+            cfg = {
+                "workspace": "workspace", "subscription": "subscription",
+                "resource_group": "group", "region": "region",
+            }
+            client = Client()
+
+        prometheus_stats = fake_prometheus_stats(
+            Path("/tmp/nonexistent-queue-plan-token.json"), "old", "new"
+        )
+        with mock.patch.dict(sys.modules, {
+            "clusterx.launcher.ssp.prometheus_stats": prometheus_stats,
+        }):
+            self.assertEqual(
+                m._query_gpu_utilization(Cluster(), "queue", "cluster", 5), []
+            )
+        self.assertEqual(Cluster.client.tokens, ["old", "new"])
+        self.assertEqual(prometheus_stats.get_query_token.call_count, 2)
+
+    def test_gpu_utilization_maps_aid_and_training_jobs_per_card(self):
+        m = self.module
+        jobs = {
+            "train": job("train", "trainer", 2),
+            "aid": job("aid", "developer", 1),
+        }
+        jobs["train"].update({
+            "type": "trainingJob",
+            "placements": [{"node": "n1", "pod": "train-0", "gpu": 2}],
+        })
+        jobs["aid"].update({
+            "type": "aid",
+            "placements": [{"node": "n2", "pod": "aid-0", "gpu": 1}],
+        })
+        series = []
+        for workload_id, hostname, pod, uuid, device, compute, memory in (
+            ("train", "host-a", "train-0", "gpu-a", 0, 10, 40),
+            ("train", "host-a", "train-0", "gpu-b", 1, 30, 60),
+            ("aid", "host-b", "aid-0", "gpu-c", 3, 80, 25),
+        ):
+            series.extend([
+                gpu_metric(workload_id, hostname, pod, uuid, device,
+                           m.GPU_COMPUTE_UTIL, compute),
+                gpu_metric(workload_id, hostname, pod, uuid, device,
+                           m.GPU_MEMORY_UTIL, memory),
+            ])
+        warnings = m._attach_gpu_utilization(
+            jobs, series, {"host-a": "n1", "host-b": "n2"}
+        )
+        self.assertEqual(warnings, [])
+        self.assertEqual(jobs["train"]["gpu_utilization"], {
+            "allocated_gpu_count": 2,
+            "reported_gpu_count": 2,
+            "gpu_compute_util_avg_pct": 20.0,
+            "gpu_compute_util_min_pct": 10.0,
+            "gpu_compute_util_max_pct": 30.0,
+            "gpu_memory_util_avg_pct": 50.0,
+            "gpu_memory_util_min_pct": 40.0,
+            "gpu_memory_util_max_pct": 60.0,
+        })
+        self.assertEqual(jobs["aid"]["gpu_utilization"]["reported_gpu_count"], 1)
+        self.assertEqual(jobs["aid"]["gpus"][0]["device_index"], "3")
+
+        nodes = {
+            "n1": node("n1", 2, {"train": {"gpu": 2}}),
+            "n2": node("n2", 1, {"aid": {"gpu": 1}}),
+        }
+        report = m.build_report(
+            {"nodes": nodes, "jobs": jobs, "gpu_utilization_window_minutes": 17},
+            m.Target(1, 8), "queue", "cluster",
+        )
+        self.assertEqual(report["gpu_utilization"]["window_minutes"], 17)
+        self.assertEqual(report["gpu_utilization"]["allocated_gpu_count"], 3)
+        self.assertEqual(report["gpu_utilization"]["reported_gpu_count"], 3)
+        self.assertEqual(len(report["gpu_utilization"]["workloads"]), 2)
+        fragment = next(
+            item for item in report["fragmented_nodes"] if item["node"] == "n1"
+        )
+        self.assertEqual(
+            fragment["workloads"][0]["gpu_utilization"]["gpu_compute_util_avg_pct"],
+            20.0,
+        )
+        plain = m.render_text(report)
+        self.assertIn("GPU telemetry: 3/3", plain)
+        self.assertIn("GPU util 20.0% [10.0–30.0]", plain)
+        self.assertNotIn("Per-GPU utilization (17m):", plain)
+        detailed = m.render_text(report, show_gpu_details=True)
+        self.assertIn("Per-GPU utilization (17m):", detailed)
+        self.assertIn("n1 GPU 0", detailed)
+
+        from rich.console import Console
+        stream = io.StringIO()
+        console = Console(file=stream, force_terminal=False, width=180)
+        self.assertTrue(m.render_rich(
+            report, console=console, show_gpu_details=True
+        ))
+        output = stream.getvalue()
+        self.assertIn("Per-GPU utilization · 17m", output)
+        self.assertIn("Node util", output)
+        self.assertIn("GPU mem", output)
+
+    def test_gpu_utilization_ignores_stale_and_reports_partial_coverage(self):
+        m = self.module
+        jobs = {"current": job("current", "user", 2)}
+        jobs["current"]["placements"] = [
+            {"node": "n1", "pod": "current-0", "gpu": 2}
+        ]
+        series = [
+            gpu_metric("current", "host-a", "current-0", "gpu-a", 0,
+                       m.GPU_COMPUTE_UTIL, 15),
+            gpu_metric("current", "host-a", "current-0", "gpu-a", 0,
+                       m.GPU_MEMORY_UTIL, 35),
+            gpu_metric("old", "host-a", "old-0", "gpu-b", 1,
+                       m.GPU_COMPUTE_UTIL, 99),
+            gpu_metric("old", "host-a", "old-0", "gpu-b", 1,
+                       m.GPU_MEMORY_UTIL, 99),
+            gpu_metric("current", "host-a", "current-0", "gpu-c", 2,
+                       m.GPU_COMPUTE_UTIL, "NaN"),
+        ]
+        warnings = m._attach_gpu_utilization(jobs, series, {"host-a": "n1"})
+        self.assertEqual(len(jobs["current"]["gpus"]), 1)
+        self.assertEqual(jobs["current"]["gpu_utilization"]["reported_gpu_count"], 1)
+        self.assertTrue(any("1/2" in warning for warning in warnings))
+
+    def test_gpu_utilization_discards_ambiguous_pod_series(self):
+        m = self.module
+        jobs = {"current": job("current", "user", 1)}
+        jobs["current"]["placements"] = [
+            {"node": "n1", "pod": "current-0", "gpu": 1}
+        ]
+        series = []
+        for uuid, device in (("gpu-a", 0), ("gpu-b", 1)):
+            series.extend([
+                gpu_metric("current", "host-a", "current-0", uuid, device,
+                           m.GPU_COMPUTE_UTIL, 10),
+                gpu_metric("current", "host-a", "current-0", uuid, device,
+                           m.GPU_MEMORY_UTIL, 20),
+            ])
+        warnings = m._attach_gpu_utilization(jobs, series, {"host-a": "n1"})
+        self.assertEqual(jobs["current"]["gpus"], [])
+        self.assertTrue(any("ambiguous" in warning for warning in warnings))
+        self.assertTrue(any("0/1" in warning for warning in warnings))
+
+    def test_gpu_sort_key_orders_numeric_device_indexes(self):
+        m = self.module
+        rows = [
+            {"node": "n1", "device_index": "10", "gpu_uuid": "b"},
+            {"node": "n1", "device_index": "2", "gpu_uuid": "a"},
+            {"node": "n0", "device_index": "7", "gpu_uuid": "c"},
+        ]
+        self.assertEqual(
+            [(row["node"], row["device_index"]) for row in sorted(rows, key=m._gpu_sort_key)],
+            [("n0", "7"), ("n1", "2"), ("n1", "10")],
+        )
+
     def test_runtime_is_consistent_across_json_text_and_rich_summaries(self):
         from rich.console import Console
 
@@ -346,6 +577,7 @@ class QueuePlanTests(unittest.TestCase):
         self.assertEqual(args.candidate_scope, "fragmented")
         self.assertEqual(args.alternatives, 3)
         self.assertEqual(args.search_seconds, 10.0)
+        self.assertFalse(args.show_gpu_details)
 
     def test_full_scope_includes_shared_full_node(self):
         m = self.module
