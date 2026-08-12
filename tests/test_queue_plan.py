@@ -659,10 +659,12 @@ class QueuePlanTests(unittest.TestCase):
         self.assertIn("Search diagnostics", output)
         self.assertIn("Plan 1", output)
         self.assertIn("min-workloads · Workloads", output)
-        self.assertIn("Memory GiB", output)
+        self.assertIn("Utilization", output)
+        self.assertNotIn("Placements", output)
+        self.assertNotIn("n1: 1 GPU · 8 CPU · 32 GiB", output)
         self.assertIn("\x1b[", output)
 
-    def test_rich_report_keeps_all_placements_at_common_widths(self):
+    def test_rich_report_folds_workloads_without_showing_placements(self):
         from rich.console import Console
 
         m = self.module
@@ -686,6 +688,10 @@ class QueuePlanTests(unittest.TestCase):
             console = Console(file=stream, force_terminal=False, width=width)
             self.assertTrue(m.render_rich(report, console=console))
             output = stream.getvalue()
+            self.assertIn("Workload", output)
+            self.assertIn("Utilization", output)
+            self.assertNotIn("Placements", output)
+            self.assertNotIn("node-00: 8 GPU · 16 CPU · 64 GiB", output)
             for i in range(24):
                 self.assertIn(f"node-{i:02d}", output)
             self.assertNotIn("…", output)

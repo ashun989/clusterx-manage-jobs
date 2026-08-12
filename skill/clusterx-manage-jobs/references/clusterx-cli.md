@@ -180,10 +180,11 @@ report; use `--json` for JSON stdout or `--out <path>` to save schema version 2.
 The default terminal report uses Rich colored tables when `requirements.txt`
 is installed and falls back to plain text otherwise.
 The Rich report is grouped into queue overview, search diagnostics, fragmented
-node occupancy, and per-strategy plan cards. Each plan keeps separate workload
-and placement tables; node, workload, type, CPU, memory, and GPU details are folded to the
-terminal width rather than truncated. Plain-text fallback carries the same
-search, workload, freed-node, and placement information.
+node occupancy, and per-strategy plan cards. Each plan combines workload
+identity, runtime, utilization, and total GPU allocation in one compact table.
+Per-node placements remain available in JSON and the plain-text fallback but
+are omitted from Rich plan cards to leave more width for workload summaries.
+All displayed details are folded to the terminal width rather than truncated.
 Complete options:
 
 | Option | Meaning | Default / validation |
