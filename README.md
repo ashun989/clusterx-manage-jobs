@@ -86,11 +86,15 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_p
 
 ```bash
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_plan.py" \
-  --cwd /path/to/project --nodes 2 --strategy all
+  --cwd /path/to/project --nodes 2 --strategy all \
+  --alternatives 3 --search-seconds 10
 ```
 
 默认只分析碎片节点；如需让已占满 GPU 的节点任务也参与只读候选优化，增加
 `--candidate-scope all`。也可使用 `--candidate-scope full` 仅比较完整节点。
+每个策略默认返回最多 3 个方案；可用 `--alternatives 1..10` 调整。求解阶段
+默认使用 `--search-seconds 10`，根据当前机器实测状态吞吐在精确搜索和启发式
+搜索之间切换。
 
 首次配置后，保护配置文件权限：
 

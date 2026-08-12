@@ -103,6 +103,10 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   for backward-compatible fragment cleanup. A `full` node is any occupied node
   whose allocated GPUs equal or exceed its GPU capacity, including nodes shared
   by multiple jobs.
+  Use `--alternatives N` (default `3`, range `1` to `10`) for ranked plans per
+  strategy. Use `--search-seconds S` (default `10`) to bound only local solving;
+  exact search calibrates itself from measured state throughput and reserves
+  time for a heuristic fallback.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
   pagination, filter, and ordering options when the result set is large. Treat
   Worker fields as runtime observations and do not infer missing nodes.

@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any, Callable, Iterable
 
 from config_resolver import inspect_config, resolve_config
@@ -20,7 +21,7 @@ from redact import redact
 
 
 SCHEMA_VERSION = 1
-MAX_EXACT_STATES = 100_000
+CALIBRATION_STATES = 1_000
 
 
 @dataclass(frozen=True)
@@ -174,7 +175,9 @@ def _heuristic_candidates(
     jobs: dict[str, dict[str, Any]],
     target: Target,
     keys: list[Callable[[dict[str, Any]], tuple[Any, ...]]],
-    max_states: int,
+    deadline: float,
+    clock: Callable[[], float],
+    stats: dict[str, Any],
 ) -> list[dict[str, Any]]:
     eligible_jobs = sorted({job_id for name in eligible for job_id in nodes[name]["jobs"]})
     seeds = [{job_id} for job_id in eligible_jobs]
@@ -185,12 +188,11 @@ def _heuristic_candidates(
     unique_additions = list({tuple(sorted(item)): item for item in additions if item}.values())
     results: list[dict[str, Any]] = []
     for key in keys:
-        examined = 0
         for seed in unique_seeds.values():
             selected = set(seed)
-            while examined < max_states:
+            while clock() < deadline:
                 candidate = _candidate_from_jobs(selected, nodes, jobs, target)
-                examined += 1
+                stats["states_examined"] += 1
                 if len(candidate["freed_nodes"]) >= target.nodes:
                     results.append(_prune_candidate(candidate, nodes, jobs, target, key))
                     break
@@ -200,19 +202,50 @@ def _heuristic_candidates(
                     if expanded == selected:
                         continue
                     proposal = _candidate_from_jobs(expanded, nodes, jobs, target)
-                    examined += 1
+                    stats["states_examined"] += 1
                     gained = len(proposal["freed_nodes"]) - len(candidate["freed_nodes"])
                     expansions.append((-gained, key(proposal), tuple(sorted(expanded)), expanded))
-                    if examined >= max_states:
+                    if clock() >= deadline:
                         break
                 if not expansions:
                     break
                 selected = set(min(expansions)[3])
-            if examined >= max_states:
+            if clock() >= deadline:
                 break
-        if examined >= max_states:
+        if clock() >= deadline:
             break
     return results
+
+
+def _rank_candidates(
+    candidates: Iterable[dict[str, Any]],
+    strategy: str,
+    key: Callable[[dict[str, Any]], tuple[Any, ...]],
+    alternatives: int,
+    optimality: str,
+) -> list[dict[str, Any]]:
+    unique: dict[tuple[str, ...], dict[str, Any]] = {}
+    for candidate in candidates:
+        signature = tuple(candidate["jobs"])
+        previous = unique.get(signature)
+        if previous is None or key(candidate) < key(previous):
+            unique[signature] = candidate
+    ranked = sorted(unique.values(), key=key)[:alternatives]
+    if not ranked:
+        return []
+    primary_field = {"min-gpu": "gpus", "min-jobs": "job_count", "min-users": "users"}[strategy]
+    best_cost = int(ranked[0][primary_field])
+    return [
+        {
+            "strategy": strategy,
+            "rank": rank,
+            "primary_cost": int(candidate[primary_field]),
+            "delta_from_best": int(candidate[primary_field]) - best_cost,
+            "optimality": optimality,
+            **candidate,
+        }
+        for rank, candidate in enumerate(ranked, 1)
+    ]
 
 
 def solve_candidates(
@@ -221,10 +254,23 @@ def solve_candidates(
     target: Target,
     *,
     candidate_scope: str = "fragmented",
-    max_states: int = MAX_EXACT_STATES,
+    alternatives: int = 3,
+    search_seconds: float = 10.0,
+    clock: Callable[[], float] = time.monotonic,
+    search_stats: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
+    started = clock()
+    stats = search_stats if search_stats is not None else {}
+    stats.update({
+        "search_budget_seconds": search_seconds,
+        "search_elapsed_seconds": 0.0,
+        "estimated_states": 0,
+        "states_examined": 0,
+        "switch_reason": "not-needed",
+    })
     already = [name for name, node in nodes.items() if _fits(node, target, set())]
     if len(already) >= target.nodes:
+        stats["search_elapsed_seconds"] = round(clock() - started, 6)
         return [], "not-needed"
 
     fragmented = [
@@ -249,58 +295,76 @@ def solve_candidates(
     eligible = [name for name in eligible if name not in already]
     need = target.nodes - len(already)
     if need <= 0 or not eligible:
+        stats["switch_reason"] = "no-eligible-candidates"
+        stats["search_elapsed_seconds"] = round(clock() - started, 6)
         return [], "exact"
 
     max_group_size = min(need, len(eligible))
     state_count = sum(
         math.comb(len(eligible), size) for size in range(1, max_group_size + 1)
     )
+    stats["estimated_states"] = state_count
 
     keys: list[tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]]]] = [
         ("min-gpu", lambda c: (c["gpus"], c["job_count"], c["users"], c["jobs"])),
         ("min-jobs", lambda c: (c["job_count"], c["gpus"], c["users"], c["jobs"])),
         ("min-users", lambda c: (c["users"], c["gpus"], c["job_count"], c["jobs"])),
     ]
-    candidates: list[dict[str, Any]] = []
-    optimality = "exact" if state_count <= max_states else "heuristic"
-    if optimality == "exact":
-        examined = 0
-        for size in range(1, max_group_size + 1):
-            for group in itertools.combinations(eligible, size):
-                examined += 1
-                if examined > max_states:
-                    optimality = "heuristic"
-                    candidates.clear()
+    top_by_strategy: dict[str, dict[tuple[str, ...], dict[str, Any]]] = {
+        strategy: {} for strategy, _ in keys
+    }
+
+    def retain(candidate: dict[str, Any]) -> None:
+        for strategy, key in keys:
+            pruned = _prune_candidate(candidate, nodes, jobs, target, key)
+            bucket = top_by_strategy[strategy]
+            bucket[tuple(pruned["jobs"])] = pruned
+            if len(bucket) > alternatives:
+                keep = sorted(bucket.values(), key=key)[:alternatives]
+                top_by_strategy[strategy] = {tuple(item["jobs"]): item for item in keep}
+
+    exact_deadline = started + search_seconds * 0.8
+    final_deadline = started + search_seconds
+    optimality = "exact"
+    stats["switch_reason"] = "completed"
+    stop_exact = False
+    for size in range(1, max_group_size + 1):
+        for group in itertools.combinations(eligible, size):
+            candidate = _candidate(group, nodes, jobs, target)
+            stats["states_examined"] += 1
+            if len(candidate["freed_nodes"]) >= target.nodes:
+                retain(candidate)
+            elapsed = clock() - started
+            if state_count > CALIBRATION_STATES and stats["states_examined"] == CALIBRATION_STATES:
+                throughput = stats["states_examined"] / max(elapsed, 1e-9)
+                estimated_total = state_count / throughput
+                if estimated_total > search_seconds * 0.8:
+                    stats["switch_reason"] = "estimated-time"
+                    stop_exact = True
                     break
-                candidate = _candidate(group, nodes, jobs, target)
-                if len(candidate["freed_nodes"]) >= target.nodes:
-                    candidates.append(candidate)
-            if optimality == "heuristic":
+            if clock() >= exact_deadline:
+                stats["switch_reason"] = "exact-deadline"
+                stop_exact = True
                 break
+        if stop_exact:
+            break
+    if stop_exact:
+        optimality = "heuristic"
+        for candidate in _heuristic_candidates(
+            eligible, nodes, jobs, target, [key for _, key in keys],
+            final_deadline, clock, stats,
+        ):
+            retain(candidate)
 
-    if optimality == "heuristic":
-        candidates = _heuristic_candidates(
-            eligible, nodes, jobs, target, [key for _, key in keys], max_states
-        )
-
-    if not candidates:
+    if not any(top_by_strategy.values()):
+        stats["search_elapsed_seconds"] = round(clock() - started, 6)
         return [], optimality
     selected: list[dict[str, Any]] = []
-    seen: dict[tuple[str, ...], dict[str, Any]] = {}
     for strategy, key in keys:
-        best = min(candidates, key=key)
-        signature = tuple(best["jobs"])
-        if signature in seen:
-            seen[signature]["also_strategies"].append(strategy)
-            continue
-        plan = {
-            "strategy": strategy,
-            "also_strategies": [],
-            "optimality": optimality,
-            **best,
-        }
-        seen[signature] = plan
-        selected.append(plan)
+        selected.extend(_rank_candidates(
+            top_by_strategy[strategy].values(), strategy, key, alternatives, optimality
+        ))
+    stats["search_elapsed_seconds"] = round(clock() - started, 6)
     return selected, optimality
 
 
@@ -424,11 +488,17 @@ def collect_snapshot(
 def build_report(
     snapshot: dict[str, Any], target: Target, queue: str, cluster_name: str,
     candidate_scope: str = "fragmented",
+    alternatives: int = 3,
+    search_seconds: float = 10.0,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     nodes = snapshot["nodes"]
     jobs = snapshot["jobs"]
+    search_stats: dict[str, Any] = {}
     suggestions, optimality = solve_candidates(
-        nodes, jobs, target, candidate_scope=candidate_scope
+        nodes, jobs, target, candidate_scope=candidate_scope,
+        alternatives=alternatives, search_seconds=search_seconds,
+        clock=clock, search_stats=search_stats,
     )
     for suggestion in suggestions:
         suggestion["job_details"] = [
@@ -497,6 +567,7 @@ def build_report(
             ),
             "optimality": optimality,
             "candidate_scope": candidate_scope,
+            **search_stats,
         },
         "fragmented_nodes": fragmented,
         "suggestions": suggestions,
@@ -531,26 +602,25 @@ def render_text(report: dict[str, Any]) -> str:
     labels = {"min-gpu": "coordinated GPU", "min-jobs": "jobs", "min-users": "users"}
     for index, suggestion in enumerate(report["suggestions"], 1):
         display_strategy = suggestion.get("display_strategy", suggestion["strategy"])
-        equivalent = [
-            strategy for strategy in (
-                suggestion["strategy"], *suggestion.get("also_strategies", [])
-            )
-            if strategy != display_strategy
-        ]
-        qualifier = "minimum" if suggestion["optimality"] == "exact" else "lowest found"
+        if suggestion["rank"] == 1:
+            qualifier = "minimum" if suggestion["optimality"] == "exact" else "lowest found"
+        else:
+            qualifier = "alternative" if suggestion["optimality"] == "exact" else "alternative found"
         lines.extend(
             [
                 "",
-                f"Plan {index} ({qualifier} {labels[display_strategy]}, {suggestion['optimality']}):",
+                f"Plan {index} ({display_strategy} rank {suggestion['rank']}, {qualifier}, {suggestion['optimality']}):",
                 f"  Coordination candidate: {suggestion['gpus']} GPU, {_count_label(suggestion['job_count'], 'job')}, {_count_label(suggestion['users'], 'user')}",
                 f"  Freed nodes: {', '.join(suggestion['freed_nodes'][:target['nodes']])}",
             ]
         )
-        if equivalent:
-            lines.append(
-                ("  Also optimal for: " if suggestion["optimality"] == "exact" else "  Also best found for: ")
-                + ", ".join(labels[strategy] for strategy in equivalent)
+        if suggestion["rank"] > 1:
+            delta = suggestion["delta_from_best"]
+            comparison = (
+                f"tied on {labels[display_strategy]}" if delta == 0
+                else f"+{delta} {labels[display_strategy]} vs best"
             )
+            lines.append(f"  Comparison: {comparison}")
         for job in suggestion["job_details"]:
             lines.append(f"  - {job['user']}: {job['job_name']} ({job['total_gpu']} GPU total)")
     lines.append("\nRead-only report: no job was stopped or modified.")
@@ -643,15 +713,12 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
     }
     for index, suggestion in enumerate(suggestions, 1):
         display_strategy = suggestion.get("display_strategy", suggestion["strategy"])
-        equivalent = [
-            strategy for strategy in (
-                suggestion["strategy"], *suggestion.get("also_strategies", [])
-            )
-            if strategy != display_strategy
-        ]
-        qualifier = "Minimum" if suggestion["optimality"] == "exact" else "Lowest found"
+        if suggestion["rank"] == 1:
+            qualifier = "Minimum" if suggestion["optimality"] == "exact" else "Lowest found"
+        else:
+            qualifier = "Alternative" if suggestion["optimality"] == "exact" else "Alternative found"
         plan = Table(
-            title=f"Plan {index} · {qualifier} {labels[display_strategy]} · {suggestion['optimality']}",
+            title=f"Plan {index} · {display_strategy} rank {suggestion['rank']} · {qualifier} · {suggestion['optimality']}",
             box=box.SIMPLE_HEAVY,
             header_style="bold blue",
         )
@@ -675,11 +742,14 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
             + ", ".join(suggestion["freed_nodes"][:target["nodes"]])
             + "[/]"
         )
-        if equivalent:
+        if suggestion["rank"] > 1:
+            delta = suggestion["delta_from_best"]
+            comparison = (
+                f"Tied on {labels[display_strategy]}" if delta == 0
+                else f"+{delta} {labels[display_strategy]} versus best"
+            )
             console.print(
-                ("[bold]Also optimal for:[/] [magenta]" if suggestion["optimality"] == "exact" else "[bold]Also best found for:[/] [magenta]")
-                + ", ".join(labels[strategy] for strategy in equivalent)
-                + "[/]"
+                f"[bold]Comparison:[/] [magenta]{comparison}[/]"
             )
         console.print(plan)
     console.print("[dim]Read-only report: no job was stopped or modified.[/]")
@@ -712,6 +782,14 @@ def parse_args() -> argparse.Namespace:
         default="fragmented",
         help="Nodes whose jobs may be coordination candidates (default: fragmented)",
     )
+    parser.add_argument(
+        "--alternatives", type=int, default=3,
+        help="Maximum plans per strategy, including rank 1 (default: 3)",
+    )
+    parser.add_argument(
+        "--search-seconds", type=float, default=10.0,
+        help="Local solver time budget in seconds (default: 10)",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json", help="Print schema-versioned JSON instead of a terminal report")
     parser.add_argument("--out", type=Path, help="Also save the complete JSON report to this path")
     args = parser.parse_args()
@@ -723,6 +801,10 @@ def parse_args() -> argparse.Namespace:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.minutes <= 0:
         parser.error("--minutes must be positive")
+    if not 1 <= args.alternatives <= 10:
+        parser.error("--alternatives must be between 1 and 10")
+    if args.search_seconds <= 0:
+        parser.error("--search-seconds must be positive")
     return args
 
 
@@ -755,20 +837,16 @@ def main() -> int:
             warnings.append("Job set changed during the first collection; report uses one retry")
         target = Target(args.nodes, args.gpus_per_node, args.cpus_per_node, args.memory_per_node_gib)
         report = build_report(
-            snapshot, target, str(queue), str(cluster_name), args.candidate_scope
+            snapshot, target, str(queue), str(cluster_name), args.candidate_scope,
+            args.alternatives, args.search_seconds,
         )
         report["warnings"].extend(warnings)
         report["analysis"]["requested_strategy"] = args.strategy
         if args.strategy != "all":
-            filtered = []
-            for suggestion in report["suggestions"]:
-                if (
-                    args.strategy == suggestion["strategy"]
-                    or args.strategy in suggestion.get("also_strategies", [])
-                ):
-                    suggestion["display_strategy"] = args.strategy
-                    filtered.append(suggestion)
-            report["suggestions"] = filtered
+            report["suggestions"] = [
+                suggestion for suggestion in report["suggestions"]
+                if args.strategy == suggestion["strategy"]
+            ]
         payload = json.dumps(report, ensure_ascii=False, indent=2)
         if args.out:
             args.out.parent.mkdir(parents=True, exist_ok=True)

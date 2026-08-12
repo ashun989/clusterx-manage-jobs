@@ -191,11 +191,24 @@ optimization. A full node may be occupied by one job or shared by multiple
 jobs. Jobs remain indivisible: selecting any placement charges the job's total
 GPU allocation and evaluates every node released by that job.
 
+`--alternatives` defaults to `3` and accepts `1` through `10`. It returns that
+many ranked, distinct job sets per selected strategy; `--strategy all` groups
+results independently under `min-gpu`, `min-jobs`, and `min-users` without
+cross-strategy deduplication. Exact ranks use `Minimum` / `Alternative`;
+heuristic ranks use `Lowest found` / `Alternative found`.
+
+`--search-seconds` defaults to `10` and bounds local solving only. Exact search
+measures the first 1,000 states, estimates whether enumeration fits within 80%
+of the budget, and reserves 20% for heuristic fallback. JSON analysis reports
+the budget, elapsed time, estimated and examined states, and switch reason.
+
 Only jobs placed on nodes selected by `--candidate-scope` are candidates.
-Exact search is used up to 100,000 states. Larger searches use deterministic,
-multi-start job/node heuristics followed by redundant-job pruning. Exact plans
+Exact search is controlled by the measured time budget rather than a fixed
+state threshold. Larger searches use deterministic, multi-start job/node
+heuristics followed by redundant-job pruning. Exact plans
 are labeled `Minimum`; heuristic plans are labeled `Lowest found` and do not
-claim global optimality. JSON uses `also_strategies` for deduplicated plans.
+claim global optimality. Suggestions expose `strategy`, `rank`, `primary_cost`,
+and `delta_from_best`.
 Missing Worker mappings, truncated node inventory, allocation mismatches, or a
 changing job snapshot cause a safe failure rather than a partial suggestion.
 If a node's allocated GPU count is greater than the GPU resources attributable
