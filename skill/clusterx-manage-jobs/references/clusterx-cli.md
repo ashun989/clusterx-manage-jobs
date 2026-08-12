@@ -1,6 +1,7 @@
 # Clusterx CLI reference
 
-Source snapshot: Feishu document revision 43, Clusterx 2026.7.28.
+Source snapshot: Feishu document revision 53, Clusterx 2026.8.11. Options noted
+below were cross-checked against the installed CLI's dynamic help.
 
 This is a sanitized operational reference. Prefer the installed CLI's dynamic
 help when it differs from this snapshot.
@@ -93,15 +94,15 @@ The positional argument is the command to run. Snapshot options include:
 | `--exclude` | Comma-separated hostnames to exclude | unset |
 | `--priority` | `1=NORMAL`, `2=HIGH`, `3=HIGHEST` | `1` |
 | `--retry` | Maximum retries | no retry |
-| `--no-env` | Do not inherit current environment | `False` |
-| `--environment`, `-e` | Environment setting | unset |
+| `--no-env` | Do not export the current shell environment | `False` |
+| `--environment`, `-e` | SSP job-spec `KEY=VALUE`; repeat for multiple values | unset |
 | `--queue`, `--partition`, `-q`, `-p` | Queue | config/default |
 | `--cluster-name`, `-C` | Override configured cluster | config |
 | `--machine-type` | Machine specification | unset |
 | `--enable-privileged` | Host-root privileged mode | `False` |
 | `--sp-block` | A3 logical supernode chip count | unset |
 | `--image` | Container image URL | config/default |
-| `--mount` | Volume mount specification | config/default |
+| `--mount`, `--empty-mount` | Repeatable volume mount specification | config/default |
 | `--shm-size-gib` | Shared memory in GiB | `64` |
 | `--storage-ak-id` | Storage access-key ID | config/default |
 | `--storage-ak-secret` | Storage access-key secret | config/default |
@@ -121,7 +122,7 @@ clusterx run \
 Do not copy example credentials, signed URLs, queue names, images, resource IDs,
 or endpoints from documentation into a real job.
 
-Clusterx 2026.7.28 converts the positional command tokens to a string with
+Clusterx 2026.8.11 converts the positional command tokens to a string with
 `" ".join(cmd)` before writing its shared launch script. It does not shell-quote
 individual arguments, so command-string forms such as `bash -c`, `bash -lc`,
 `sh -c`, and their absolute-path equivalents lose the command boundary and can
@@ -144,7 +145,7 @@ option merely appearing in dynamic help.
 
 ## SSP Prometheus statistics
 
-Clusterx 2026.7.28 adds queue- and job-level SSP metrics:
+Clusterx 2026.8.11 provides queue- and job-level SSP metrics:
 
 ```bash
 clusterx stats --scope queue --metric all
@@ -214,9 +215,31 @@ Before `run`, verify:
 Expected result includes a job schema/status such as `Queuing`. Record the job
 ID for later `get-job`, `log`, `stats`, or `stop` operations.
 
+## Job details and Workers
+
+For SSP runtime Worker discovery:
+
+```bash
+clusterx get-job <job-id> --workers
+```
+
+Live help provides `--page-size` (1-100), `--page-token`, `--skip`,
+`--request-id`, `--filter`, and `--order-by`. Worker filters support `name`,
+`phase`, `pod_ip`, and `host_ip`; ordering supports `name` or `phase` with an
+optional `asc`/`desc`. Keep pagination tokens and infrastructure addresses out
+of reports unless the user needs them.
+
+## Stopping jobs
+
+Clusterx 2026.8.11 can stop one job by ID or select multiple jobs using regex,
+group, user, partition, and status filters. Batch stopping is destructive: use
+filters only when the user explicitly requests that exact batch scope, list and
+show the resolved matches first, and do not broaden an exact-job request into a
+filter. Use the CLI's confirmation option as required by live help.
+
 ## SSP log limitation
 
-With Clusterx 2026.7.28, `clusterx log <job-id>` fetches
+With Clusterx 2026.8.11, `clusterx log <job-id>` fetches
 `trainingJobs/<job-id>/pods` before reading pod logs. This endpoint may return
 HTTP 404 both while an SSP job is `Running` and after `get-job` reports
 `Succeeded`, even when the workload flushes stdout. Keeping the task alive does
@@ -246,3 +269,4 @@ preview.
 | 2026.6.12 | Added SSP GPU utilization, memory, power, and temperature stats |
 | 2026.7.1 | Added JSON volume mounts for PV_AOSS and other complex volumes |
 | 2026.7.28 | Added queue/job SSP metrics and A3 `--sp-block` scheduling |
+| 2026.8.11 | Added SSP Worker listing/filtering, repeatable mounts, explicit environment semantics, and batch stop filters |

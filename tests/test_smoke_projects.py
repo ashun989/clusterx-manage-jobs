@@ -132,7 +132,7 @@ class SmokeProjectTests(unittest.TestCase):
             self.assertIn("Succeeded", text)
             self.assertIn("HTTP 404", text)
 
-    def test_skill_documents_2026_7_28_features(self):
+    def test_skill_documents_2026_8_11_features(self):
         skill_root = ROOT / "skill" / "clusterx-manage-jobs"
         skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
         reference_text = (
@@ -140,8 +140,11 @@ class SmokeProjectTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         combined = f"{skill_text}\n{reference_text}"
 
-        self.assertIn("2026.7.28", combined)
+        self.assertIn("2026.8.11", combined)
         self.assertIn("--sp-block", reference_text)
+        self.assertIn("--workers", reference_text)
+        self.assertIn("--page-size", reference_text)
+        self.assertIn("batch `stop`", skill_text)
         self.assertIn("--scope queue", combined)
         self.assertIn("--scope job", combined)
         self.assertIn("--job <exact-job-name>", combined)
