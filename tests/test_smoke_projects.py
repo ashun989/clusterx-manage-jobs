@@ -203,14 +203,16 @@ class SmokeProjectTests(unittest.TestCase):
             "Exit status `0`",
             "`1` means live analysis failed",
             "`2` means arguments",
-            "allocated GPU count",
-            "not claimed as fully releasable",
+            "capacity source of truth",
+            "never claimed as releasable",
             "Complete options:",
             "default can display up to nine plan cards",
-            '"schema_version": 1',
+            '"schema_version": 2',
             "`estimated-time`",
             "`exact-deadline`",
             "cross-strategy deduplication",
+            "min-workloads",
+            "unattributed",
         ):
             self.assertIn(marker, cli_reference)
         self.assertNotIn("plus deduplicated candidates", cli_reference)
