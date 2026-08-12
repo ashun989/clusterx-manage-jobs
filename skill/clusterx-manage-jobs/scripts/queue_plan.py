@@ -1309,25 +1309,43 @@ def render_rich(
                 summary_grid.add_row("Comparison", f"[magenta]{comparison}[/]")
             summary_grid.add_row("Freed nodes", "[green]" + ", ".join(suggestion["freed_nodes"]) + "[/]")
 
-            workloads_table = Table(
-                box=box.SIMPLE, expand=True, header_style=f"bold {color}"
-            )
-            workloads_table.add_column("Workload", overflow="fold", ratio=3)
-            workloads_table.add_column("Utilization", overflow="fold", ratio=2)
+            jobs_table = Table(box=box.SIMPLE, expand=True, header_style=f"bold {color}")
+            jobs_table.add_column("User", overflow="fold")
+            jobs_table.add_column("Workload", overflow="fold", ratio=2)
+            jobs_table.add_column("Type", overflow="fold")
+            jobs_table.add_column("Running", justify="right")
+            jobs_table.add_column("GPU util", justify="right")
+            jobs_table.add_column("GPU mem", justify="right")
+            jobs_table.add_column("Total GPU", justify="right")
             for workload in suggestion["workload_details"]:
-                workloads_table.add_row(
-                    f"{workload['user']} · {workload['workload_name']}\n"
-                    f"{workload['type']} · Running "
-                    f"{_format_runtime(workload.get('runtime_seconds'))} · "
-                    f"{workload['total_gpu']} GPU",
-                    "GPU " + _format_utilization(
+                jobs_table.add_row(
+                    str(workload["user"]), str(workload["workload_name"]),
+                    str(workload["type"]),
+                    _format_runtime(workload.get("runtime_seconds")),
+                    _format_utilization(
                         workload.get("gpu_utilization"), "gpu_compute_util"
-                    ) + "\nMem " + _format_utilization(
+                    ),
+                    _format_utilization(
                         workload.get("gpu_utilization"), "gpu_memory_util"
                     ),
+                    str(workload["total_gpu"]),
                 )
+
+            placement_table = Table(box=box.SIMPLE, expand=True, header_style="bold green")
+            placement_table.add_column("Workload", overflow="fold")
+            placement_table.add_column("Node", overflow="fold", ratio=2)
+            placement_table.add_column("GPU", justify="right")
+            placement_table.add_column("CPU", justify="right")
+            placement_table.add_column("Memory GiB", justify="right")
+            for workload in suggestion["workload_details"]:
+                for placement in workload["placements"]:
+                    placement_table.add_row(
+                        str(workload["workload_name"]), str(placement["node"]),
+                        str(placement.get("gpu", 0)), str(placement.get("cpu", 0)),
+                        str(placement.get("memory_gib", 0)),
+                    )
             console.print(Panel(
-                Group(summary_grid, workloads_table),
+                Group(summary_grid, jobs_table, placement_table),
                 title=f"[bold {color}]Plan {plan_index} · Rank {suggestion['rank']} · {qualifier} · {suggestion['optimality']}[/]",
                 border_style=color,
             ))
