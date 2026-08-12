@@ -23,6 +23,8 @@ from redact import redact
 
 SCHEMA_VERSION = 2
 CALIBRATION_STATES = 1_000
+GPU_COMPUTE_UTIL = "gpu-compute-util"
+GPU_MEMORY_UTIL = "gpu-memory-util"
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,71 @@ def _format_runtime(seconds: Any) -> str:
         return f"{total_hours}h {minutes:02d}m"
     days, hours = divmod(total_hours, 24)
     return f"{days}d {hours:02d}h"
+
+
+def _percent_summary(values: Iterable[Any]) -> dict[str, float | None]:
+    finite = [float(value) for value in values
+              if isinstance(value, (int, float)) and not isinstance(value, bool)
+              and math.isfinite(float(value))]
+    if not finite:
+        return {"avg_pct": None, "min_pct": None, "max_pct": None}
+    return {
+        "avg_pct": round(sum(finite) / len(finite), 2),
+        "min_pct": round(min(finite), 2),
+        "max_pct": round(max(finite), 2),
+    }
+
+
+def _summarize_gpu_utilization(
+    gpus: Iterable[dict[str, Any]], allocated_gpu_count: int | float
+) -> dict[str, Any]:
+    rows = list(gpus)
+    compute = _percent_summary(row.get("gpu_compute_util_pct") for row in rows)
+    memory = _percent_summary(row.get("gpu_memory_util_pct") for row in rows)
+    return {
+        "allocated_gpu_count": int(allocated_gpu_count),
+        "reported_gpu_count": sum(
+            row.get("gpu_compute_util_pct") is not None
+            and row.get("gpu_memory_util_pct") is not None
+            for row in rows
+        ),
+        "gpu_compute_util_avg_pct": compute["avg_pct"],
+        "gpu_compute_util_min_pct": compute["min_pct"],
+        "gpu_compute_util_max_pct": compute["max_pct"],
+        "gpu_memory_util_avg_pct": memory["avg_pct"],
+        "gpu_memory_util_min_pct": memory["min_pct"],
+        "gpu_memory_util_max_pct": memory["max_pct"],
+    }
+
+
+def _format_utilization(summary: dict[str, Any] | None, prefix: str) -> str:
+    summary = summary or {}
+    average = summary.get(f"{prefix}_avg_pct")
+    minimum = summary.get(f"{prefix}_min_pct")
+    maximum = summary.get(f"{prefix}_max_pct")
+    if average is None:
+        return "-"
+    result = f"{float(average):.1f}%"
+    if minimum is not None and maximum is not None and not math.isclose(
+        float(minimum), float(maximum), abs_tol=0.05
+    ):
+        result += f" [{float(minimum):.1f}–{float(maximum):.1f}]"
+    allocated = int(summary.get("allocated_gpu_count") or 0)
+    reported = int(summary.get("reported_gpu_count") or 0)
+    if allocated and reported < allocated:
+        result += f" ({reported}/{allocated})"
+    return result
+
+
+def _gpu_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    device = str(row.get("device_index") or "")
+    device_key: tuple[int, int | str] = (
+        (0, int(device)) if device.isdigit() else (1, device)
+    )
+    return (
+        str(row.get("node") or ""), device_key,
+        str(row.get("gpu_uuid") or ""),
+    )
 
 
 def _resource_map(node: dict[str, Any]) -> dict[str, tuple[int, int]]:
@@ -488,6 +555,157 @@ def _list_node_pods(cluster: Any, cluster_name: str, queue: str, node_id: str) -
         skip += len(page)
 
 
+def _escape_prometheus_label(value: Any) -> str:
+    return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _query_gpu_utilization(
+    cluster: Any, queue: str, cluster_name: str, minutes: int
+) -> list[dict[str, Any]]:
+    """Fetch per-GPU compute and memory utilization in one Prometheus request."""
+    from clusterx.launcher.ssp.prometheus_stats import build_cache_path, get_query_token
+
+    labels = {
+        "label_resource_compute_sensecore_cn_workspace_name": cluster.cfg["workspace"],
+        "label_resource_compute_sensecore_cn_cluster_name": cluster_name,
+        "label_resource_compute_sensecore_cn_queue_name": queue,
+    }
+    selector = ",".join(
+        f'{key}="{_escape_prometheus_label(value)}"' for key, value in labels.items()
+    )
+    compute = (
+        "label_replace("
+        f"avg_over_time(lepton__ssp__gpu_util{{{selector}}}[{minutes}m]),"
+        f'"queue_plan_metric","{GPU_COMPUTE_UTIL}","__name__",".*")'
+    )
+    memory = (
+        "label_replace(100 * "
+        f"avg_over_time(lepton__ssp__gpu_memory_used__MiB{{{selector}}}[{minutes}m]) / "
+        f"avg_over_time(lepton__ssp__gpu_memory_total__MiB{{{selector}}}[{minutes}m]),"
+        f'"queue_plan_metric","{GPU_MEMORY_UTIL}","__name__",".*")'
+    )
+    cache_path = build_cache_path(
+        cluster.cfg["subscription"], cluster.cfg["resource_group"],
+        cluster.cfg["region"], cluster.cfg["workspace"],
+    )
+    token = get_query_token(cluster.client, cache_path=cache_path)["query_token"]
+    promql = f"({compute}) or ({memory})"
+    try:
+        response = cluster.client.query_prometheus(token, promql)
+    except Exception as error:
+        status_code = getattr(getattr(error, "response", None), "status_code", None)
+        if status_code not in (401, 403):
+            raise
+        cache_path.unlink(missing_ok=True)
+        token = get_query_token(cluster.client, cache_path=cache_path)["query_token"]
+        response = cluster.client.query_prometheus(token, promql)
+    if response.get("status") not in (None, "success"):
+        error = response.get("error") or response.get("errorType") or response
+        raise RuntimeError(f"Prometheus utilization query failed: {error}")
+    return list((response.get("data") or {}).get("result") or [])
+
+
+def _attach_gpu_utilization(
+    jobs: dict[str, dict[str, Any]],
+    series: Iterable[dict[str, Any]],
+    hostname_to_node: dict[str, str],
+) -> list[str]:
+    """Attach current, unambiguous per-GPU telemetry to workload records."""
+    expected: dict[tuple[str, str, str], int] = {}
+    for workload_id, workload in jobs.items():
+        workload["gpus"] = []
+        for placement in workload.get("placements") or []:
+            gpu_count = int(placement.get("gpu") or 0)
+            if gpu_count <= 0:
+                continue
+            key = (
+                workload_id,
+                str(placement.get("node") or ""),
+                str(placement.get("pod") or ""),
+            )
+            expected[key] = expected.get(key, 0) + gpu_count
+
+    records: dict[tuple[tuple[str, str, str], str], dict[str, Any]] = {}
+    ambiguous_pods: set[tuple[str, str, str]] = set()
+    for item in series:
+        labels = item.get("metric") or {}
+        workload_id = str(
+            labels.get("label_resource_compute_sensecore_cn_workload_uid") or ""
+        )
+        node_name = hostname_to_node.get(str(labels.get("Hostname") or ""), "")
+        pod_name = str(labels.get("exported_pod") or labels.get("pod") or "")
+        pod_key = (workload_id, node_name, pod_name)
+        if pod_key not in expected:
+            continue
+        gpu_uuid = str(labels.get("UUID") or "")
+        device_index = str(labels.get("gpu") or labels.get("device") or "")
+        identity = gpu_uuid or f"device:{device_index}"
+        if not identity or identity == "device:":
+            ambiguous_pods.add(pod_key)
+            continue
+        metric_name = str(labels.get("queue_plan_metric") or "")
+        field = {
+            GPU_COMPUTE_UTIL: "gpu_compute_util_pct",
+            GPU_MEMORY_UTIL: "gpu_memory_util_pct",
+        }.get(metric_name)
+        if field is None:
+            continue
+        value = item.get("value") or []
+        try:
+            parsed = float(value[1])
+        except (IndexError, TypeError, ValueError):
+            parsed = math.nan
+        if not math.isfinite(parsed):
+            continue
+        record = records.setdefault((pod_key, identity), {
+            "node": node_name,
+            "pod": pod_name,
+            "device_index": device_index or None,
+            "gpu_uuid": gpu_uuid or None,
+            "gpu_compute_util_pct": None,
+            "gpu_memory_util_pct": None,
+        })
+        if record[field] is not None:
+            ambiguous_pods.add(pod_key)
+            continue
+        record[field] = round(parsed, 2)
+
+    by_pod: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for (pod_key, _), record in records.items():
+        by_pod.setdefault(pod_key, []).append(record)
+    for pod_key, rows in by_pod.items():
+        if len(rows) > expected[pod_key]:
+            ambiguous_pods.add(pod_key)
+
+    for pod_key, rows in by_pod.items():
+        if pod_key in ambiguous_pods:
+            continue
+        workload_id = pod_key[0]
+        jobs[workload_id]["gpus"].extend(sorted(rows, key=_gpu_sort_key))
+
+    allocated = 0
+    reported = 0
+    for workload in jobs.values():
+        workload["gpus"].sort(key=_gpu_sort_key)
+        allocated_count = int(workload.get("total_gpu") or 0)
+        summary = _summarize_gpu_utilization(workload["gpus"], allocated_count)
+        workload["gpu_utilization"] = summary
+        allocated += allocated_count
+        reported += int(summary["reported_gpu_count"])
+
+    warnings: list[str] = []
+    if ambiguous_pods:
+        warnings.append(
+            f"Per-GPU utilization ignored {len(ambiguous_pods)} ambiguous Pod mappings"
+        )
+    if reported < allocated:
+        warnings.append(
+            f"Per-GPU utilization covered {reported}/{allocated} attributed GPUs; "
+            "missing values are shown as unavailable"
+        )
+    return warnings
+
+
 def collect_snapshot(
     cluster: Any, queue: str, cluster_name: str, *, minutes: int = 5
 ) -> tuple[dict[str, Any], list[str]]:
@@ -587,6 +805,22 @@ def collect_snapshot(
     for item in jobs.values():
         item["total_gpu"] = _clean_number(sum(float(p["gpu"]) for p in item["placements"]))
 
+    if any(float(item["total_gpu"]) > 0 for item in jobs.values()):
+        try:
+            utilization_series = _query_gpu_utilization(
+                cluster, queue, cluster_name, minutes
+            )
+            warnings.extend(_attach_gpu_utilization(
+                jobs, utilization_series, hostname_to_node
+            ))
+        except Exception:
+            _attach_gpu_utilization(jobs, [], hostname_to_node)
+            warnings.append(
+                "Per-GPU utilization was unavailable; allocation analysis is still valid"
+            )
+    else:
+        _attach_gpu_utilization(jobs, [], hostname_to_node)
+
     try:
         metric_rows = cluster.stats_prometheus(
             scope="queue", metric="all", minutes=minutes, queue=queue,
@@ -603,7 +837,11 @@ def collect_snapshot(
     except Exception:
         warnings.append("Prometheus node metrics were unavailable; allocation analysis is still valid")
 
-    return {"nodes": nodes, "jobs": jobs}, warnings
+    return {
+        "nodes": nodes,
+        "jobs": jobs,
+        "gpu_utilization_window_minutes": minutes,
+    }, warnings
 
 
 def build_report(
@@ -620,6 +858,15 @@ def build_report(
     if generated_at.tzinfo is None:
         generated_at = generated_at.replace(tzinfo=timezone.utc)
     generated_at = generated_at.astimezone(timezone.utc)
+    utilization_window = int(snapshot.get("gpu_utilization_window_minutes") or 5)
+    for workload in jobs.values():
+        workload.setdefault("gpus", [])
+        workload.setdefault(
+            "gpu_utilization",
+            _summarize_gpu_utilization(
+                workload["gpus"], workload.get("total_gpu") or 0
+            ),
+        )
     search_stats: dict[str, Any] = {}
     suggestions, optimality = solve_candidates(
         nodes, jobs, target, candidate_scope=candidate_scope,
@@ -638,6 +885,7 @@ def build_report(
                 "user": jobs[workload_id]["user"],
                 "workspace": jobs[workload_id].get("workspace", ""),
                 **_runtime_fields(jobs[workload_id], generated_at),
+                "gpu_utilization": jobs[workload_id]["gpu_utilization"],
                 "total_gpu": jobs[workload_id]["total_gpu"],
                 "placements": jobs[workload_id]["placements"],
             }
@@ -659,6 +907,13 @@ def build_report(
                     "user": jobs[workload_id]["user"],
                     "workspace": jobs[workload_id].get("workspace", ""),
                     **_runtime_fields(jobs[workload_id], generated_at),
+                    "gpu_utilization": _summarize_gpu_utilization(
+                        [
+                            gpu for gpu in jobs[workload_id]["gpus"]
+                            if gpu.get("node") == name
+                        ],
+                        node["jobs"][workload_id].get("gpu") or 0,
+                    ),
                     **node["jobs"][workload_id],
                 }
                 for workload_id in sorted(node["jobs"])
@@ -688,6 +943,28 @@ def build_report(
     for workload in jobs.values():
         kind = str(workload.get("type", "unknown"))
         type_counts[kind] = type_counts.get(kind, 0) + 1
+    utilization_workloads = [
+        {
+            "workload_id": workload_id,
+            "workload_name": jobs[workload_id]["job_name"],
+            "type": jobs[workload_id].get("type", "unknown"),
+            "user": jobs[workload_id]["user"],
+            "workspace": jobs[workload_id].get("workspace", ""),
+            **_runtime_fields(jobs[workload_id], generated_at),
+            "total_gpu": jobs[workload_id]["total_gpu"],
+            **jobs[workload_id]["gpu_utilization"],
+            "gpus": jobs[workload_id]["gpus"],
+        }
+        for workload_id in sorted(
+            jobs,
+            key=lambda item: (
+                str(jobs[item].get("user") or ""),
+                str(jobs[item].get("job_name") or ""),
+                item,
+            ),
+        )
+        if float(jobs[workload_id].get("total_gpu") or 0) > 0
+    ]
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
@@ -721,13 +998,23 @@ def build_report(
             "candidate_scope": candidate_scope,
             **search_stats,
         },
+        "gpu_utilization": {
+            "window_minutes": utilization_window,
+            "allocated_gpu_count": sum(
+                int(item["allocated_gpu_count"]) for item in utilization_workloads
+            ),
+            "reported_gpu_count": sum(
+                int(item["reported_gpu_count"]) for item in utilization_workloads
+            ),
+            "workloads": utilization_workloads,
+        },
         "fragmented_nodes": fragmented,
         "suggestions": suggestions,
         "warnings": [],
     }
 
 
-def render_text(report: dict[str, Any]) -> str:
+def render_text(report: dict[str, Any], *, show_gpu_details: bool = False) -> str:
     target = report["target"]
     summary = report["summary"]
     lines = [
@@ -744,6 +1031,12 @@ def render_text(report: dict[str, Any]) -> str:
         ),
         f"Candidate scope: {report['analysis']['candidate_scope']}",
         (
+            "GPU telemetry: "
+            f"{report['gpu_utilization']['reported_gpu_count']}/"
+            f"{report['gpu_utilization']['allocated_gpu_count']} attributed GPUs; "
+            f"window={report['gpu_utilization']['window_minutes']}m"
+        ),
+        (
             "Search: "
             f"{report['analysis']['optimality']}; "
             f"{report['analysis']['search_elapsed_seconds']:.3f}s / "
@@ -754,6 +1047,37 @@ def render_text(report: dict[str, Any]) -> str:
         ),
     ]
     lines.extend(f"Warning: {warning}" for warning in report.get("warnings", []))
+    fragments = report.get("fragmented_nodes") or []
+    if fragments:
+        lines.append("")
+        lines.append("Fragmented workload utilization:")
+        for fragment in fragments:
+            for workload in fragment.get("workloads") or []:
+                utilization = workload.get("gpu_utilization") or {}
+                lines.append(
+                    f"  - {fragment['node']} · {workload['user']}: "
+                    f"{workload['workload_name']} [{workload['type']}] · "
+                    f"GPU util {_format_utilization(utilization, 'gpu_compute_util')} · "
+                    f"GPU mem {_format_utilization(utilization, 'gpu_memory_util')}"
+                )
+    if show_gpu_details:
+        lines.append("")
+        lines.append(
+            f"Per-GPU utilization ({report['gpu_utilization']['window_minutes']}m):"
+        )
+        gpu_rows = 0
+        for workload in report["gpu_utilization"].get("workloads") or []:
+            for gpu in workload.get("gpus") or []:
+                gpu_rows += 1
+                lines.append(
+                    f"  - {workload['user']}: {workload['workload_name']} "
+                    f"[{workload['type']}] · {gpu['node']} GPU "
+                    f"{gpu.get('device_index') or '?'} · "
+                    f"GPU util {_format_utilization({'gpu_compute_util_avg_pct': gpu.get('gpu_compute_util_pct')}, 'gpu_compute_util')} · "
+                    f"GPU mem {_format_utilization({'gpu_memory_util_avg_pct': gpu.get('gpu_memory_util_pct')}, 'gpu_memory_util')}"
+                )
+        if not gpu_rows:
+            lines.append("  No per-GPU telemetry is available.")
     if not report["analysis"]["needs_repacking"]:
         lines.append("Result: enough nodes are already schedulable; no workload coordination is needed.")
         return "\n".join(lines) + "\n"
@@ -783,10 +1107,13 @@ def render_text(report: dict[str, Any]) -> str:
             )
             lines.append(f"  Comparison: {comparison}")
         for workload in suggestion["workload_details"]:
+            utilization = workload.get("gpu_utilization") or {}
             lines.append(
                 f"  - {workload['user']}: {workload['workload_name']} "
                 f"[{workload['type']}] ({workload['total_gpu']} GPU total, "
-                f"running {_format_runtime(workload.get('runtime_seconds'))})"
+                f"running {_format_runtime(workload.get('runtime_seconds'))}, "
+                f"GPU util {_format_utilization(utilization, 'gpu_compute_util')}, "
+                f"GPU mem {_format_utilization(utilization, 'gpu_memory_util')})"
             )
             for placement in workload["placements"]:
                 lines.append(
@@ -798,7 +1125,10 @@ def render_text(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
+def render_rich(
+    report: dict[str, Any], *, console: Any | None = None,
+    show_gpu_details: bool = False,
+) -> bool:
     """Render a colored terminal report; return False when Rich is unavailable."""
     try:
         from rich import box
@@ -837,6 +1167,13 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
         "[bold cyan]Nodes[/]",
         f"{summary['total_nodes']} total · [green]{schedulable} schedulable[/] · [yellow]{summary['fragmented_nodes']} fragmented[/] · {summary['full_nodes']} full",
     )
+    gpu_telemetry = report["gpu_utilization"]
+    overview.add_row(
+        "[bold cyan]Telemetry[/]",
+        f"{gpu_telemetry['reported_gpu_count']}/{gpu_telemetry['allocated_gpu_count']} attributed GPUs",
+        "[bold cyan]Window[/]",
+        f"{gpu_telemetry['window_minutes']}m",
+    )
     console.print(Panel(overview, title="[bold]ClusterX Queue Packing[/]", border_style="cyan"))
     for warning in report.get("warnings", []):
         console.print(f"[bold yellow]Warning:[/] {warning}")
@@ -868,10 +1205,12 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
         table.add_column("Node", style="cyan", overflow="fold")
         table.add_column("GPU", justify="right")
         table.add_column("Free", justify="right", style="green")
-        table.add_column("GPU util", justify="right")
+        table.add_column("Node util", justify="right")
         table.add_column("User", overflow="fold")
         table.add_column("Workload", overflow="fold")
         table.add_column("Running", justify="right")
+        table.add_column("GPU util", justify="right")
+        table.add_column("GPU mem", justify="right")
         table.add_column("GPU", justify="right")
         for fragment in fragments:
             jobs = list(fragment.get("workloads") or [])
@@ -891,9 +1230,47 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
                     str(item.get("user", "-")),
                     f"{item.get('workload_name', '-')} [{item.get('type', 'unknown')}]",
                     _format_runtime(item.get("runtime_seconds")),
+                    _format_utilization(item.get("gpu_utilization"), "gpu_compute_util"),
+                    _format_utilization(item.get("gpu_utilization"), "gpu_memory_util"),
                     str(item.get("gpu", 0)),
                 )
         console.print(table)
+
+    if show_gpu_details:
+        gpu_table = Table(
+            title=f"Per-GPU utilization · {gpu_telemetry['window_minutes']}m",
+            box=box.ROUNDED,
+            header_style="bold cyan",
+            row_styles=("", "dim"),
+        )
+        gpu_table.add_column("User", overflow="fold")
+        gpu_table.add_column("Workload", overflow="fold", ratio=2)
+        gpu_table.add_column("Type", overflow="fold")
+        gpu_table.add_column("Node", overflow="fold")
+        gpu_table.add_column("GPU", justify="right")
+        gpu_table.add_column("GPU util", justify="right")
+        gpu_table.add_column("GPU mem", justify="right")
+        detail_count = 0
+        for workload in gpu_telemetry.get("workloads") or []:
+            for gpu in workload.get("gpus") or []:
+                detail_count += 1
+                gpu_table.add_row(
+                    str(workload["user"]), str(workload["workload_name"]),
+                    str(workload["type"]), str(gpu["node"]),
+                    str(gpu.get("device_index") or "?"),
+                    _format_utilization(
+                        {"gpu_compute_util_avg_pct": gpu.get("gpu_compute_util_pct")},
+                        "gpu_compute_util",
+                    ),
+                    _format_utilization(
+                        {"gpu_memory_util_avg_pct": gpu.get("gpu_memory_util_pct")},
+                        "gpu_memory_util",
+                    ),
+                )
+        if detail_count:
+            console.print(gpu_table)
+        else:
+            console.print("[yellow]No per-GPU telemetry is available.[/]")
 
     if target_met:
         console.print("[bold green]✓ Enough nodes are already schedulable; no pause is needed.[/]")
@@ -937,12 +1314,20 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
             jobs_table.add_column("Workload", overflow="fold", ratio=2)
             jobs_table.add_column("Type", overflow="fold")
             jobs_table.add_column("Running", justify="right")
+            jobs_table.add_column("GPU util", justify="right")
+            jobs_table.add_column("GPU mem", justify="right")
             jobs_table.add_column("Total GPU", justify="right")
             for workload in suggestion["workload_details"]:
                 jobs_table.add_row(
                     str(workload["user"]), str(workload["workload_name"]),
                     str(workload["type"]),
                     _format_runtime(workload.get("runtime_seconds")),
+                    _format_utilization(
+                        workload.get("gpu_utilization"), "gpu_compute_util"
+                    ),
+                    _format_utilization(
+                        workload.get("gpu_utilization"), "gpu_memory_util"
+                    ),
                     str(workload["total_gpu"]),
                 )
 
@@ -1001,6 +1386,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--search-seconds", type=float, default=10.0,
         help="Local solver time budget in seconds (default: 10)",
+    )
+    parser.add_argument(
+        "--show-gpu-details", action="store_true",
+        help="Expand per-GPU utilization in terminal output; JSON always includes it",
     )
     parser.add_argument("--json", action="store_true", dest="as_json", help="Print schema-versioned JSON instead of a terminal report")
     parser.add_argument("--out", type=Path, help="Also save the complete JSON report to this path")
@@ -1067,8 +1456,8 @@ def main() -> int:
             args.out.write_text(payload + "\n", encoding="utf-8")
         if args.as_json:
             sys.stdout.write(payload + "\n")
-        elif not render_rich(report):
-            sys.stdout.write(render_text(report))
+        elif not render_rich(report, show_gpu_details=args.show_gpu_details):
+            sys.stdout.write(render_text(report, show_gpu_details=args.show_gpu_details))
         return 0
     except (OSError, RuntimeError, ValueError) as error:
         print(redact(f"queue analysis failed: {error}"), file=sys.stderr)

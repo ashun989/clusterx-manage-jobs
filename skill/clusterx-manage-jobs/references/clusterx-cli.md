@@ -201,6 +201,7 @@ Complete options:
 | `--candidate-scope` | `fragmented`, `full`, or `all` occupied nodes | `fragmented` |
 | `--alternatives` | Maximum ranked plans per strategy, including rank 1 | `3`, integer from `1` through `10` |
 | `--search-seconds` | Local solver time budget | `10`, positive number |
+| `--show-gpu-details` | Expand a deduplicated per-GPU terminal table | Disabled; JSON always includes per-GPU data |
 | `--json` | Write schema-versioned JSON to stdout instead of terminal UI | Disabled |
 | `--out` | Also save the complete JSON report | Unset |
 
@@ -231,6 +232,14 @@ heuristics followed by redundant-job pruning. Exact plans
 are labeled `Minimum`; heuristic plans are labeled `Lowest found` and do not
 claim global optimality. Suggestions expose `strategy`, `rank`, `primary_cost`,
 and `delta_from_best`.
+
+Workload rows show the `--minutes` window's per-GPU compute and memory
+utilization as the card average plus the minimum-to-maximum range. The
+fragmented-node table aggregates only the workload's cards on that node; plan
+tables aggregate the complete workload. `--show-gpu-details` adds one
+deduplicated terminal table for all currently attributed GPUs, ordered by
+workload, node, and device index. Utilization is observational only and never
+changes capacity attribution, candidate ranking, or stop authorization.
 
 Schema version 2 has this top-level shape (values abbreviated):
 
@@ -269,6 +278,37 @@ Schema version 2 has this top-level shape (values abbreviated):
     "switch_reason": "estimated-time",
     "requested_strategy": "all"
   },
+  "gpu_utilization": {
+    "window_minutes": 5,
+    "allocated_gpu_count": 420,
+    "reported_gpu_count": 420,
+    "workloads": [{
+      "workload_id": "<workload-id>",
+      "workload_name": "<workload-name>",
+      "type": "aid",
+      "user": "<user>",
+      "workspace": "<workspace>",
+      "create_time": "<UTC ISO-8601 or null>",
+      "runtime_seconds": 184020,
+      "total_gpu": 2,
+      "allocated_gpu_count": 2,
+      "reported_gpu_count": 2,
+      "gpu_compute_util_avg_pct": 53.4,
+      "gpu_compute_util_min_pct": 41.2,
+      "gpu_compute_util_max_pct": 65.6,
+      "gpu_memory_util_avg_pct": 72.3,
+      "gpu_memory_util_min_pct": 70.1,
+      "gpu_memory_util_max_pct": 74.5,
+      "gpus": [{
+        "node": "<node>",
+        "pod": "<pod>",
+        "device_index": "0",
+        "gpu_uuid": "<GPU UUID>",
+        "gpu_compute_util_pct": 41.2,
+        "gpu_memory_util_pct": 70.1
+      }]
+    }]
+  },
   "fragmented_nodes": [{
     "node": "<node>",
     "allocated_gpu": 7,
@@ -283,6 +323,16 @@ Schema version 2 has this top-level shape (values abbreviated):
       "workspace": "<workspace>",
       "create_time": "<UTC ISO-8601 or null>",
       "runtime_seconds": 184020,
+      "gpu_utilization": {
+        "allocated_gpu_count": 1,
+        "reported_gpu_count": 1,
+        "gpu_compute_util_avg_pct": 41.2,
+        "gpu_compute_util_min_pct": 41.2,
+        "gpu_compute_util_max_pct": 41.2,
+        "gpu_memory_util_avg_pct": 70.1,
+        "gpu_memory_util_min_pct": 70.1,
+        "gpu_memory_util_max_pct": 70.1
+      },
       "gpu": 1,
       "cpu": 8,
       "memory_gib": 32.0
@@ -312,6 +362,16 @@ Schema version 2 has this top-level shape (values abbreviated):
       "workspace": "<workspace>",
       "create_time": "<UTC ISO-8601 or null>",
       "runtime_seconds": 184020,
+      "gpu_utilization": {
+        "allocated_gpu_count": 32,
+        "reported_gpu_count": 32,
+        "gpu_compute_util_avg_pct": 53.4,
+        "gpu_compute_util_min_pct": 41.2,
+        "gpu_compute_util_max_pct": 65.6,
+        "gpu_memory_util_avg_pct": 72.3,
+        "gpu_memory_util_min_pct": 70.1,
+        "gpu_memory_util_max_pct": 74.5
+      },
       "total_gpu": 32,
       "placements": [{
         "node": "<node>",
@@ -343,6 +403,14 @@ earliest valid Pod `create_time` for the workload to top-level `generated_at`;
 the JSON form exposes both `create_time` and integer `runtime_seconds`. Missing,
 invalid, or future timestamps produce JSON `null` values and `-` in terminal
 output. This is observational metadata only and does not affect packing results.
+
+Per-GPU utilization is fetched in one additional Prometheus request containing
+both compute and memory metrics. Series are accepted only when workload UID,
+Pod, and Hostname match the current allocation snapshot. Missing or non-finite
+values produce JSON `null` and terminal `-`; stale series are ignored, and an
+over-complete ambiguous Pod mapping is omitted with a warning. The top-level
+coverage counts refer to Pod-attributed GPUs, so they may be lower than node
+allocation when the report already identifies unattributed resources.
 
 Configuration discovery starts from the current directory when `--cwd` is
 omitted. Exit status `0` means the report completed (including "no suggestion"
