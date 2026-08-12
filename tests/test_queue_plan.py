@@ -1,5 +1,6 @@
 import importlib.util
 import io
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import unittest
@@ -231,6 +232,103 @@ class QueuePlanTests(unittest.TestCase):
         self.assertTrue(report["suggestions"])
         self.assertEqual(report["summary"]["workload_counts"], {"aid": 4})
         self.assertTrue(warnings)
+
+    def test_multinode_workload_uses_earliest_pod_create_time(self):
+        m = self.module
+        raw_nodes = [raw_node("node-a", gpu=1), raw_node("node-b", gpu=1)]
+        pods_by_node = {
+            raw_nodes[0]["id"]: [{
+                "name": "worker-a", "create_time": "2026-08-12T10:05:00Z",
+                "resource": {"accelerate_device_count": 1},
+                "workload": {"uid": "shared", "name": "shared", "type": "trainingJob"},
+                "ownership": {"creator_name": "user"},
+            }],
+            raw_nodes[1]["id"]: [{
+                "name": "worker-b", "create_time": "2026-08-12T10:00:00Z",
+                "resource": {"accelerate_device_count": 1},
+                "workload": {"uid": "shared", "name": "shared", "type": "trainingJob"},
+                "ownership": {"creator_name": "user"},
+            }],
+        }
+
+        class Client:
+            subscription = "s"
+            resource_group = "r"
+            region = "z"
+
+            def list_queue_nodes(self, **kwargs):
+                return {"nodes": raw_nodes, "total_size": len(raw_nodes)}
+
+            def _make_management_request(self, method, path, *, params):
+                pods = pods_by_node[params["node_id"]]
+                return {"pods": pods, "total_size": len(pods)}
+
+        class Cluster:
+            client = Client()
+
+            def stats_prometheus(self, **kwargs):
+                return []
+
+        snapshot, _ = m.collect_snapshot(Cluster(), "queue", "cluster")
+        self.assertEqual(snapshot["jobs"]["shared"]["create_time"], "2026-08-12T10:00:00Z")
+
+    def test_runtime_is_consistent_across_json_text_and_rich_summaries(self):
+        from rich.console import Console
+
+        m = self.module
+        jobs = {"a": job("a", "u", 1)}
+        jobs["a"].update({
+            "create_time": "2026-08-10T09:53:00Z",
+            "type": "aid",
+            "placements": [{"node": "n1", "gpu": 1, "cpu": 8, "memory_gib": 32}],
+        })
+        nodes = {"n1": node("n1", 1, {"a": {"gpu": 1}})}
+        fixed_now = datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc)
+        report = m.build_report(
+            {"nodes": nodes, "jobs": jobs}, m.Target(1, 8), "queue", "cluster",
+            now=lambda: fixed_now,
+        )
+        expected_seconds = 2 * 86400 + 3 * 3600 + 7 * 60
+        fragment = report["fragmented_nodes"][0]["workloads"][0]
+        suggestion = report["suggestions"][0]["workload_details"][0]
+        for workload in (fragment, suggestion):
+            self.assertEqual(workload["create_time"], "2026-08-10T09:53:00Z")
+            self.assertEqual(workload["runtime_seconds"], expected_seconds)
+        self.assertEqual(report["generated_at"], "2026-08-12T13:00:00+00:00")
+        self.assertIn("running 2d 03h", m.render_text(report))
+
+        stream = io.StringIO()
+        console = Console(file=stream, force_terminal=False, width=160)
+        self.assertTrue(m.render_rich(report, console=console))
+        output = stream.getvalue()
+        self.assertGreaterEqual(output.count("Running"), 2)
+        self.assertGreaterEqual(output.count("2d 03h"), 2)
+
+    def test_invalid_missing_and_future_times_are_unavailable(self):
+        m = self.module
+        fixed_now = datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc)
+        for create_time in (None, "not-a-time", "2026-08-12T13:00:01Z"):
+            with self.subTest(create_time=create_time):
+                jobs = {"a": job("a", "u", 1)}
+                jobs["a"]["create_time"] = create_time
+                jobs["a"]["placements"] = [{"node": "n1", "gpu": 1}]
+                nodes = {"n1": node("n1", 1, {"a": {"gpu": 1}})}
+                report = m.build_report(
+                    {"nodes": nodes, "jobs": jobs}, m.Target(1, 8), "q", "c",
+                    now=lambda: fixed_now,
+                )
+                workload = report["fragmented_nodes"][0]["workloads"][0]
+                self.assertIsNone(workload["create_time"])
+                self.assertIsNone(workload["runtime_seconds"])
+                self.assertIn("running -", m.render_text(report))
+
+    def test_runtime_display_boundaries(self):
+        m = self.module
+        self.assertEqual(m._format_runtime(0), "<1m")
+        self.assertEqual(m._format_runtime(25 * 60), "25m")
+        self.assertEqual(m._format_runtime((3 * 60 + 7) * 60), "3h 07m")
+        self.assertEqual(m._format_runtime((4 * 24 + 3) * 3600), "4d 03h")
+        self.assertEqual(m._format_runtime(None), "-")
 
     def test_unattributed_load_is_visible_but_not_releasable(self):
         m = self.module

@@ -281,6 +281,8 @@ Schema version 2 has this top-level shape (values abbreviated):
       "actionable": true,
       "user": "<user>",
       "workspace": "<workspace>",
+      "create_time": "<UTC ISO-8601 or null>",
+      "runtime_seconds": 184020,
       "gpu": 1,
       "cpu": 8,
       "memory_gib": 32.0
@@ -308,6 +310,8 @@ Schema version 2 has this top-level shape (values abbreviated):
       "actionable": true,
       "user": "<user>",
       "workspace": "<workspace>",
+      "create_time": "<UTC ISO-8601 or null>",
+      "runtime_seconds": 184020,
       "total_gpu": 32,
       "placements": [{
         "node": "<node>",
@@ -332,6 +336,13 @@ is the capacity source of truth. Positive allocation-to-Pod differences are
 reported as unattributed and never claimed as releasable. If Pod attribution
 exceeds node allocation, the affected node is excluded for that resource and a
 warning is emitted.
+
+The terminal workload summaries show `Running` as a compact reference duration
+(`25m`, `3h 07m`, or `4d 03h`). It is calculated once per report from the
+earliest valid Pod `create_time` for the workload to top-level `generated_at`;
+the JSON form exposes both `create_time` and integer `runtime_seconds`. Missing,
+invalid, or future timestamps produce JSON `null` values and `-` in terminal
+output. This is observational metadata only and does not affect packing results.
 
 Configuration discovery starts from the current directory when `--cwd` is
 omitted. Exit status `0` means the report completed (including "no suggestion"

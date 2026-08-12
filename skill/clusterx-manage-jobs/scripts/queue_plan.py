@@ -33,6 +33,43 @@ class Target:
     memory_gib: int | None = None
 
 
+def _parse_utc_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _runtime_fields(workload: dict[str, Any], generated_at: datetime) -> dict[str, Any]:
+    created_at = _parse_utc_timestamp(workload.get("create_time"))
+    if created_at is None or created_at > generated_at:
+        return {"create_time": None, "runtime_seconds": None}
+    return {
+        "create_time": str(workload["create_time"]),
+        "runtime_seconds": int((generated_at - created_at).total_seconds()),
+    }
+
+
+def _format_runtime(seconds: Any) -> str:
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or seconds < 0:
+        return "-"
+    total_minutes = int(seconds) // 60
+    if total_minutes < 1:
+        return "<1m"
+    if total_minutes < 60:
+        return f"{total_minutes}m"
+    total_hours, minutes = divmod(total_minutes, 60)
+    if total_hours < 24:
+        return f"{total_hours}h {minutes:02d}m"
+    days, hours = divmod(total_hours, 24)
+    return f"{days}d {hours:02d}h"
+
+
 def _resource_map(node: dict[str, Any]) -> dict[str, tuple[int, int]]:
     result: dict[str, tuple[int, int]] = {}
     for item in node.get("summary_data") or []:
@@ -519,10 +556,18 @@ def collect_snapshot(
                 "user": str(ownership.get("creator_name") or "unknown"),
                 "type": str(workload.get("type") or "unknown"),
                 "workspace": str(workspace.get("name") or ""),
+                "create_time": None,
                 "actionable": True,
                 "total_gpu": 0,
                 "placements": [],
             })
+            pod_create_time = pod.get("create_time")
+            parsed_pod_time = _parse_utc_timestamp(pod_create_time)
+            parsed_item_time = _parse_utc_timestamp(item.get("create_time"))
+            if parsed_pod_time is not None and (
+                parsed_item_time is None or parsed_pod_time < parsed_item_time
+            ):
+                item["create_time"] = str(pod_create_time)
             item["placements"].append({"node": node_name, "pod": str(pod.get("name") or ""), **placement})
 
         allocated = {
@@ -567,9 +612,14 @@ def build_report(
     alternatives: int = 3,
     search_seconds: float = 10.0,
     clock: Callable[[], float] = time.monotonic,
+    now: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
     nodes = snapshot["nodes"]
     jobs = snapshot["jobs"]
+    generated_at = (now or (lambda: datetime.now(timezone.utc)))()
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=timezone.utc)
+    generated_at = generated_at.astimezone(timezone.utc)
     search_stats: dict[str, Any] = {}
     suggestions, optimality = solve_candidates(
         nodes, jobs, target, candidate_scope=candidate_scope,
@@ -587,6 +637,7 @@ def build_report(
                 "actionable": jobs[workload_id].get("actionable", True),
                 "user": jobs[workload_id]["user"],
                 "workspace": jobs[workload_id].get("workspace", ""),
+                **_runtime_fields(jobs[workload_id], generated_at),
                 "total_gpu": jobs[workload_id]["total_gpu"],
                 "placements": jobs[workload_id]["placements"],
             }
@@ -607,6 +658,7 @@ def build_report(
                     "actionable": jobs[workload_id].get("actionable", True),
                     "user": jobs[workload_id]["user"],
                     "workspace": jobs[workload_id].get("workspace", ""),
+                    **_runtime_fields(jobs[workload_id], generated_at),
                     **node["jobs"][workload_id],
                 }
                 for workload_id in sorted(node["jobs"])
@@ -638,7 +690,7 @@ def build_report(
         type_counts[kind] = type_counts.get(kind, 0) + 1
     return {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at.isoformat(),
         "queue": queue,
         "cluster": cluster_name,
         "target": {
@@ -733,7 +785,8 @@ def render_text(report: dict[str, Any]) -> str:
         for workload in suggestion["workload_details"]:
             lines.append(
                 f"  - {workload['user']}: {workload['workload_name']} "
-                f"[{workload['type']}] ({workload['total_gpu']} GPU total)"
+                f"[{workload['type']}] ({workload['total_gpu']} GPU total, "
+                f"running {_format_runtime(workload.get('runtime_seconds'))})"
             )
             for placement in workload["placements"]:
                 lines.append(
@@ -818,6 +871,7 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
         table.add_column("GPU util", justify="right")
         table.add_column("User", overflow="fold")
         table.add_column("Workload", overflow="fold")
+        table.add_column("Running", justify="right")
         table.add_column("GPU", justify="right")
         for fragment in fragments:
             jobs = list(fragment.get("workloads") or [])
@@ -836,6 +890,7 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
                     ("-" if gpu_util is None else f"{gpu_util:.1f}%") if row == 0 else "",
                     str(item.get("user", "-")),
                     f"{item.get('workload_name', '-')} [{item.get('type', 'unknown')}]",
+                    _format_runtime(item.get("runtime_seconds")),
                     str(item.get("gpu", 0)),
                 )
         console.print(table)
@@ -881,11 +936,14 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
             jobs_table.add_column("User", overflow="fold")
             jobs_table.add_column("Workload", overflow="fold", ratio=2)
             jobs_table.add_column("Type", overflow="fold")
+            jobs_table.add_column("Running", justify="right")
             jobs_table.add_column("Total GPU", justify="right")
             for workload in suggestion["workload_details"]:
                 jobs_table.add_row(
                     str(workload["user"]), str(workload["workload_name"]),
-                    str(workload["type"]), str(workload["total_gpu"]),
+                    str(workload["type"]),
+                    _format_runtime(workload.get("runtime_seconds")),
+                    str(workload["total_gpu"]),
                 )
 
             placement_table = Table(box=box.SIMPLE, expand=True, header_style="bold green")
