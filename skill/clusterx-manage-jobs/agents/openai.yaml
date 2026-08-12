@@ -1,4 +1,4 @@
 interface:
   display_name: "Clusterx 训练任务管理"
-  short_description: "安全配置、提交、查询、停止并同步 PT 集群 Clusterx 训练任务"
-  default_prompt: "使用 $clusterx-manage-jobs 检查配置并为我的 PT 训练任务生成提交预览。"
+  short_description: "安全管理 Clusterx 任务并诊断队列负载与 GPU 资源碎片"
+  default_prompt: "使用 $clusterx-manage-jobs 检查 Clusterx 队列负载、任务或完整节点调度情况。"

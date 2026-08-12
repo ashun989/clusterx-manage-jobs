@@ -160,6 +160,43 @@ before querying. Current metrics include CPU and memory utilization, GPU count,
 utilization, memory utilization, total/per-device power, memory bandwidth
 utilization, temperature, and `all`.
 
+## Queue packing analysis
+
+Use the Skill's read-only queue analyzer when aggregate free GPUs exist but a
+full-node job cannot schedule:
+
+```bash
+python3 scripts/queue_plan.py --cwd <project> --nodes 2
+```
+
+The command joins running jobs, users, requested resources, runtime Workers,
+and queue nodes. It reports fragmented nodes plus deduplicated candidates for
+minimum paused GPUs, tasks, and users. It never calls a stop API. Pass
+`--cpus-per-node` and `--memory-per-node-gib` to include those requested
+resources; otherwise the conclusion is GPU-only. Default output is a terminal
+report; use `--json` for JSON stdout or `--out <path>` to save schema version 1.
+The default terminal report uses Rich colored tables when `requirements.txt`
+is installed and falls back to plain text otherwise.
+`--gpus-per-node` defaults to `8`; pass it explicitly for other node shapes.
+`--strategy` defaults to `all`; select `min-gpu`, `min-tasks`, or `min-users`
+to show only that recommendation. `--minutes` defaults to `5` and controls
+only the Prometheus load lookback window, not allocation or candidate solving.
+When multiple strategies resolve to the same task set, the report deduplicates
+the plan and explicitly lists every other strategy for which it is also optimal.
+
+Only tasks placed on fragmented nodes are candidates. Exact search is used up
+to 100,000 states, then a deterministic result marked `heuristic` is returned.
+Missing Worker mappings, truncated node inventory, allocation mismatches, or a
+changing job snapshot cause a safe failure rather than a partial suggestion.
+If a node's allocated GPU count is greater than the GPU resources attributable
+to visible running Workers, that node is not claimed as fully releasable. This
+conservative rule may leave a fragmented node out of every suggestion.
+
+Configuration discovery starts from the current directory when `--cwd` is
+omitted. Exit status `0` means the report completed (including "no suggestion"
+or "no pause needed"), `1` means live analysis failed or the snapshot was not
+trustworthy, and `2` means arguments or protected configuration are invalid.
+
 ## Storage mounts
 
 Simple file-storage form:
