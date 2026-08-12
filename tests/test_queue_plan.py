@@ -142,13 +142,12 @@ class QueuePlanTests(unittest.TestCase):
         self.assertIn("Minimum jobs, Minimum users", output)
         self.assertIn("\x1b[", output)
 
-    def test_min_tasks_is_normalized_to_deprecated_alias(self):
+    def test_min_jobs_strategy_is_accepted(self):
         with mock.patch.object(
-            sys, "argv", ["queue_plan.py", "--nodes", "2", "--strategy", "min-tasks"]
+            sys, "argv", ["queue_plan.py", "--nodes", "2", "--strategy", "min-jobs"]
         ):
             args = self.module.parse_args()
         self.assertEqual(args.strategy, "min-jobs")
-        self.assertEqual(args.deprecated_strategy, "min-tasks")
 
 
 if __name__ == "__main__":

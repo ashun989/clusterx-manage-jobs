@@ -588,17 +588,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minutes", type=int, default=5, help="Prometheus lookback only (default: 5)")
     parser.add_argument(
         "--strategy",
-        choices=("all", "min-gpu", "min-jobs", "min-users", "min-tasks"),
+        choices=("all", "min-gpu", "min-jobs", "min-users"),
         default="all",
         help="Suggestion strategy to display (default: all)",
     )
     parser.add_argument("--json", action="store_true", dest="as_json", help="Print schema-versioned JSON instead of a terminal report")
     parser.add_argument("--out", type=Path, help="Also save the complete JSON report to this path")
     args = parser.parse_args()
-    args.deprecated_strategy = None
-    if args.strategy == "min-tasks":
-        args.deprecated_strategy = "min-tasks"
-        args.strategy = "min-jobs"
     for name in ("nodes", "gpus_per_node"):
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
@@ -640,10 +636,6 @@ def main() -> int:
         target = Target(args.nodes, args.gpus_per_node, args.cpus_per_node, args.memory_per_node_gib)
         report = build_report(snapshot, target, str(queue), str(cluster_name))
         report["warnings"].extend(warnings)
-        if args.deprecated_strategy:
-            report["warnings"].append(
-                "--strategy min-tasks is deprecated; use min-jobs"
-            )
         report["analysis"]["requested_strategy"] = args.strategy
         if args.strategy != "all":
             filtered = []

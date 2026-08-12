@@ -181,8 +181,7 @@ is installed and falls back to plain text otherwise.
 `--strategy` defaults to `all`; select `min-gpu`, `min-jobs`, or `min-users`
 to show only that recommendation. `--minutes` defaults to `5` and controls
 only the Prometheus load lookback window, not allocation or candidate solving.
-`min-tasks` remains a deprecated compatibility alias for `min-jobs`. When
-multiple strategies resolve to the same job set, the report deduplicates
+When multiple strategies resolve to the same job set, the report deduplicates
 the plan and explicitly lists every other strategy for which it is also optimal.
 
 Only jobs placed on fragmented nodes are candidates. Exact search is used up
