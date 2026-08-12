@@ -1,0 +1,344 @@
+import importlib.util
+import io
+from pathlib import Path
+import sys
+import unittest
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "skill/clusterx-manage-jobs/scripts/queue_plan.py"
+
+
+def load_module():
+    scripts = str(SCRIPT.parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    spec = importlib.util.spec_from_file_location("clusterx_queue_plan", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def node(name, allocated, jobs, *, cpu=0, memory=0):
+    return {"node": name, "state": "RUNNING", "allocated_gpu": allocated,
+            "total_gpu": 8, "allocated_cpu": cpu, "total_cpu": 112,
+            "allocated_memory_gib": memory, "total_memory_gib": 1920,
+            "jobs": jobs}
+
+
+def job(job_id, user, gpu):
+    return {"job_id": job_id, "job_name": job_id, "user": user,
+            "total_gpu": gpu, "placements": []}
+
+
+class StepClock:
+    def __init__(self, step=0.01):
+        self.value = 0.0
+        self.step = step
+
+    def __call__(self):
+        value = self.value
+        self.value += self.step
+        return value
+
+
+class QueuePlanTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_module()
+
+    def test_two_by_eight_returns_three_strategies(self):
+        m = self.module
+        jobs = {"a": job("a", "u1", 1), "b": job("b", "u2", 1),
+                "c": job("c", "u2", 1), "d": job("d", "u3", 4),
+                **{x: job(x, "u1", 1) for x in "efgh"}}
+        nodes = {
+            "n1": node("n1", 1, {"a": {"gpu": 1}}),
+            "n2": node("n2", 2, {"b": {"gpu": 1}, "c": {"gpu": 1}}),
+            "n3": node("n3", 4, {"d": {"gpu": 4}}),
+            "n4": node("n4", 4, {x: {"gpu": 1} for x in "efgh"}),
+        }
+        plans, optimality = m.solve_candidates(nodes, jobs, m.Target(2, 8))
+        self.assertEqual(optimality, "exact")
+        by_strategy = {plan["strategy"]: plan for plan in plans if plan["rank"] == 1}
+        self.assertEqual(by_strategy["min-gpu"]["gpus"], 3)
+        self.assertEqual(by_strategy["min-jobs"]["job_count"], 2)
+        self.assertEqual(by_strategy["min-users"]["users"], 1)
+
+    def test_existing_free_nodes_need_no_pause(self):
+        m = self.module
+        nodes = {"n1": node("n1", 0, {}), "n2": node("n2", 0, {}),
+                 "n3": node("n3", 4, {"a": {"gpu": 4}})}
+        plans, optimality = m.solve_candidates(
+            nodes, {"a": job("a", "u", 4)}, m.Target(2, 8))
+        self.assertEqual((plans, optimality), ([], "not-needed"))
+
+    def test_cpu_only_task_is_included_when_cpu_blocks_target(self):
+        m = self.module
+        jobs = {"cpu": job("cpu", "u", 0), "gpu": job("gpu", "u", 1)}
+        nodes = {"n1": node("n1", 1,
+                 {"cpu": {"gpu": 0, "cpu": 80},
+                  "gpu": {"gpu": 1, "cpu": 16}}, cpu=96)}
+        plans, _ = m.solve_candidates(nodes, jobs, m.Target(1, 8, cpus=64))
+        self.assertEqual(set(plans[0]["jobs"]), {"cpu", "gpu"})
+
+    def test_multinode_job_cost_counts_whole_job(self):
+        m = self.module
+        jobs = {"multi": job("multi", "u", 4)}
+        nodes = {"n1": node("n1", 2, {"multi": {"gpu": 2}}),
+                 "n2": node("n2", 2, {"multi": {"gpu": 2}})}
+        plans, _ = m.solve_candidates(nodes, jobs, m.Target(2, 8))
+        self.assertEqual((plans[0]["gpus"], plans[0]["job_count"]), (4, 1))
+
+    def test_small_search_limit_marks_heuristic(self):
+        m = self.module
+        jobs = {str(i): job(str(i), "u", 1) for i in range(20)}
+        nodes = {f"n{i}": node(f"n{i}", 1, {str(i): {"gpu": 1}})
+                 for i in range(20)}
+        plans, optimality = m.solve_candidates(
+            nodes, jobs, m.Target(3, 8), search_seconds=0.05,
+            clock=StepClock(0.00002))
+        self.assertEqual(optimality, "heuristic")
+        self.assertTrue(plans)
+
+    def test_heuristic_prunes_small_jobs_when_large_job_alone_is_feasible(self):
+        m = self.module
+        jobs = {
+            "small-a": job("small-a", "u", 1),
+            "small-b": job("small-b", "u", 1),
+            "large": job("large", "u", 192),
+        }
+        jobs["small-a"]["placements"] = [{"node": "f1", "gpu": 1}]
+        jobs["small-b"]["placements"] = [{"node": "f2", "gpu": 1}]
+        jobs["large"]["placements"] = [
+            {"node": f"n{i}", "gpu": 8} for i in range(24)
+        ]
+        nodes = {
+            "f1": node("f1", 1, {"small-a": {"gpu": 1}}),
+            "f2": node("f2", 1, {"small-b": {"gpu": 1}}),
+            **{
+                f"n{i}": node(f"n{i}", 8, {"large": {"gpu": 8}})
+                for i in range(24)
+            },
+        }
+        plans, optimality = m.solve_candidates(
+            nodes, jobs, m.Target(4, 8), candidate_scope="all",
+            search_seconds=0.2, clock=StepClock()
+        )
+        self.assertEqual(optimality, "heuristic")
+        by_strategy = {plan["strategy"]: plan for plan in plans if plan["rank"] == 1}
+        self.assertEqual(by_strategy["min-gpu"]["jobs"], ["large"])
+        self.assertEqual(by_strategy["min-gpu"]["gpus"], 192)
+        self.assertEqual(by_strategy["min-gpu"]["job_count"], 1)
+
+    def test_heuristic_plans_are_single_job_irreducible(self):
+        m = self.module
+        jobs = {name: job(name, "u", 1) for name in "abcde"}
+        nodes = {
+            f"n{i}": node(f"n{i}", 1, {name: {"gpu": 1}})
+            for i, name in enumerate(jobs)
+        }
+        plans, _ = m.solve_candidates(
+            nodes, jobs, m.Target(3, 8), search_seconds=0.2,
+            clock=StepClock()
+        )
+        for plan in plans:
+            for job_id in plan["jobs"]:
+                reduced = m._candidate_from_jobs(
+                    set(plan["jobs"]) - {job_id}, nodes, jobs, m.Target(3, 8)
+                )
+                self.assertLess(len(reduced["freed_nodes"]), 3)
+
+    def test_script_contains_no_stop_operation(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("stop_training_job", source)
+        self.assertNotIn("clusterx stop", source)
+
+    def test_gpus_per_node_defaults_to_eight(self):
+        with mock.patch.object(sys, "argv", ["queue_plan.py", "--nodes", "2"]):
+            args = self.module.parse_args()
+        self.assertEqual(args.gpus_per_node, 8)
+        self.assertEqual(args.strategy, "all")
+        self.assertEqual(args.candidate_scope, "fragmented")
+        self.assertEqual(args.alternatives, 3)
+        self.assertEqual(args.search_seconds, 10.0)
+
+    def test_full_scope_includes_shared_full_node(self):
+        m = self.module
+        jobs = {"a": job("a", "u1", 4), "b": job("b", "u2", 4)}
+        nodes = {"n1": node(
+            "n1", 8, {"a": {"gpu": 4}, "b": {"gpu": 4}}
+        )}
+        plans, optimality = m.solve_candidates(
+            nodes, jobs, m.Target(1, 8), candidate_scope="full"
+        )
+        self.assertEqual(optimality, "exact")
+        self.assertEqual(set(plans[0]["jobs"]), {"a", "b"})
+        self.assertEqual(plans[0]["freed_nodes"], ["n1"])
+
+    def test_all_scope_compares_fragmented_and_full_job_plans(self):
+        m = self.module
+        jobs = {
+            **{name: job(name, name, 1) for name in "abcd"},
+            "multi": job("multi", "shared", 16),
+        }
+        nodes = {
+            "f1": node("f1", 2, {"a": {"gpu": 1}, "b": {"gpu": 1}}),
+            "f2": node("f2", 2, {"c": {"gpu": 1}, "d": {"gpu": 1}}),
+            "n1": node("n1", 8, {"multi": {"gpu": 8}}),
+            "n2": node("n2", 8, {"multi": {"gpu": 8}}),
+        }
+        plans, _ = m.solve_candidates(
+            nodes, jobs, m.Target(2, 8), candidate_scope="all"
+        )
+        by_strategy = {plan["strategy"]: plan for plan in plans if plan["rank"] == 1}
+        self.assertEqual(set(by_strategy["min-gpu"]["jobs"]), set("abcd"))
+        self.assertEqual(by_strategy["min-gpu"]["gpus"], 4)
+        self.assertEqual(by_strategy["min-jobs"]["jobs"], ["multi"])
+        self.assertEqual(by_strategy["min-users"]["jobs"], ["multi"])
+
+    def test_report_exposes_candidate_scope_and_full_node_count(self):
+        m = self.module
+        jobs = {"a": job("a", "u", 8)}
+        jobs["a"]["placements"] = [{"node": "n1", "gpu": 8}]
+        nodes = {"n1": node("n1", 8, {"a": {"gpu": 8}})}
+        report = m.build_report(
+            {"nodes": nodes, "jobs": jobs}, m.Target(1, 8),
+            "queue", "cluster", "full",
+        )
+        self.assertEqual(report["analysis"]["candidate_scope"], "full")
+        self.assertEqual(report["summary"]["full_nodes"], 1)
+
+    def test_same_plan_is_grouped_independently_by_strategy(self):
+        m = self.module
+        jobs = {"a": job("a", "u", 1), "b": job("b", "u", 1)}
+        nodes = {"n1": node("n1", 1, {"a": {"gpu": 1}}),
+                 "n2": node("n2", 1, {"b": {"gpu": 1}})}
+        plans, _ = m.solve_candidates(nodes, jobs, m.Target(2, 8))
+        self.assertEqual(len(plans), 3)
+        self.assertEqual(
+            [plan["strategy"] for plan in plans],
+            ["min-gpu", "min-jobs", "min-users"],
+        )
+        self.assertTrue(all(plan["rank"] == 1 for plan in plans))
+        self.assertTrue(all("also_strategies" not in plan for plan in plans))
+        jobs["a"]["placements"] = [{"node": "n1", "gpu": 1}]
+        jobs["b"]["placements"] = [{"node": "n2", "gpu": 1}]
+        report = m.build_report(
+            {"nodes": nodes, "jobs": jobs}, m.Target(2, 8), "queue", "cluster")
+        text = m.render_text(report)
+        self.assertIn("min-jobs rank 1", text)
+
+    def test_rich_report_contains_tables_and_color(self):
+        from rich.console import Console
+
+        m = self.module
+        jobs = {"a": job("a", "u", 1)}
+        jobs["a"]["placements"] = [
+            {"node": "n1", "gpu": 1, "cpu": 8, "memory_gib": 32}
+        ]
+        nodes = {"n1": node("n1", 1, {"a": {"gpu": 1}})}
+        report = m.build_report(
+            {"nodes": nodes, "jobs": jobs}, m.Target(1, 8), "queue", "cluster")
+        stream = io.StringIO()
+        console = Console(file=stream, force_terminal=True, color_system="standard", width=120)
+        self.assertTrue(m.render_rich(report, console=console))
+        output = stream.getvalue()
+        self.assertIn("ClusterX Queue Packing", output)
+        self.assertIn("Fragmented nodes", output)
+        self.assertIn("Search diagnostics", output)
+        self.assertIn("Plan 1", output)
+        self.assertIn("min-jobs · Jobs", output)
+        self.assertIn("Memory GiB", output)
+        self.assertIn("\x1b[", output)
+
+    def test_rich_report_keeps_all_placements_at_common_widths(self):
+        from rich.console import Console
+
+        m = self.module
+        job_name = "distributed-job-with-complete-placement-details"
+        jobs = {"multi": job("multi", "long-user-name", 192)}
+        jobs["multi"]["job_name"] = job_name
+        jobs["multi"]["placements"] = [
+            {"node": f"node-{i:02d}", "gpu": 8, "cpu": 16, "memory_gib": 64}
+            for i in range(24)
+        ]
+        nodes = {
+            f"node-{i:02d}": node(f"node-{i:02d}", 8, {"multi": {"gpu": 8}})
+            for i in range(24)
+        }
+        report = m.build_report(
+            {"nodes": nodes, "jobs": jobs}, m.Target(4, 8),
+            "queue", "cluster", "full", alternatives=1,
+        )
+        for width in (80, 120, 160):
+            stream = io.StringIO()
+            console = Console(file=stream, force_terminal=False, width=width)
+            self.assertTrue(m.render_rich(report, console=console))
+            output = stream.getvalue()
+            for i in range(24):
+                self.assertIn(f"node-{i:02d}", output)
+            self.assertNotIn("…", output)
+        plain = m.render_text(report)
+        self.assertIn(job_name, plain)
+        for i in range(24):
+            self.assertIn(f"node-{i:02d}: 8 GPU, 16 CPU, 64 GiB memory", plain)
+
+    def test_min_jobs_strategy_is_accepted(self):
+        with mock.patch.object(
+            sys, "argv", ["queue_plan.py", "--nodes", "2", "--strategy", "min-jobs"]
+        ):
+            args = self.module.parse_args()
+        self.assertEqual(args.strategy, "min-jobs")
+
+    def test_alternatives_returns_ranked_plans_per_strategy(self):
+        m = self.module
+        jobs = {name: job(name, f"u{name}", gpu) for name, gpu in zip("abcd", (1, 2, 3, 4))}
+        nodes = {
+            f"n{i}": node(f"n{i}", jobs[name]["total_gpu"], {name: {"gpu": jobs[name]["total_gpu"]}})
+            for i, name in enumerate(jobs)
+        }
+        plans, optimality = m.solve_candidates(
+            nodes, jobs, m.Target(1, 8), alternatives=3
+        )
+        self.assertEqual(optimality, "exact")
+        for strategy in ("min-gpu", "min-jobs", "min-users"):
+            group = [plan for plan in plans if plan["strategy"] == strategy]
+            self.assertEqual([plan["rank"] for plan in group], [1, 2, 3])
+            self.assertEqual(group[0]["delta_from_best"], 0)
+            self.assertNotIn("also_strategies", group[0])
+        gpu_group = [plan for plan in plans if plan["strategy"] == "min-gpu"]
+        self.assertEqual([plan["primary_cost"] for plan in gpu_group], [1, 2, 3])
+        self.assertEqual([plan["delta_from_best"] for plan in gpu_group], [0, 1, 2])
+
+    def test_alternative_and_search_arguments_are_validated(self):
+        for value in ("0", "11"):
+            with mock.patch.object(
+                sys, "argv", ["queue_plan.py", "--nodes", "2", "--alternatives", value]
+            ), self.assertRaises(SystemExit):
+                self.module.parse_args()
+        with mock.patch.object(
+            sys, "argv", ["queue_plan.py", "--nodes", "2", "--search-seconds", "0"]
+        ), self.assertRaises(SystemExit):
+            self.module.parse_args()
+
+    def test_report_includes_search_measurements(self):
+        m = self.module
+        jobs = {"a": job("a", "u", 1)}
+        jobs["a"]["placements"] = [{"node": "n1", "gpu": 1}]
+        report = m.build_report(
+            {"nodes": {"n1": node("n1", 1, {"a": {"gpu": 1}})}, "jobs": jobs},
+            m.Target(1, 8), "queue", "cluster", search_seconds=2.5,
+        )
+        analysis = report["analysis"]
+        self.assertEqual(analysis["search_budget_seconds"], 2.5)
+        self.assertEqual(analysis["estimated_states"], 1)
+        self.assertGreaterEqual(analysis["states_examined"], 1)
+        self.assertEqual(analysis["switch_reason"], "completed")
+
+
+if __name__ == "__main__":
+    unittest.main()

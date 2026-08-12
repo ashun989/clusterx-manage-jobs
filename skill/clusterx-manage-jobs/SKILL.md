@@ -1,6 +1,6 @@
 ---
 name: clusterx-manage-jobs
-description: Manage the full lifecycle of Clusterx training jobs on the PT/SSP cluster, including CLI and configuration checks, safe job submission previews, listing jobs, fetching job or node details, reading logs and statistics, and stopping jobs. Use when the user mentions Clusterx, PT cluster training jobs, cluster queues, job logs, or Clusterx storage mounts.
+description: Manage the full lifecycle of Clusterx training jobs on the PT/SSP cluster, including CLI and configuration checks, safe job submission previews, listing jobs, fetching job or node details, reading logs and statistics, queue load and GPU fragmentation analysis, full-node scheduling suggestions, and stopping jobs. Use when the user mentions Clusterx, PT cluster training jobs, cluster queues, node load, fragmented GPU capacity, job logs, or Clusterx storage mounts.
 ---
 
 # Clusterx Training Jobs
@@ -15,6 +15,10 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 - For global/project configuration discovery and precedence, read
   [references/configuration.md](references/configuration.md).
 - For a preflight check, run `python3 scripts/preflight.py`.
+- For queue packing, per-user/per-job node allocation, GPU fragmentation, or
+  full-node scheduling analysis, run `python3 scripts/queue_plan.py`. This is a
+  read-only report and must never stop jobs. Install `requirements.txt` for
+  colored Rich tables; retain the built-in plain-text fallback when unavailable.
 - Run Clusterx through `python3 scripts/clusterx_exec.py --cwd <project> --`
   so project configuration overrides the persistent global configuration and
   Clusterx stdout/stderr are redacted before they are returned.
@@ -89,6 +93,20 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 
 - Execute `list`, `get-job`, `get-node`, `log`, and `stats` as read-only
   operations without confirmation unless another action is implied.
+- For requests such as "why can 2 x 8 GPU not schedule" or "which jobs could
+  be coordinated to release full nodes", run `queue_plan.py --nodes M`;
+  `--gpus-per-node` defaults to 8. Add `--cpus-per-node` and
+  `--memory-per-node-gib` only when the target workload specifies them. Treat
+  every suggestion as a coordination candidate, not authorization to stop
+  anything. Use `--strategy all|min-gpu|min-jobs|min-users`; default to
+  `all`. Use `--candidate-scope fragmented|full|all`; default to `fragmented`
+  for backward-compatible fragment cleanup. A `full` node is any occupied node
+  whose allocated GPUs equal or exceed its GPU capacity, including nodes shared
+  by multiple jobs.
+  Use `--alternatives N` (default `3`, range `1` to `10`) for ranked plans per
+  strategy. Use `--search-seconds S` (default `10`) to bound only local solving;
+  exact search calibrates itself from measured state throughput and reserves
+  time for a heuristic fallback.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
   pagination, filter, and ordering options when the result set is large. Treat
   Worker fields as runtime observations and do not infer missing nodes.

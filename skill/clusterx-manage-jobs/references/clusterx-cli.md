@@ -160,6 +160,172 @@ before querying. Current metrics include CPU and memory utilization, GPU count,
 utilization, memory utilization, total/per-device power, memory bandwidth
 utilization, temperature, and `all`.
 
+## Queue packing analysis
+
+Use the Skill's read-only queue analyzer when aggregate free GPUs exist but a
+full-node job cannot schedule:
+
+```bash
+python3 scripts/queue_plan.py --cwd <project> --nodes 2
+```
+
+The command joins running jobs, users, requested resources, runtime Workers,
+and queue nodes. It reports occupied nodes plus independently ranked candidates
+for minimum coordinated GPUs, jobs, and users. It never calls a stop API. Pass
+`--cpus-per-node` and `--memory-per-node-gib` to include those requested
+resources; otherwise the conclusion is GPU-only. Default output is a terminal
+report; use `--json` for JSON stdout or `--out <path>` to save schema version 1.
+The default terminal report uses Rich colored tables when `requirements.txt`
+is installed and falls back to plain text otherwise.
+The Rich report is grouped into queue overview, search diagnostics, fragmented
+node occupancy, and per-strategy plan cards. Each plan keeps separate job and
+placement tables; node, job, CPU, memory, and GPU details are folded to the
+terminal width rather than truncated. Plain-text fallback carries the same
+search, job, freed-node, and placement information.
+Complete options:
+
+| Option | Meaning | Default / validation |
+| --- | --- | --- |
+| `--nodes` | Required schedulable node count | Required, positive integer |
+| `--gpus-per-node` | GPU requirement per target node | `8`, positive integer |
+| `--cpus-per-node` | Optional CPU requirement per target node | Unset, positive integer when supplied |
+| `--memory-per-node-gib` | Optional memory requirement per target node | Unset, positive integer when supplied |
+| `--queue`, `-q` | Queue override | Selected Clusterx config |
+| `--cluster-name` | Cluster override | Selected Clusterx config |
+| `--config` | Explicit protected Clusterx YAML | Config discovery when omitted |
+| `--cwd` | Config discovery starting directory | Current directory |
+| `--minutes` | Prometheus lookback window only | `5`, positive integer |
+| `--strategy` | `all`, `min-gpu`, `min-jobs`, or `min-users` | `all` |
+| `--candidate-scope` | `fragmented`, `full`, or `all` occupied nodes | `fragmented` |
+| `--alternatives` | Maximum ranked plans per strategy, including rank 1 | `3`, integer from `1` through `10` |
+| `--search-seconds` | Local solver time budget | `10`, positive number |
+| `--json` | Write schema-versioned JSON to stdout instead of terminal UI | Disabled |
+| `--out` | Also save the complete JSON report | Unset |
+
+`--candidate-scope` controls which occupied nodes may contribute jobs to a
+plan. It defaults to `fragmented`, preserving fragment-only analysis. Use
+`full` for GPU-saturated nodes or `all` to compare both populations in one
+optimization. A full node may be occupied by one job or shared by multiple
+jobs. Jobs remain indivisible: selecting any placement charges the job's total
+GPU allocation and evaluates every node released by that job.
+
+`--alternatives` defaults to `3` and accepts `1` through `10`. It returns that
+many ranked, distinct job sets per selected strategy; `--strategy all` groups
+results independently under `min-gpu`, `min-jobs`, and `min-users` without
+cross-strategy deduplication, so the default can display up to nine plan cards.
+The same job set may appear in more than one strategy group with a separate
+rank. Exact ranks use `Minimum` / `Alternative`;
+heuristic ranks use `Lowest found` / `Alternative found`.
+
+`--search-seconds` defaults to `10` and bounds local solving only. Exact search
+measures the first 1,000 states, estimates whether enumeration fits within 80%
+of the budget, and reserves 20% for heuristic fallback. JSON analysis reports
+the budget, elapsed time, estimated and examined states, and switch reason.
+
+Only jobs placed on nodes selected by `--candidate-scope` are candidates.
+Exact search is controlled by the measured time budget rather than a fixed
+state threshold. Larger searches use deterministic, multi-start job/node
+heuristics followed by redundant-job pruning. Exact plans
+are labeled `Minimum`; heuristic plans are labeled `Lowest found` and do not
+claim global optimality. Suggestions expose `strategy`, `rank`, `primary_cost`,
+and `delta_from_best`.
+
+Schema version 1 has this top-level shape (values abbreviated):
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "<UTC ISO-8601>",
+  "queue": "<queue>",
+  "cluster": "<cluster>",
+  "target": {
+    "nodes": 4,
+    "gpus_per_node": 8,
+    "cpus_per_node": null,
+    "memory_per_node_gib": null
+  },
+  "summary": {
+    "total_nodes": 56,
+    "total_gpu": 448,
+    "allocated_gpu": 420,
+    "free_gpu": 28,
+    "currently_schedulable_nodes": 0,
+    "fragmented_nodes": 5,
+    "full_nodes": 50,
+    "running_jobs": 48
+  },
+  "analysis": {
+    "needs_repacking": true,
+    "resource_scope": "gpu",
+    "optimality": "heuristic",
+    "candidate_scope": "all",
+    "search_budget_seconds": 10.0,
+    "search_elapsed_seconds": 0.84,
+    "estimated_states": 368830,
+    "states_examined": 10270,
+    "switch_reason": "estimated-time",
+    "requested_strategy": "all"
+  },
+  "fragmented_nodes": [{
+    "node": "<node>",
+    "allocated_gpu": 7,
+    "total_gpu": 8,
+    "free_gpu": 1,
+    "jobs": [{
+      "job_id": "<job-id>",
+      "job_name": "<job-name>",
+      "user": "<user>",
+      "gpu": 1,
+      "cpu": 8,
+      "memory_gib": 32.0
+    }],
+    "metrics": {"gpu-util": 53.4}
+  }],
+  "suggestions": [{
+    "strategy": "min-gpu",
+    "rank": 1,
+    "primary_cost": 32,
+    "delta_from_best": 0,
+    "optimality": "heuristic",
+    "target_nodes": ["<node>"],
+    "freed_nodes": ["<node>"],
+    "jobs": ["<job-id>"],
+    "gpus": 32,
+    "job_count": 1,
+    "users": 1,
+    "job_details": [{
+      "job_id": "<job-id>",
+      "job_name": "<job-name>",
+      "user": "<user>",
+      "total_gpu": 32,
+      "placements": [{
+        "node": "<node>",
+        "gpu": 8,
+        "cpu": 64,
+        "memory_gib": 800.0
+      }]
+    }]
+  }],
+  "warnings": []
+}
+```
+
+`switch_reason` is `completed` after full exact enumeration,
+`estimated-time` when measured throughput predicts that exact enumeration will
+exceed 80% of the budget, `exact-deadline` when exact enumeration reaches that
+deadline, `not-needed` when enough nodes are already schedulable, or
+`no-eligible-candidates` when the selected scope contains no candidate nodes.
+Missing Worker mappings, truncated node inventory, allocation mismatches, or a
+changing job snapshot cause a safe failure rather than a partial suggestion.
+If a node's allocated GPU count is greater than the GPU resources attributable
+to visible running Workers, that node is not claimed as fully releasable. This
+conservative rule may leave a fragmented node out of every suggestion.
+
+Configuration discovery starts from the current directory when `--cwd` is
+omitted. Exit status `0` means the report completed (including "no suggestion"
+or "no pause needed"), `1` means live analysis failed or the snapshot was not
+trustworthy, and `2` means arguments or protected configuration are invalid.
+
 ## Storage mounts
 
 Simple file-storage form:

@@ -63,3 +63,17 @@ python3 scripts/clusterx_exec.py --cwd <project-dir> -- log <job-id>
 ```
 
 包装器只报告配置来源和路径，不输出配置值。
+
+通过只读队列分析器检查完整节点调度和 GPU 碎片：
+
+```bash
+python3 scripts/queue_plan.py --nodes 2
+python3 scripts/queue_plan.py --cwd <project-dir> --nodes 2 --strategy min-gpu
+python3 scripts/queue_plan.py --nodes 2 --candidate-scope all
+python3 scripts/queue_plan.py --nodes 2 --alternatives 3 --search-seconds 10
+```
+
+`--cwd` 可省略；省略时以当前工作目录为配置发现起点。安装 Skill 后从任意
+目录调用时，使用
+`${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_plan.py`
+的完整路径。

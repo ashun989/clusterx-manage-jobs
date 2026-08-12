@@ -28,6 +28,7 @@
 - 检查 `clusterx` 命令、配置文件权限、必填配置项和共享 `tmpdir`。
 - 为训练任务生成资源、镜像、挂载和脱敏命令预览；用户已明确要求提交时直接执行。
 - 查询任务、节点、日志和统计信息；用户已明确指定准确目标时直接停止任务。
+- 汇总队列节点上的用户与任务资源，诊断 GPU 碎片并生成只读的完整节点释放候选。
 - 对配置、命令、复杂挂载 JSON、HTTP 认证头和签名 URL 做脱敏。
 - 提交前拒绝 Clusterx 无法安全保留参数边界的 `bash/sh -c/-lc` 写法，
   要求直接调用 runner 脚本。
@@ -46,6 +47,15 @@ cp -a skill/clusterx-manage-jobs \
   "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs"
 ```
 
+复制完成后安装终端美化依赖：
+
+```bash
+python3 -m pip install -r \
+  "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/requirements.txt"
+```
+
+`rich` 缺失时队列分析 CLI 会自动回退到无颜色纯文本，不影响只读分析。
+
 开发期间也可以把安装路径软链接到源码目录；仓库移动或目录重构后，应同步
 检查软链接目标下是否仍能直接看到 `SKILL.md`。
 
@@ -63,6 +73,28 @@ python3 --version
 clusterx --version
 clusterx --help
 ```
+
+安装后可从任意目录执行队列碎片分析；`--cwd` 可省略，此时从当前目录向上
+查找项目配置，并继续按全局配置优先级回退：
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_plan.py" \
+  --nodes 2
+```
+
+需要解析另一个项目的配置时显式传入目录：
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_plan.py" \
+  --cwd /path/to/project --nodes 2 --strategy all \
+  --alternatives 3 --search-seconds 10
+```
+
+默认只分析碎片节点；如需让已占满 GPU 的节点任务也参与只读候选优化，增加
+`--candidate-scope all`。也可使用 `--candidate-scope full` 仅比较完整节点。
+每个策略默认返回最多 3 个方案；可用 `--alternatives 1..10` 调整。求解阶段
+默认使用 `--search-seconds 10`，根据当前机器实测状态吞吐在精确搜索和启发式
+搜索之间切换。
 
 首次配置后，保护配置文件权限：
 
@@ -100,8 +132,8 @@ python3 \
 ```
 
 官方 `quick_validate.py` 需要 PyYAML；若要在 base 环境直接运行校验器，
-需先在可访问的内部软件源安装 `PyYAML`。本项目功能脚本本身仅依赖 Python
-标准库。
+需先在可访问的内部软件源安装 `PyYAML`。运行时核心逻辑使用 Python 标准库；
+`requirements.txt` 中的 `rich` 用于彩色表格，并有纯文本降级路径。
 
 脱敏器从标准输入读取，避免凭据出现在进程参数中：
 
@@ -117,6 +149,21 @@ printf '%s\n' 'access_token=example' |
 
 `smoke-projects` 不进入 Skill 安装包；它用于从本仓库快速验证安装好的 Skill。
 可直接对 Codex 提出：
+
+```text
+使用 $clusterx-manage-jobs，分析当前队列申请 2 个完整 8 卡节点的资源整理方案，
+展示最少 GPU、最少作业和最少用户的候选，每种策略最多给 3 个方案，不要停止作业。
+```
+
+```text
+使用 $clusterx-manage-jobs，汇总当前队列每个碎片节点上的用户、作业、GPU
+占用和最近 10 分钟负载。
+```
+
+```text
+使用 $clusterx-manage-jobs，检查 2 个节点、每节点 8 GPU、64 CPU、800 GiB
+内存是否可调度；如果不能，给出只读整理候选。
+```
 
 ```text
 使用 $clusterx-manage-jobs，根据 smoke-projects/gpu-matmul/project.json
