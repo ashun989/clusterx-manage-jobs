@@ -19,7 +19,7 @@ class PreflightTests(unittest.TestCase):
             binary = temp / "clusterx"
             binary.write_text(
                 "#!/bin/sh\n"
-                "printf '%s\\n' 'clusterx 2026.7.28 access_token=leaked'\n",
+                "printf '%s\\n' 'clusterx 2026.8.11 access_token=leaked'\n",
                 encoding="utf-8",
             )
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
@@ -97,6 +97,7 @@ class PreflightTests(unittest.TestCase):
             binary.write_text("#!/bin/sh\nprintf 'clusterx 1.0\\n'\n", encoding="utf-8")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
             env = os.environ.copy()
+            env.pop("CLUSTERX_CFG_PATH", None)
             env["PATH"] = f"{temp}{os.pathsep}{env.get('PATH', '')}"
             env["DEV_ENV"] = str(temp / "global")
             run = subprocess.run(

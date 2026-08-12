@@ -47,7 +47,7 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
    and fill it locally. Never ask the user to paste secrets into chat.
 4. Run `clusterx_exec.py` with `--version`, `--help`, and the requested
    subcommand's `--help`. Prefer the installed CLI over the reference snapshot
-   and report material differences. Version 2026.7.28 is tested; treat other
+   and report material differences. Version 2026.8.11 is tested; treat other
    versions as unverified rather than unsupported.
 5. Require a shared `tmpdir` mounted at the same path on the development
    machine and job.
@@ -67,26 +67,35 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
    `PV_AFS` and `PV_AOSS` `mount_path`, and never ask the user to supply those
    paths. Do not display the generated target arguments. Require at least one
    configured mount of each type requested by the manifest.
-4. Build the `clusterx run` command without executing it.
-5. Pipe previews built outside the wrapper through `scripts/redact.py`.
-6. Show the redacted command plus a concise resource and risk summary.
-7. If the user explicitly requested submission and the command matches that
+4. Invoke a runner by absolute path, such as
+   `bash /absolute/path/to/runner.sh`, and pass runtime settings through
+   repeated `-e KEY=VALUE` options. Never use `bash -c`, `bash -lc`, or the
+   corresponding command-string mode of another shell: Clusterx 2026.8.11
+   joins command arguments without preserving shell quoting, and the wrapper
+   rejects these unsafe forms before submission.
+5. Build the `clusterx run` command without executing it.
+6. Pipe previews built outside the wrapper through `scripts/redact.py`.
+7. Show the redacted command plus a concise resource and risk summary.
+8. If the user explicitly requested submission and the command matches that
    request, execute it without another confirmation. If the user requested
    only a preview, stop after the preview.
-8. Do not add `--enable-privileged` unless the user explicitly requested it.
+9. Do not add `--enable-privileged` unless the user explicitly requested it.
    Ask before adding it later because that expands the authorized risk.
-9. Capture the job ID and report the initial status without exposing
+10. Capture the job ID and report the initial status without exposing
    credentials.
-10. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
+11. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
 
 ## Query and stop jobs
 
 - Execute `list`, `get-job`, `get-node`, `log`, and `stats` as read-only
   operations without confirmation unless another action is implied.
+- For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
+  pagination, filter, and ordering options when the result set is large. Treat
+  Worker fields as runtime observations and do not infer missing nodes.
 - For SSP Prometheus statistics, use `--scope queue` for configured queue
   summaries and `--scope job --job <exact-job-name>` for a workload. Read live
   help for the supported metrics and keep queue/job identifiers out of reports.
-- On SSP with Clusterx 2026.7.28, treat a pods-endpoint HTTP 404 from `log` as
+- On SSP with Clusterx 2026.8.11, treat a pods-endpoint HTTP 404 from `log` as
   a log-discovery failure, not proof that the job failed. Check `get-job`
   separately. The same 404 can occur while a job is `Running` and after it is
   `Succeeded`, even when the workload flushes output.
@@ -98,6 +107,10 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   when the user explicitly requested that exact target. If a partial name has
   no unique exact resolution, show the candidates and ask the user to choose;
   never infer a destructive target.
+- Clusterx 2026.8.11 supports batch `stop` filters. Use them only when the user
+  explicitly requests that exact batch scope. Preview the resolved matching
+  jobs before executing; never broaden an exact-target request into a regex,
+  group, user, partition, or status filter.
 - Use the wrapper's redacted output when presenting command results. Pass any
   text obtained outside the wrapper through `scripts/redact.py`.
 
