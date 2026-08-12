@@ -94,6 +94,10 @@ def _job_cost(job_ids: set[str], jobs: dict[str, dict[str, Any]]) -> dict[str, i
     }
 
 
+def _count_label(value: int, singular: str) -> str:
+    return f"{value} {singular if value == 1 else singular + 's'}"
+
+
 def _candidate(
     targets: Iterable[str],
     nodes: dict[str, dict[str, Any]],
@@ -120,6 +124,95 @@ def _candidate(
         "jobs": sorted(job_ids),
         **costs,
     }
+
+
+def _candidate_from_jobs(
+    job_ids: Iterable[str],
+    nodes: dict[str, dict[str, Any]],
+    jobs: dict[str, dict[str, Any]],
+    target: Target,
+) -> dict[str, Any]:
+    selected = set(job_ids)
+    freed = sorted(node for node, data in nodes.items() if _fits(data, target, selected))
+    target_nodes = sorted({
+        node_name
+        for job_id in selected
+        for placement in jobs[job_id].get("placements", [])
+        if (node_name := str(placement.get("node", "")))
+    })
+    return {
+        "target_nodes": target_nodes,
+        "freed_nodes": freed,
+        "jobs": sorted(selected),
+        **_job_cost(selected, jobs),
+    }
+
+
+def _prune_candidate(
+    candidate: dict[str, Any],
+    nodes: dict[str, dict[str, Any]],
+    jobs: dict[str, dict[str, Any]],
+    target: Target,
+    key: Callable[[dict[str, Any]], tuple[Any, ...]],
+) -> dict[str, Any]:
+    """Remove redundant jobs until no single removal still satisfies the target."""
+    current = candidate
+    while True:
+        reduced = [
+            _candidate_from_jobs(set(current["jobs"]) - {job_id}, nodes, jobs, target)
+            for job_id in current["jobs"]
+        ]
+        feasible = [item for item in reduced if len(item["freed_nodes"]) >= target.nodes]
+        if not feasible:
+            return current
+        current = min(feasible, key=key)
+
+
+def _heuristic_candidates(
+    eligible: list[str],
+    nodes: dict[str, dict[str, Any]],
+    jobs: dict[str, dict[str, Any]],
+    target: Target,
+    keys: list[Callable[[dict[str, Any]], tuple[Any, ...]]],
+    max_states: int,
+) -> list[dict[str, Any]]:
+    eligible_jobs = sorted({job_id for name in eligible for job_id in nodes[name]["jobs"]})
+    seeds = [{job_id} for job_id in eligible_jobs]
+    seeds.extend(set(nodes[name]["jobs"]) for name in eligible)
+    additions = [{job_id} for job_id in eligible_jobs]
+    additions.extend(set(nodes[name]["jobs"]) for name in eligible)
+    unique_seeds = {tuple(sorted(seed)): seed for seed in seeds if seed}
+    unique_additions = list({tuple(sorted(item)): item for item in additions if item}.values())
+    results: list[dict[str, Any]] = []
+    for key in keys:
+        examined = 0
+        for seed in unique_seeds.values():
+            selected = set(seed)
+            while examined < max_states:
+                candidate = _candidate_from_jobs(selected, nodes, jobs, target)
+                examined += 1
+                if len(candidate["freed_nodes"]) >= target.nodes:
+                    results.append(_prune_candidate(candidate, nodes, jobs, target, key))
+                    break
+                expansions = []
+                for addition in unique_additions:
+                    expanded = selected | addition
+                    if expanded == selected:
+                        continue
+                    proposal = _candidate_from_jobs(expanded, nodes, jobs, target)
+                    examined += 1
+                    gained = len(proposal["freed_nodes"]) - len(candidate["freed_nodes"])
+                    expansions.append((-gained, key(proposal), tuple(sorted(expanded)), expanded))
+                    if examined >= max_states:
+                        break
+                if not expansions:
+                    break
+                selected = set(min(expansions)[3])
+            if examined >= max_states:
+                break
+        if examined >= max_states:
+            break
+    return results
 
 
 def solve_candidates(
@@ -163,6 +256,11 @@ def solve_candidates(
         math.comb(len(eligible), size) for size in range(1, max_group_size + 1)
     )
 
+    keys: list[tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]]]] = [
+        ("min-gpu", lambda c: (c["gpus"], c["job_count"], c["users"], c["jobs"])),
+        ("min-jobs", lambda c: (c["job_count"], c["gpus"], c["users"], c["jobs"])),
+        ("min-users", lambda c: (c["users"], c["gpus"], c["job_count"], c["jobs"])),
+    ]
     candidates: list[dict[str, Any]] = []
     optimality = "exact" if state_count <= max_states else "heuristic"
     if optimality == "exact":
@@ -181,44 +279,23 @@ def solve_candidates(
                 break
 
     if optimality == "heuristic":
-        heuristic_keys: list[Callable[[dict[str, Any]], tuple[Any, ...]]] = [
-            lambda c: (c["gpus"], c["job_count"], c["users"], c["jobs"]),
-            lambda c: (c["job_count"], c["gpus"], c["users"], c["jobs"]),
-            lambda c: (c["users"], c["gpus"], c["job_count"], c["jobs"]),
-        ]
-        for key in heuristic_keys:
-            chosen: list[str] = []
-            remaining = sorted(eligible)
-            while remaining and len(chosen) < max_group_size:
-                next_node = min(
-                    remaining,
-                    key=lambda name: key(_candidate([*chosen, name], nodes, jobs, target)),
-                )
-                chosen.append(next_node)
-                remaining.remove(next_node)
-                candidate = _candidate(chosen, nodes, jobs, target)
-                if len(candidate["freed_nodes"]) >= target.nodes:
-                    candidates.append(candidate)
-                    break
+        candidates = _heuristic_candidates(
+            eligible, nodes, jobs, target, [key for _, key in keys], max_states
+        )
 
     if not candidates:
         return [], optimality
-    keys: list[tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]]]] = [
-        ("min-gpu", lambda c: (c["gpus"], c["job_count"], c["users"], c["jobs"])),
-        ("min-jobs", lambda c: (c["job_count"], c["gpus"], c["users"], c["jobs"])),
-        ("min-users", lambda c: (c["users"], c["gpus"], c["job_count"], c["jobs"])),
-    ]
     selected: list[dict[str, Any]] = []
     seen: dict[tuple[str, ...], dict[str, Any]] = {}
     for strategy, key in keys:
         best = min(candidates, key=key)
         signature = tuple(best["jobs"])
         if signature in seen:
-            seen[signature]["also_optimal_for"].append(strategy)
+            seen[signature]["also_strategies"].append(strategy)
             continue
         plan = {
             "strategy": strategy,
-            "also_optimal_for": [],
+            "also_strategies": [],
             "optimality": optimality,
             **best,
         }
@@ -451,26 +528,27 @@ def render_text(report: dict[str, Any]) -> str:
     if not report["suggestions"]:
         lines.append("Result: no eligible candidate suggestion satisfies the target.")
         return "\n".join(lines) + "\n"
-    labels = {"min-gpu": "minimum coordinated GPU", "min-jobs": "minimum jobs", "min-users": "minimum users"}
+    labels = {"min-gpu": "coordinated GPU", "min-jobs": "jobs", "min-users": "users"}
     for index, suggestion in enumerate(report["suggestions"], 1):
         display_strategy = suggestion.get("display_strategy", suggestion["strategy"])
         equivalent = [
             strategy for strategy in (
-                suggestion["strategy"], *suggestion.get("also_optimal_for", [])
+                suggestion["strategy"], *suggestion.get("also_strategies", [])
             )
             if strategy != display_strategy
         ]
+        qualifier = "minimum" if suggestion["optimality"] == "exact" else "lowest found"
         lines.extend(
             [
                 "",
-                f"Plan {index} ({labels[display_strategy]}, {suggestion['optimality']}):",
-                f"  Coordination candidate: {suggestion['gpus']} GPU, {suggestion['job_count']} jobs, {suggestion['users']} users",
+                f"Plan {index} ({qualifier} {labels[display_strategy]}, {suggestion['optimality']}):",
+                f"  Coordination candidate: {suggestion['gpus']} GPU, {_count_label(suggestion['job_count'], 'job')}, {_count_label(suggestion['users'], 'user')}",
                 f"  Freed nodes: {', '.join(suggestion['freed_nodes'][:target['nodes']])}",
             ]
         )
         if equivalent:
             lines.append(
-                "  Also optimal for: "
+                ("  Also optimal for: " if suggestion["optimality"] == "exact" else "  Also best found for: ")
                 + ", ".join(labels[strategy] for strategy in equivalent)
             )
         for job in suggestion["job_details"]:
@@ -559,20 +637,21 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
         return True
 
     labels = {
-        "min-gpu": "Minimum coordinated GPU",
-        "min-jobs": "Minimum jobs",
-        "min-users": "Minimum users",
+        "min-gpu": "coordinated GPU",
+        "min-jobs": "jobs",
+        "min-users": "users",
     }
     for index, suggestion in enumerate(suggestions, 1):
         display_strategy = suggestion.get("display_strategy", suggestion["strategy"])
         equivalent = [
             strategy for strategy in (
-                suggestion["strategy"], *suggestion.get("also_optimal_for", [])
+                suggestion["strategy"], *suggestion.get("also_strategies", [])
             )
             if strategy != display_strategy
         ]
+        qualifier = "Minimum" if suggestion["optimality"] == "exact" else "Lowest found"
         plan = Table(
-            title=f"Plan {index} · {labels[display_strategy]} · {suggestion['optimality']}",
+            title=f"Plan {index} · {qualifier} {labels[display_strategy]} · {suggestion['optimality']}",
             box=box.SIMPLE_HEAVY,
             header_style="bold blue",
         )
@@ -590,14 +669,15 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
             )
         console.print(
             f"[bold]Coordination candidate:[/] [yellow]{suggestion['gpus']} GPU[/], "
-            f"{suggestion['job_count']} jobs, {suggestion['users']} users\n"
+            f"{_count_label(suggestion['job_count'], 'job')}, "
+            f"{_count_label(suggestion['users'], 'user')}\n"
             f"[bold]Freed nodes:[/] [green]"
             + ", ".join(suggestion["freed_nodes"][:target["nodes"]])
             + "[/]"
         )
         if equivalent:
             console.print(
-                "[bold]Also optimal for:[/] [magenta]"
+                ("[bold]Also optimal for:[/] [magenta]" if suggestion["optimality"] == "exact" else "[bold]Also best found for:[/] [magenta]")
                 + ", ".join(labels[strategy] for strategy in equivalent)
                 + "[/]"
             )
@@ -684,7 +764,7 @@ def main() -> int:
             for suggestion in report["suggestions"]:
                 if (
                     args.strategy == suggestion["strategy"]
-                    or args.strategy in suggestion.get("also_optimal_for", [])
+                    or args.strategy in suggestion.get("also_strategies", [])
                 ):
                     suggestion["display_strategy"] = args.strategy
                     filtered.append(suggestion)

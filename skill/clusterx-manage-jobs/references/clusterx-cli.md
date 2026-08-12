@@ -192,8 +192,10 @@ jobs. Jobs remain indivisible: selecting any placement charges the job's total
 GPU allocation and evaluates every node released by that job.
 
 Only jobs placed on nodes selected by `--candidate-scope` are candidates.
-Exact search is used up to 100,000 states, then deterministic results marked
-`heuristic` are returned.
+Exact search is used up to 100,000 states. Larger searches use deterministic,
+multi-start job/node heuristics followed by redundant-job pruning. Exact plans
+are labeled `Minimum`; heuristic plans are labeled `Lowest found` and do not
+claim global optimality. JSON uses `also_strategies` for deduplicated plans.
 Missing Worker mappings, truncated node inventory, allocation mismatches, or a
 changing job snapshot cause a safe failure rather than a partial suggestion.
 If a node's allocated GPU count is greater than the GPU resources attributable

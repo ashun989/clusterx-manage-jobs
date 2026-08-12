@@ -88,9 +88,55 @@ class QueuePlanTests(unittest.TestCase):
         nodes = {f"n{i}": node(f"n{i}", 1, {str(i): {"gpu": 1}})
                  for i in range(6)}
         plans, optimality = m.solve_candidates(
-            nodes, jobs, m.Target(3, 8), max_states=1)
+            nodes, jobs, m.Target(3, 8), max_states=20)
         self.assertEqual(optimality, "heuristic")
         self.assertTrue(plans)
+
+    def test_heuristic_prunes_small_jobs_when_large_job_alone_is_feasible(self):
+        m = self.module
+        jobs = {
+            "small-a": job("small-a", "u", 1),
+            "small-b": job("small-b", "u", 1),
+            "large": job("large", "u", 192),
+        }
+        jobs["small-a"]["placements"] = [{"node": "f1", "gpu": 1}]
+        jobs["small-b"]["placements"] = [{"node": "f2", "gpu": 1}]
+        jobs["large"]["placements"] = [
+            {"node": f"n{i}", "gpu": 8} for i in range(24)
+        ]
+        nodes = {
+            "f1": node("f1", 1, {"small-a": {"gpu": 1}}),
+            "f2": node("f2", 1, {"small-b": {"gpu": 1}}),
+            **{
+                f"n{i}": node(f"n{i}", 8, {"large": {"gpu": 8}})
+                for i in range(24)
+            },
+        }
+        plans, optimality = m.solve_candidates(
+            nodes, jobs, m.Target(4, 8), candidate_scope="all", max_states=10
+        )
+        self.assertEqual(optimality, "heuristic")
+        by_strategy = {plan["strategy"]: plan for plan in plans}
+        self.assertEqual(by_strategy["min-gpu"]["jobs"], ["large"])
+        self.assertEqual(by_strategy["min-gpu"]["gpus"], 192)
+        self.assertEqual(by_strategy["min-gpu"]["job_count"], 1)
+
+    def test_heuristic_plans_are_single_job_irreducible(self):
+        m = self.module
+        jobs = {name: job(name, "u", 1) for name in "abcde"}
+        nodes = {
+            f"n{i}": node(f"n{i}", 1, {name: {"gpu": 1}})
+            for i, name in enumerate(jobs)
+        }
+        plans, _ = m.solve_candidates(
+            nodes, jobs, m.Target(3, 8), max_states=20
+        )
+        for plan in plans:
+            for job_id in plan["jobs"]:
+                reduced = m._candidate_from_jobs(
+                    set(plan["jobs"]) - {job_id}, nodes, jobs, m.Target(3, 8)
+                )
+                self.assertLess(len(reduced["freed_nodes"]), 3)
 
     def test_script_contains_no_stop_operation(self):
         source = SCRIPT.read_text(encoding="utf-8")
@@ -137,7 +183,7 @@ class QueuePlanTests(unittest.TestCase):
         self.assertEqual(by_strategy["min-gpu"]["gpus"], 4)
         self.assertEqual(by_strategy["min-jobs"]["jobs"], ["multi"])
         self.assertEqual(
-            by_strategy["min-jobs"]["also_optimal_for"], ["min-users"]
+            by_strategy["min-jobs"]["also_strategies"], ["min-users"]
         )
 
     def test_report_exposes_candidate_scope_and_full_node_count(self):
@@ -160,14 +206,15 @@ class QueuePlanTests(unittest.TestCase):
         plans, _ = m.solve_candidates(nodes, jobs, m.Target(2, 8))
         self.assertEqual(len(plans), 1)
         self.assertEqual(
-            plans[0]["also_optimal_for"], ["min-jobs", "min-users"])
+            plans[0]["also_strategies"], ["min-jobs", "min-users"])
+        self.assertNotIn("also_optimal_for", plans[0])
         jobs["a"]["placements"] = [{"node": "n1", "gpu": 1}]
         jobs["b"]["placements"] = [{"node": "n2", "gpu": 1}]
         report = m.build_report(
             {"nodes": nodes, "jobs": jobs}, m.Target(2, 8), "queue", "cluster")
         text = m.render_text(report)
         self.assertIn(
-            "Also optimal for: minimum jobs, minimum users", text)
+            "Also optimal for: jobs, users", text)
 
     def test_rich_report_contains_tables_and_color(self):
         from rich.console import Console
@@ -188,7 +235,7 @@ class QueuePlanTests(unittest.TestCase):
         self.assertIn("Fragmented nodes", output)
         self.assertIn("Plan 1", output)
         self.assertIn("Also optimal for:", output)
-        self.assertIn("Minimum jobs, Minimum users", output)
+        self.assertIn("jobs, users", output)
         self.assertIn("\x1b[", output)
 
     def test_min_jobs_strategy_is_accepted(self):
