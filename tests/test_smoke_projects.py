@@ -205,8 +205,17 @@ class SmokeProjectTests(unittest.TestCase):
             "`2` means arguments",
             "allocated GPU count",
             "not claimed as fully releasable",
+            "Complete options:",
+            "default can display up to nine plan cards",
+            '"schema_version": 1',
+            "`estimated-time`",
+            "`exact-deadline`",
+            "cross-strategy deduplication",
         ):
             self.assertIn(marker, cli_reference)
+        self.assertNotIn("plus deduplicated candidates", cli_reference)
+        self.assertNotIn("the report deduplicates", cli_reference)
+        self.assertNotIn("最少任务", readme)
 
 
 if __name__ == "__main__":

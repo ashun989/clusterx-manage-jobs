@@ -152,11 +152,11 @@ printf '%s\n' 'access_token=example' |
 
 ```text
 使用 $clusterx-manage-jobs，分析当前队列申请 2 个完整 8 卡节点的资源整理方案，
-展示最少 GPU、最少任务和最少用户的候选，不要停止任务。
+展示最少 GPU、最少作业和最少用户的候选，每种策略最多给 3 个方案，不要停止作业。
 ```
 
 ```text
-使用 $clusterx-manage-jobs，汇总当前队列每个碎片节点上的用户、任务、GPU
+使用 $clusterx-manage-jobs，汇总当前队列每个碎片节点上的用户、作业、GPU
 占用和最近 10 分钟负载。
 ```
 
