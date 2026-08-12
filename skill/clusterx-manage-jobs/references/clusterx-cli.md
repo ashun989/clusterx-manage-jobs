@@ -171,20 +171,21 @@ python3 scripts/queue_plan.py --cwd <project> --nodes 2
 
 The command joins running jobs, users, requested resources, runtime Workers,
 and queue nodes. It reports fragmented nodes plus deduplicated candidates for
-minimum paused GPUs, tasks, and users. It never calls a stop API. Pass
+minimum coordinated GPUs, jobs, and users. It never calls a stop API. Pass
 `--cpus-per-node` and `--memory-per-node-gib` to include those requested
 resources; otherwise the conclusion is GPU-only. Default output is a terminal
 report; use `--json` for JSON stdout or `--out <path>` to save schema version 1.
 The default terminal report uses Rich colored tables when `requirements.txt`
 is installed and falls back to plain text otherwise.
 `--gpus-per-node` defaults to `8`; pass it explicitly for other node shapes.
-`--strategy` defaults to `all`; select `min-gpu`, `min-tasks`, or `min-users`
+`--strategy` defaults to `all`; select `min-gpu`, `min-jobs`, or `min-users`
 to show only that recommendation. `--minutes` defaults to `5` and controls
 only the Prometheus load lookback window, not allocation or candidate solving.
-When multiple strategies resolve to the same task set, the report deduplicates
+`min-tasks` remains a deprecated compatibility alias for `min-jobs`. When
+multiple strategies resolve to the same job set, the report deduplicates
 the plan and explicitly lists every other strategy for which it is also optimal.
 
-Only tasks placed on fragmented nodes are candidates. Exact search is used up
+Only jobs placed on fragmented nodes are candidates. Exact search is used up
 to 100,000 states, then a deterministic result marked `heuristic` is returned.
 Missing Worker mappings, truncated node inventory, allocation mismatches, or a
 changing job snapshot cause a safe failure rather than a partial suggestion.

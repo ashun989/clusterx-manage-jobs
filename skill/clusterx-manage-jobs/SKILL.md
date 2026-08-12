@@ -17,7 +17,7 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 - For a preflight check, run `python3 scripts/preflight.py`.
 - For queue packing, per-user/per-job node allocation, GPU fragmentation, or
   full-node scheduling analysis, run `python3 scripts/queue_plan.py`. This is a
-  read-only report and must never stop tasks. Install `requirements.txt` for
+  read-only report and must never stop jobs. Install `requirements.txt` for
   colored Rich tables; retain the built-in plain-text fallback when unavailable.
 - Run Clusterx through `python3 scripts/clusterx_exec.py --cwd <project> --`
   so project configuration overrides the persistent global configuration and
@@ -93,12 +93,12 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 
 - Execute `list`, `get-job`, `get-node`, `log`, and `stats` as read-only
   operations without confirmation unless another action is implied.
-- For requests such as "why can 2 x 8 GPU not schedule" or "which tasks could
+- For requests such as "why can 2 x 8 GPU not schedule" or "which jobs could
   be coordinated to release full nodes", run `queue_plan.py --nodes M`;
   `--gpus-per-node` defaults to 8. Add `--cpus-per-node` and
   `--memory-per-node-gib` only when the target workload specifies them. Treat
   every suggestion as a coordination candidate, not authorization to stop
-  anything. Use `--strategy all|min-gpu|min-tasks|min-users`; default to
+  anything. Use `--strategy all|min-gpu|min-jobs|min-users`; default to
   `all`.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
   pagination, filter, and ordering options when the result set is large. Treat

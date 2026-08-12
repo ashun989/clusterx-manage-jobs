@@ -88,7 +88,7 @@ def _fits(node: dict[str, Any], target: Target, stopped: set[str]) -> bool:
 def _job_cost(job_ids: set[str], jobs: dict[str, dict[str, Any]]) -> dict[str, int]:
     return {
         "gpus": sum(int(jobs[j]["total_gpu"]) for j in job_ids),
-        "tasks": len(job_ids),
+        "job_count": len(job_ids),
         "users": len({str(jobs[j]["user"]) for j in job_ids}),
     }
 
@@ -184,9 +184,9 @@ def solve_candidates(
     if not candidates:
         return [], optimality
     keys: list[tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]]]] = [
-        ("min-gpu", lambda c: (c["gpus"], c["tasks"], c["users"], c["jobs"])),
-        ("min-tasks", lambda c: (c["tasks"], c["gpus"], c["users"], c["jobs"])),
-        ("min-users", lambda c: (c["users"], c["gpus"], c["tasks"], c["jobs"])),
+        ("min-gpu", lambda c: (c["gpus"], c["job_count"], c["users"], c["jobs"])),
+        ("min-jobs", lambda c: (c["job_count"], c["gpus"], c["users"], c["jobs"])),
+        ("min-users", lambda c: (c["users"], c["gpus"], c["job_count"], c["jobs"])),
     ]
     selected: list[dict[str, Any]] = []
     seen: dict[tuple[str, ...], dict[str, Any]] = {}
@@ -412,13 +412,14 @@ def render_text(report: dict[str, Any]) -> str:
             f"fragmented nodes: {summary['fragmented_nodes']}"
         ),
     ]
+    lines.extend(f"Warning: {warning}" for warning in report.get("warnings", []))
     if not report["analysis"]["needs_repacking"]:
-        lines.append("Result: enough nodes are already schedulable; no task pause is needed.")
+        lines.append("Result: enough nodes are already schedulable; no job coordination is needed.")
         return "\n".join(lines) + "\n"
     if not report["suggestions"]:
         lines.append("Result: no eligible fragmented-node suggestion satisfies the target.")
         return "\n".join(lines) + "\n"
-    labels = {"min-gpu": "minimum paused GPU", "min-tasks": "minimum tasks", "min-users": "minimum users"}
+    labels = {"min-gpu": "minimum coordinated GPU", "min-jobs": "minimum jobs", "min-users": "minimum users"}
     for index, suggestion in enumerate(report["suggestions"], 1):
         display_strategy = suggestion.get("display_strategy", suggestion["strategy"])
         equivalent = [
@@ -431,7 +432,7 @@ def render_text(report: dict[str, Any]) -> str:
             [
                 "",
                 f"Plan {index} ({labels[display_strategy]}, {suggestion['optimality']}):",
-                f"  Pause candidate: {suggestion['gpus']} GPU, {suggestion['tasks']} tasks, {suggestion['users']} users",
+                f"  Coordination candidate: {suggestion['gpus']} GPU, {suggestion['job_count']} jobs, {suggestion['users']} users",
                 f"  Freed nodes: {', '.join(suggestion['freed_nodes'][:target['nodes']])}",
             ]
         )
@@ -442,7 +443,7 @@ def render_text(report: dict[str, Any]) -> str:
             )
         for job in suggestion["job_details"]:
             lines.append(f"  - {job['user']}: {job['job_name']} ({job['total_gpu']} GPU total)")
-    lines.append("\nRead-only report: no task was stopped or modified.")
+    lines.append("\nRead-only report: no job was stopped or modified.")
     return "\n".join(lines) + "\n"
 
 
@@ -484,6 +485,8 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
     )
     overview.add_row("Status", status)
     console.print(Panel(overview, title="[bold]ClusterX Queue Packing[/]", border_style="cyan"))
+    for warning in report.get("warnings", []):
+        console.print(f"[bold yellow]Warning:[/] {warning}")
 
     fragments = report.get("fragmented_nodes") or []
     if fragments:
@@ -522,8 +525,8 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
         return True
 
     labels = {
-        "min-gpu": "Minimum paused GPU",
-        "min-tasks": "Minimum tasks",
+        "min-gpu": "Minimum coordinated GPU",
+        "min-jobs": "Minimum jobs",
         "min-users": "Minimum users",
     }
     for index, suggestion in enumerate(suggestions, 1):
@@ -540,7 +543,7 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
             header_style="bold blue",
         )
         plan.add_column("User", style="cyan")
-        plan.add_column("Task")
+        plan.add_column("Job")
         plan.add_column("GPU", justify="right", style="yellow")
         plan.add_column("Placement", style="dim")
         for job in suggestion["job_details"]:
@@ -552,8 +555,8 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
                 str(job["total_gpu"]), placement,
             )
         console.print(
-            f"[bold]Pause candidate:[/] [yellow]{suggestion['gpus']} GPU[/], "
-            f"{suggestion['tasks']} tasks, {suggestion['users']} users\n"
+            f"[bold]Coordination candidate:[/] [yellow]{suggestion['gpus']} GPU[/], "
+            f"{suggestion['job_count']} jobs, {suggestion['users']} users\n"
             f"[bold]Freed nodes:[/] [green]"
             + ", ".join(suggestion["freed_nodes"][:target["nodes"]])
             + "[/]"
@@ -565,7 +568,7 @@ def render_rich(report: dict[str, Any], *, console: Any | None = None) -> bool:
                 + "[/]"
             )
         console.print(plan)
-    console.print("[dim]Read-only report: no task was stopped or modified.[/]")
+    console.print("[dim]Read-only report: no job was stopped or modified.[/]")
     return True
 
 
@@ -585,13 +588,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minutes", type=int, default=5, help="Prometheus lookback only (default: 5)")
     parser.add_argument(
         "--strategy",
-        choices=("all", "min-gpu", "min-tasks", "min-users"),
+        choices=("all", "min-gpu", "min-jobs", "min-users", "min-tasks"),
         default="all",
         help="Suggestion strategy to display (default: all)",
     )
     parser.add_argument("--json", action="store_true", dest="as_json", help="Print schema-versioned JSON instead of a terminal report")
     parser.add_argument("--out", type=Path, help="Also save the complete JSON report to this path")
     args = parser.parse_args()
+    args.deprecated_strategy = None
+    if args.strategy == "min-tasks":
+        args.deprecated_strategy = "min-tasks"
+        args.strategy = "min-jobs"
     for name in ("nodes", "gpus_per_node"):
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
@@ -633,6 +640,10 @@ def main() -> int:
         target = Target(args.nodes, args.gpus_per_node, args.cpus_per_node, args.memory_per_node_gib)
         report = build_report(snapshot, target, str(queue), str(cluster_name))
         report["warnings"].extend(warnings)
+        if args.deprecated_strategy:
+            report["warnings"].append(
+                "--strategy min-tasks is deprecated; use min-jobs"
+            )
         report["analysis"]["requested_strategy"] = args.strategy
         if args.strategy != "all":
             filtered = []

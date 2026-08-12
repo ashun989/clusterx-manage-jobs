@@ -54,7 +54,7 @@ class QueuePlanTests(unittest.TestCase):
         self.assertEqual(optimality, "exact")
         by_strategy = {plan["strategy"]: plan for plan in plans}
         self.assertEqual(by_strategy["min-gpu"]["gpus"], 3)
-        self.assertEqual(by_strategy["min-tasks"]["tasks"], 2)
+        self.assertEqual(by_strategy["min-jobs"]["job_count"], 2)
         self.assertEqual(by_strategy["min-users"]["users"], 1)
 
     def test_existing_free_nodes_need_no_pause(self):
@@ -80,7 +80,7 @@ class QueuePlanTests(unittest.TestCase):
         nodes = {"n1": node("n1", 2, {"multi": {"gpu": 2}}),
                  "n2": node("n2", 2, {"multi": {"gpu": 2}})}
         plans, _ = m.solve_candidates(nodes, jobs, m.Target(2, 8))
-        self.assertEqual((plans[0]["gpus"], plans[0]["tasks"]), (4, 1))
+        self.assertEqual((plans[0]["gpus"], plans[0]["job_count"]), (4, 1))
 
     def test_small_search_limit_marks_heuristic(self):
         m = self.module
@@ -111,14 +111,14 @@ class QueuePlanTests(unittest.TestCase):
         plans, _ = m.solve_candidates(nodes, jobs, m.Target(2, 8))
         self.assertEqual(len(plans), 1)
         self.assertEqual(
-            plans[0]["also_optimal_for"], ["min-tasks", "min-users"])
+            plans[0]["also_optimal_for"], ["min-jobs", "min-users"])
         jobs["a"]["placements"] = [{"node": "n1", "gpu": 1}]
         jobs["b"]["placements"] = [{"node": "n2", "gpu": 1}]
         report = m.build_report(
             {"nodes": nodes, "jobs": jobs}, m.Target(2, 8), "queue", "cluster")
         text = m.render_text(report)
         self.assertIn(
-            "Also optimal for: minimum tasks, minimum users", text)
+            "Also optimal for: minimum jobs, minimum users", text)
 
     def test_rich_report_contains_tables_and_color(self):
         from rich.console import Console
@@ -139,8 +139,16 @@ class QueuePlanTests(unittest.TestCase):
         self.assertIn("Fragmented nodes", output)
         self.assertIn("Plan 1", output)
         self.assertIn("Also optimal for:", output)
-        self.assertIn("Minimum tasks, Minimum users", output)
+        self.assertIn("Minimum jobs, Minimum users", output)
         self.assertIn("\x1b[", output)
+
+    def test_min_tasks_is_normalized_to_deprecated_alias(self):
+        with mock.patch.object(
+            sys, "argv", ["queue_plan.py", "--nodes", "2", "--strategy", "min-tasks"]
+        ):
+            args = self.module.parse_args()
+        self.assertEqual(args.strategy, "min-jobs")
+        self.assertEqual(args.deprecated_strategy, "min-tasks")
 
 
 if __name__ == "__main__":
