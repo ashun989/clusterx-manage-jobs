@@ -14,7 +14,10 @@ import math
 import os
 from pathlib import Path
 import re
+import select
+import signal
 import sys
+import threading
 import time
 from typing import Any, Callable, Iterable, Iterator
 
@@ -27,6 +30,11 @@ CALIBRATION_STATES = 1_000
 GPU_COMPUTE_UTIL = "gpu-compute-util"
 GPU_MEMORY_UTIL = "gpu-memory-util"
 HTTP_POOL_SIZE = 16
+_MOUSE_SCROLL_LINES = 3
+_PASTE_START = b"\x1b[200~"
+_PASTE_END = b"\x1b[201~"
+_ENABLE_DASHBOARD_INPUT = "\x1b[?1000h\x1b[?1006h\x1b[?2004h"
+_DISABLE_DASHBOARD_INPUT = "\x1b[?2004l\x1b[?1006l\x1b[?1000l"
 
 
 @dataclass(frozen=True)
@@ -1505,6 +1513,317 @@ def render_rich(
     return True
 
 
+class _ScrollableRichReport:
+    """A full report rendered through a vertically scrollable terminal window."""
+
+    def __init__(self, renderable: Any, *, refreshing: bool = True) -> None:
+        self._renderable = renderable
+        self._refreshing = refreshing
+        self._offset = 0
+        self._total_lines = 0
+        self._body_height = 1
+        self._lock = threading.RLock()
+
+    def update(self, renderable: Any, *, refreshing: bool) -> None:
+        with self._lock:
+            self._renderable = renderable
+            self._refreshing = refreshing
+
+    def set_refreshing(self, refreshing: bool) -> None:
+        with self._lock:
+            self._refreshing = refreshing
+
+    def scroll_lines(self, delta: int) -> bool:
+        with self._lock:
+            maximum = max(0, self._total_lines - self._body_height)
+            updated = min(maximum, max(0, self._offset + delta))
+            changed = updated != self._offset
+            self._offset = updated
+            return changed
+
+    def scroll_page(self, direction: int) -> bool:
+        with self._lock:
+            amount = max(1, self._body_height - 1)
+        return self.scroll_lines(direction * amount)
+
+    def home(self) -> bool:
+        with self._lock:
+            changed = self._offset != 0
+            self._offset = 0
+            return changed
+
+    def end(self) -> bool:
+        with self._lock:
+            updated = max(0, self._total_lines - self._body_height)
+            changed = updated != self._offset
+            self._offset = updated
+            return changed
+
+    @property
+    def position(self) -> tuple[int, int, int]:
+        with self._lock:
+            start = 0 if self._total_lines == 0 else self._offset + 1
+            end = min(self._total_lines, self._offset + self._body_height)
+            return start, end, self._total_lines
+
+    def __rich_console__(self, console: Any, options: Any) -> Iterable[Any]:
+        from rich.segment import Segment
+        from rich.text import Text
+
+        with self._lock:
+            body_height = max(1, options.size.height - 1)
+            report_options = options.copy()
+            report_options.height = None
+            report_options.max_height = 1_000_000
+            lines = console.render_lines(
+                self._renderable, report_options, pad=True, new_lines=False
+            )
+            total_lines = len(lines)
+            maximum = max(0, total_lines - body_height)
+            self._offset = min(maximum, max(0, self._offset))
+            self._total_lines = total_lines
+            self._body_height = body_height
+            visible = lines[self._offset:self._offset + body_height]
+            if len(visible) < body_height:
+                blank = [Segment(" " * options.size.width)]
+                visible.extend([blank] * (body_height - len(visible)))
+            start = 0 if total_lines == 0 else self._offset + 1
+            end = min(total_lines, self._offset + body_height)
+            state = "refreshing" if self._refreshing else "ready"
+            footer = Text(
+                f" {state} · lines {start}-{end}/{total_lines} · "
+                "↑↓/wheel scroll · PgUp/PgDn page · Home/End · q quit ",
+                style="reverse", overflow="ellipsis", no_wrap=True,
+            )
+            footer_lines = console.render_lines(
+                footer, options.update(height=1), pad=True, new_lines=False
+            )
+            output_lines = visible + footer_lines[:1]
+
+        for index, line in enumerate(output_lines):
+            yield from line
+            if index + 1 < len(output_lines):
+                yield Segment.line()
+
+
+class _DashboardInputParser:
+    """Parse terminal input while discarding every unsupported byte sequence."""
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self._in_paste = False
+
+    @staticmethod
+    def _partial_suffix(buffer: bytearray, marker: bytes) -> int:
+        maximum = min(len(buffer), len(marker) - 1)
+        for size in range(maximum, 0, -1):
+            if bytes(buffer[-size:]) == marker[:size]:
+                return size
+        return 0
+
+    def feed(self, data: bytes) -> list[str]:
+        self._buffer.extend(data)
+        actions: list[str] = []
+        while self._buffer:
+            if self._in_paste:
+                end = self._buffer.find(_PASTE_END)
+                if end < 0:
+                    keep = self._partial_suffix(self._buffer, _PASTE_END)
+                    if keep:
+                        del self._buffer[:-keep]
+                    else:
+                        self._buffer.clear()
+                    break
+                del self._buffer[:end + len(_PASTE_END)]
+                self._in_paste = False
+                continue
+
+            if self._buffer[0] != 0x1B:
+                value = self._buffer.pop(0)
+                if value in (ord("q"), ord("Q")):
+                    actions.append("quit")
+                elif value == 0x03:
+                    actions.append("interrupt")
+                continue
+
+            if len(self._buffer) == 1:
+                break
+            if self._buffer[1] == ord("["):
+                final_index = next(
+                    (index for index in range(2, len(self._buffer))
+                     if 0x40 <= self._buffer[index] <= 0x7E),
+                    None,
+                )
+                if final_index is None:
+                    if len(self._buffer) > 128:
+                        self._buffer.clear()
+                    break
+                sequence = bytes(self._buffer[:final_index + 1])
+                del self._buffer[:final_index + 1]
+                body = sequence[2:-1]
+                final = sequence[-1:]
+                if sequence == _PASTE_START:
+                    self._in_paste = True
+                elif final == b"A":
+                    actions.append("up")
+                elif final == b"B":
+                    actions.append("down")
+                elif final == b"H" or (final == b"~" and body in (b"1", b"7")):
+                    actions.append("home")
+                elif final == b"F" or (final == b"~" and body in (b"4", b"8")):
+                    actions.append("end")
+                elif final == b"~" and body == b"5":
+                    actions.append("page-up")
+                elif final == b"~" and body == b"6":
+                    actions.append("page-down")
+                elif final == b"M" and body.startswith(b"<"):
+                    try:
+                        button = int(body[1:].split(b";", 1)[0])
+                    except ValueError:
+                        continue
+                    if button & 64:
+                        wheel = button & 3
+                        if wheel == 0:
+                            actions.append("mouse-up")
+                        elif wheel == 1:
+                            actions.append("mouse-down")
+                continue
+
+            if self._buffer[1] == ord("O"):
+                if len(self._buffer) < 3:
+                    break
+                final = bytes((self._buffer[2],))
+                del self._buffer[:3]
+                actions.extend({
+                    b"A": ["up"], b"B": ["down"],
+                    b"H": ["home"], b"F": ["end"],
+                }.get(final, []))
+                continue
+
+            # Discard Alt-key and other unknown two-byte escape sequences whole.
+            del self._buffer[:2]
+        return actions
+
+
+class _DashboardTerminalController:
+    """Own terminal input modes and refresh the scroll window on user input."""
+
+    def __init__(
+        self, *, fd: int, console: Any, live: Any,
+        viewport: _ScrollableRichReport,
+    ) -> None:
+        self.fd = fd
+        self.console = console
+        self.live = live
+        self.viewport = viewport
+        self.quit_requested = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._original_attributes: Any | None = None
+        self._parser = _DashboardInputParser()
+
+    def _write_terminal(self, value: str) -> None:
+        self.console.file.write(value)
+        self.console.file.flush()
+
+    def start(self) -> None:
+        import termios
+
+        original = termios.tcgetattr(self.fd)
+        attributes = list(original)
+        attributes[6] = list(original[6])
+        attributes[0] &= ~(termios.IXON | termios.IXOFF | termios.ICRNL)
+        attributes[3] &= ~(
+            termios.ECHO | termios.ECHONL | termios.ICANON
+            | termios.IEXTEN | termios.ISIG
+        )
+        attributes[6][termios.VMIN] = 0
+        attributes[6][termios.VTIME] = 1
+        self._original_attributes = original
+        try:
+            termios.tcsetattr(self.fd, termios.TCSAFLUSH, attributes)
+            self._write_terminal(_ENABLE_DASHBOARD_INPUT)
+            self._thread = threading.Thread(
+                target=self._read_input, name="queue-plan-input", daemon=True
+            )
+            self._thread.start()
+        except Exception:
+            self.stop()
+            raise
+
+    def stop(self) -> None:
+        import termios
+
+        self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=1)
+            self._thread = None
+        if self._original_attributes is not None:
+            try:
+                self._write_terminal(_DISABLE_DASHBOARD_INPUT)
+                termios.tcflush(self.fd, termios.TCIFLUSH)
+            finally:
+                termios.tcsetattr(
+                    self.fd, termios.TCSAFLUSH, self._original_attributes
+                )
+                self._original_attributes = None
+
+    def _refresh_if_changed(self, changed: bool) -> None:
+        if changed:
+            self.live.refresh()
+
+    def _dispatch(self, action: str) -> bool:
+        if action == "quit":
+            self.quit_requested.set()
+            self._stop.set()
+            os.kill(os.getpid(), signal.SIGINT)
+            return False
+        if action == "interrupt":
+            self._stop.set()
+            os.kill(os.getpid(), signal.SIGINT)
+            return False
+        if action == "up":
+            self._refresh_if_changed(self.viewport.scroll_lines(-1))
+        elif action == "down":
+            self._refresh_if_changed(self.viewport.scroll_lines(1))
+        elif action == "mouse-up":
+            self._refresh_if_changed(
+                self.viewport.scroll_lines(-_MOUSE_SCROLL_LINES)
+            )
+        elif action == "mouse-down":
+            self._refresh_if_changed(
+                self.viewport.scroll_lines(_MOUSE_SCROLL_LINES)
+            )
+        elif action == "page-up":
+            self._refresh_if_changed(self.viewport.scroll_page(-1))
+        elif action == "page-down":
+            self._refresh_if_changed(self.viewport.scroll_page(1))
+        elif action == "home":
+            self._refresh_if_changed(self.viewport.home())
+        elif action == "end":
+            self._refresh_if_changed(self.viewport.end())
+        return True
+
+    def _read_input(self) -> None:
+        last_size = self.console.size
+        try:
+            while not self._stop.is_set():
+                ready, _, _ = select.select([self.fd], [], [], 0.1)
+                if ready:
+                    data = os.read(self.fd, 4096)
+                    for action in self._parser.feed(data):
+                        if not self._dispatch(action):
+                            return
+                size = self.console.size
+                if size != last_size:
+                    last_size = size
+                    self.live.refresh()
+        except OSError:
+            if not self._stop.is_set():
+                self._stop.set()
+                os.kill(os.getpid(), signal.SIGINT)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--nodes", type=int, required=True, help="Number of schedulable nodes required")
@@ -1644,21 +1963,31 @@ def _next_refresh_deadline(
 
 def _run_rich_live_reports(
     cluster: Any, args: argparse.Namespace, queue: str, cluster_name: str, *,
-    console: Any, clock: Callable[[], float], sleep: Callable[[float], None],
+    console: Any, input_fd: int, clock: Callable[[], float],
+    sleep: Callable[[float], None],
 ) -> int:
     from rich.live import Live
     from rich.text import Text
 
+    viewport = _ScrollableRichReport(
+        Text("Collecting first queue snapshot…", style="bold cyan", justify="center")
+    )
     live = Live(
-        Text("Collecting first queue snapshot…", style="bold cyan", justify="center"),
+        viewport,
         console=console, screen=True, auto_refresh=False,
-        vertical_overflow="ellipsis", redirect_stdout=False, redirect_stderr=False,
+        vertical_overflow="crop", redirect_stdout=False, redirect_stderr=False,
+    )
+    controller = _DashboardTerminalController(
+        fd=input_fd, console=console, live=live, viewport=viewport,
     )
     deadline = clock()
     last_renderable: Any | None = None
     live.start(refresh=True)
     try:
+        controller.start()
         while True:
+            viewport.set_refreshing(True)
+            live.refresh()
             report = _collect_report(cluster, args, queue, cluster_name)
             _save_report(report, args)
             renderable = _build_rich_renderable(
@@ -1667,16 +1996,24 @@ def _run_rich_live_reports(
             if renderable is None:
                 raise RuntimeError("Rich became unavailable during live rendering")
             last_renderable = renderable
-            live.update(renderable, refresh=True)
+            viewport.update(renderable, refreshing=False)
+            live.update(viewport, refresh=True)
             finished_at = clock()
             deadline, _ = _next_refresh_deadline(
                 deadline, args.refresh_seconds, finished_at
             )
             sleep(max(0.0, deadline - finished_at))
+    except KeyboardInterrupt:
+        if controller.quit_requested.is_set():
+            return 0
+        raise
     finally:
-        live.stop()
-        if last_renderable is not None:
-            console.print(last_renderable)
+        try:
+            controller.stop()
+        finally:
+            live.stop()
+            if last_renderable is not None:
+                console.print(last_renderable)
 
 
 def _run_reports(
@@ -1692,9 +2029,16 @@ def _run_reports(
         except ImportError:
             pass
         else:
-            if console.is_terminal:
+            try:
+                input_is_terminal = sys.stdin.isatty()
+                input_fd = sys.stdin.fileno()
+            except (AttributeError, OSError, ValueError):
+                input_is_terminal = False
+                input_fd = -1
+            if console.is_terminal and input_is_terminal:
                 return _run_rich_live_reports(
                     cluster, args, queue, cluster_name, console=console,
+                    input_fd=input_fd,
                     clock=clock, sleep=sleep,
                 )
     deadline = clock()

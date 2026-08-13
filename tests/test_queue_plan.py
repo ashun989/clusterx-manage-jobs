@@ -2,10 +2,16 @@ import argparse
 import importlib.util
 import io
 from datetime import datetime, timezone
+import os
 from pathlib import Path
+import pty
+import select
+import signal
 import sys
 import tempfile
+import termios
 import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -807,14 +813,27 @@ class QueuePlanTests(unittest.TestCase):
             show_gpu_details=False,
         )
         console = mock.Mock(is_terminal=True)
+        console.file = mock.Mock()
         live = mock.Mock()
+        viewport = mock.Mock()
+        controller = mock.Mock()
+        controller.quit_requested = threading.Event()
         reports = [{"snapshot": 1}, {"snapshot": 2}]
         renderables = [object(), object()]
         clock_values = iter((0, 3, 11))
         sleeps = []
 
-        with mock.patch("rich.console.Console", return_value=console), \
+        stdin = mock.Mock()
+        stdin.isatty.return_value = True
+        stdin.fileno.return_value = 17
+        with mock.patch.object(sys, "stdin", stdin), \
+                mock.patch("rich.console.Console", return_value=console), \
                 mock.patch("rich.live.Live", return_value=live) as live_class, \
+                mock.patch.object(
+                    m, "_ScrollableRichReport", return_value=viewport,
+                ) as viewport_class, mock.patch.object(
+                    m, "_DashboardTerminalController", return_value=controller,
+                ) as controller_class, \
                 mock.patch.object(
                     m, "_collect_report",
                     side_effect=[*reports, KeyboardInterrupt],
@@ -832,16 +851,30 @@ class QueuePlanTests(unittest.TestCase):
         live_kwargs = live_class.call_args.kwargs
         self.assertTrue(live_kwargs["screen"])
         self.assertFalse(live_kwargs["auto_refresh"])
-        self.assertEqual(live_kwargs["vertical_overflow"], "ellipsis")
-        self.assertIn("Collecting first queue snapshot", str(live_class.call_args.args[0]))
+        self.assertEqual(live_kwargs["vertical_overflow"], "crop")
+        self.assertIs(live_class.call_args.args[0], viewport)
+        self.assertIn(
+            "Collecting first queue snapshot",
+            str(viewport_class.call_args.args[0]),
+        )
+        controller_class.assert_called_once_with(
+            fd=17, console=console, live=live, viewport=viewport,
+        )
         live.start.assert_called_once_with(refresh=True)
         self.assertEqual(
             live.update.call_args_list,
             [
-                mock.call(renderables[0], refresh=True),
-                mock.call(renderables[1], refresh=True),
+                mock.call(viewport, refresh=True),
+                mock.call(viewport, refresh=True),
             ],
         )
+        self.assertEqual(viewport.update.call_args_list, [
+            mock.call(renderables[0], refreshing=False),
+            mock.call(renderables[1], refreshing=False),
+        ])
+        self.assertEqual(viewport.set_refreshing.call_count, 3)
+        controller.start.assert_called_once_with()
+        controller.stop.assert_called_once_with()
         live.stop.assert_called_once_with()
         console.clear.assert_not_called()
         console.print.assert_called_once_with(renderables[-1])
@@ -857,9 +890,22 @@ class QueuePlanTests(unittest.TestCase):
             show_gpu_details=False,
         )
         console = mock.Mock(is_terminal=True)
+        console.file = mock.Mock()
         live = mock.Mock()
-        with mock.patch("rich.console.Console", return_value=console), \
+        viewport = mock.Mock()
+        controller = mock.Mock()
+        controller.quit_requested = threading.Event()
+        stdin = mock.Mock()
+        stdin.isatty.return_value = True
+        stdin.fileno.return_value = 17
+        with mock.patch.object(sys, "stdin", stdin), \
+                mock.patch("rich.console.Console", return_value=console), \
                 mock.patch("rich.live.Live", return_value=live), \
+                mock.patch.object(
+                    m, "_ScrollableRichReport", return_value=viewport,
+                ), mock.patch.object(
+                    m, "_DashboardTerminalController", return_value=controller,
+                ), \
                 mock.patch.object(
                     m, "_collect_report", side_effect=RuntimeError("failed"),
                 ), mock.patch.object(m, "_save_report") as save, \
@@ -870,6 +916,8 @@ class QueuePlanTests(unittest.TestCase):
                     clock=lambda: 0, sleep=lambda unused: None,
                 )
         live.start.assert_called_once_with(refresh=True)
+        controller.start.assert_called_once_with()
+        controller.stop.assert_called_once_with()
         live.stop.assert_called_once_with()
         live.update.assert_not_called()
         save.assert_not_called()
@@ -907,6 +955,29 @@ class QueuePlanTests(unittest.TestCase):
             stream.getvalue(), "\n--- refreshed queue snapshot ---\nplain\n"
         )
 
+    def test_refresh_with_redirected_stdin_uses_plain_text(self):
+        m = self.module
+        args = argparse.Namespace(
+            refresh_seconds=5, as_json=False, out=None,
+            show_gpu_details=False,
+        )
+        console = mock.Mock(is_terminal=True)
+        stdin = mock.Mock()
+        stdin.isatty.return_value = False
+        with mock.patch.object(sys, "stdin", stdin), \
+                mock.patch("rich.console.Console", return_value=console), \
+                mock.patch.object(
+                    m, "_collect_report", side_effect=[{}, KeyboardInterrupt],
+                ), mock.patch.object(m, "_emit_report") as emit:
+            with self.assertRaises(KeyboardInterrupt):
+                m._run_reports(
+                    object(), args, "queue", "cluster",
+                    clock=StepClock(step=1), sleep=lambda unused: None,
+                )
+        emit.assert_called_once_with(
+            {}, args, append=False, force_plain=True,
+        )
+
     def test_refresh_without_rich_uses_plain_text_fallback(self):
         m = self.module
         args = argparse.Namespace(
@@ -935,6 +1006,215 @@ class QueuePlanTests(unittest.TestCase):
             payload = m._save_report({"snapshot": 2}, args)
             self.assertEqual(payload, '{\n  "snapshot": 2\n}')
             self.assertEqual(output.read_text(), payload + "\n")
+
+    def test_scrollable_rich_report_moves_and_preserves_offset(self):
+        from rich.console import Console
+        from rich.text import Text
+
+        m = self.module
+        viewport = m._ScrollableRichReport(
+            Text("\n".join(f"line-{index:02d}" for index in range(1, 13))),
+            refreshing=False,
+        )
+
+        def render(height: int = 6) -> str:
+            stream = io.StringIO()
+            console = Console(
+                file=stream, force_terminal=False, width=80, height=height,
+            )
+            console.print(viewport, end="")
+            return stream.getvalue()
+
+        output = render()
+        self.assertEqual(viewport.position, (1, 5, 12))
+        self.assertIn("ready · lines 1-5/12", output)
+        self.assertTrue(viewport.scroll_lines(1))
+        render()
+        self.assertEqual(viewport.position, (2, 6, 12))
+        self.assertTrue(viewport.scroll_page(1))
+        render()
+        self.assertEqual(viewport.position, (6, 10, 12))
+        self.assertTrue(viewport.end())
+        render()
+        self.assertEqual(viewport.position, (8, 12, 12))
+
+        viewport.update(
+            Text("\n".join(f"new-{index:02d}" for index in range(1, 10))),
+            refreshing=True,
+        )
+        output = render()
+        self.assertEqual(viewport.position, (5, 9, 9))
+        self.assertIn("refreshing · lines 5-9/9", output)
+        self.assertTrue(viewport.home())
+        render(height=4)
+        self.assertEqual(viewport.position, (1, 3, 9))
+
+    def test_dashboard_input_parser_handles_keys_mouse_and_paste(self):
+        m = self.module
+        parser = m._DashboardInputParser()
+        self.assertEqual(parser.feed(b"ordinary text\x1bq"), [])
+        self.assertEqual(parser.feed(b"\x1b["), [])
+        self.assertEqual(parser.feed(b"A\x1b[B"), ["up", "down"])
+        self.assertEqual(
+            parser.feed(
+                b"\x1b[5~\x1b[6~\x1b[H\x1b[F"
+                b"\x1b[<64;10;4M\x1b[<65;10;4M"
+            ),
+            ["page-up", "page-down", "home", "end", "mouse-up", "mouse-down"],
+        )
+        self.assertEqual(
+            parser.feed(b"\x1b[<0;1;1M\x1b[<66;1;1M\x1b[<67;1;1M"), []
+        )
+        self.assertEqual(
+            parser.feed(b"\x1b[200~qQ\x03\x1b[A pasted"), []
+        )
+        self.assertEqual(parser.feed(b" text\x1b[20"), [])
+        self.assertEqual(parser.feed(b"1~"), [])
+        self.assertEqual(parser.feed(b"Q\x03"), ["quit", "interrupt"])
+
+    def test_dashboard_controller_maps_only_supported_actions(self):
+        m = self.module
+        console = mock.Mock()
+        live = mock.Mock()
+        viewport = mock.Mock()
+        viewport.scroll_lines.return_value = True
+        viewport.scroll_page.return_value = True
+        viewport.home.return_value = True
+        viewport.end.return_value = True
+        controller = m._DashboardTerminalController(
+            fd=7, console=console, live=live, viewport=viewport,
+        )
+        for action in (
+            "up", "down", "mouse-up", "mouse-down", "page-up",
+            "page-down", "home", "end", "ignored",
+        ):
+            self.assertTrue(controller._dispatch(action))
+        self.assertEqual(viewport.scroll_lines.call_args_list, [
+            mock.call(-1), mock.call(1), mock.call(-3), mock.call(3),
+        ])
+        self.assertEqual(viewport.scroll_page.call_args_list, [
+            mock.call(-1), mock.call(1),
+        ])
+        viewport.home.assert_called_once_with()
+        viewport.end.assert_called_once_with()
+        self.assertEqual(live.refresh.call_count, 8)
+
+        with mock.patch.object(os, "kill") as kill:
+            self.assertFalse(controller._dispatch("quit"))
+        self.assertTrue(controller.quit_requested.is_set())
+        kill.assert_called_once_with(os.getpid(), signal.SIGINT)
+
+        second = m._DashboardTerminalController(
+            fd=7, console=console, live=live, viewport=viewport,
+        )
+        with mock.patch.object(os, "kill") as kill:
+            self.assertFalse(second._dispatch("interrupt"))
+        kill.assert_called_once_with(os.getpid(), signal.SIGINT)
+
+    def test_dashboard_terminal_mode_disables_echo_and_restores_pty(self):
+        m = self.module
+        master_fd, slave_fd = pty.openpty()
+        original = termios.tcgetattr(slave_fd)
+        output = os.fdopen(
+            os.dup(slave_fd), "w", encoding="utf-8", buffering=1,
+        )
+        console = mock.Mock()
+        console.file = output
+        console.size = (80, 24)
+        live = mock.Mock()
+        viewport = mock.Mock()
+        viewport.scroll_lines.return_value = True
+        controller = m._DashboardTerminalController(
+            fd=slave_fd, console=console, live=live, viewport=viewport,
+        )
+        captured = b""
+        try:
+            controller.start()
+            active = termios.tcgetattr(slave_fd)
+            self.assertFalse(active[3] & termios.ECHO)
+            self.assertFalse(active[3] & termios.ICANON)
+            self.assertFalse(active[3] & termios.ISIG)
+            self.assertFalse(active[0] & termios.IXON)
+
+            os.write(master_fd, b"x\x1b[B")
+            deadline = time.monotonic() + 1
+            while not viewport.scroll_lines.called and time.monotonic() < deadline:
+                time.sleep(0.01)
+            viewport.scroll_lines.assert_called_once_with(1)
+            live.refresh.assert_called_once_with()
+            console.size = (100, 30)
+            deadline = time.monotonic() + 1
+            while live.refresh.call_count < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(live.refresh.call_count, 2)
+        finally:
+            controller.stop()
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master_fd], [], [], 0.01)
+                if not ready:
+                    break
+                captured += os.read(master_fd, 4096)
+            output.close()
+            restored = termios.tcgetattr(slave_fd)
+            os.close(master_fd)
+            os.close(slave_fd)
+        self.assertEqual(restored, original)
+        self.assertIn(m._ENABLE_DASHBOARD_INPUT.encode(), captured)
+        self.assertIn(m._DISABLE_DASHBOARD_INPUT.encode(), captured)
+        self.assertNotIn(b"x", captured)
+
+    def test_q_interrupts_live_collection_as_normal_exit(self):
+        m = self.module
+        args = argparse.Namespace(
+            refresh_seconds=5, as_json=False, out=None,
+            show_gpu_details=False,
+        )
+        console = mock.Mock()
+        live = mock.Mock()
+        viewport = mock.Mock()
+        controller = mock.Mock()
+        controller.quit_requested = threading.Event()
+        controller.quit_requested.set()
+        with mock.patch("rich.live.Live", return_value=live), \
+                mock.patch.object(
+                    m, "_ScrollableRichReport", return_value=viewport,
+                ), mock.patch.object(
+                    m, "_DashboardTerminalController", return_value=controller,
+                ), mock.patch.object(
+                    m, "_collect_report", side_effect=KeyboardInterrupt,
+                ):
+            status = m._run_rich_live_reports(
+                object(), args, "queue", "cluster", console=console,
+                input_fd=17, clock=lambda: 0, sleep=lambda unused: None,
+            )
+        self.assertEqual(status, 0)
+        controller.stop.assert_called_once_with()
+        live.stop.assert_called_once_with()
+        console.print.assert_not_called()
+
+    def test_main_maps_keyboard_interrupt_to_130(self):
+        m = self.module
+        args = argparse.Namespace(
+            config=None, cwd=None, queue=None, cluster_name=None,
+        )
+        selection = types.SimpleNamespace(path=Path("/tmp/clusterx-test.yaml"))
+        cluster = mock.Mock()
+        cluster.cfg = {"queue": "queue", "cluster": "cluster"}
+        with mock.patch.object(m, "parse_args", return_value=args), \
+                mock.patch.object(
+                    m, "resolve_config", return_value=selection,
+                ), mock.patch.object(
+                    m, "inspect_config",
+                    return_value={"exists": True, "permissions_safe": True},
+                ), mock.patch.object(m, "_pooled_http_session"), \
+                mock.patch(
+                    "clusterx.launcher.ssp.ssp.SSPCluster",
+                    return_value=cluster,
+                ), mock.patch.object(
+                    m, "_run_reports", side_effect=KeyboardInterrupt,
+                ):
+            self.assertEqual(m.main(), 130)
 
     def test_full_scope_includes_shared_full_node(self):
         m = self.module

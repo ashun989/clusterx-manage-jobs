@@ -102,7 +102,9 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_p
 如果一次完整查询跨过一个或多个刷新时刻，这些刷新会被跳过。结合 `--json`
 时 stdout 输出 NDJSON；`--out` 始终覆盖保存最新的完整 JSON 快照。交互式
 Rich 终端会自动进入全屏仪表盘并原地更新，退出后恢复原终端且只完整打印
-最后一份快照；非 TTY 或缺少 Rich 时按快照追加纯文本。
+最后一份快照。可用方向键、滚轮、PgUp/PgDn 和 Home/End 滚动，`q` 或
+Ctrl-C 退出；其他输入不会回显或残留给 shell。鼠标事件启用期间，终端文本
+选择通常需要按住 Shift。非 TTY、stdin 重定向或缺少 Rich 时按快照追加纯文本。
 
 汇总表默认显示 `--minutes` 窗口内每个 workload 的 GPU 算力、显存平均利用率
 及单卡范围。需要定位具体卡时增加 `--show-gpu-details`；JSON 始终保留逐卡
