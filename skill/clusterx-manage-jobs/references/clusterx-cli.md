@@ -184,6 +184,11 @@ node occupancy, and per-strategy plan cards. Each plan keeps separate workload
 and placement tables; node, workload, type, CPU, memory, and GPU details are folded to the
 terminal width rather than truncated. Plain-text fallback carries the same
 search, workload, freed-node, and placement information.
+The opening overview also groups Pod-attributed workloads and allocated GPU,
+CPU, and memory by user. Per-user GPU compute and memory utilization is averaged
+over the user's reported cards and includes the observed range and telemetry
+coverage. Unattributed node resources remain separate and are never assigned to
+a user.
 Complete options:
 
 | Option | Meaning | Default / validation |
@@ -266,6 +271,24 @@ Schema version 2 has this top-level shape (values abbreviated):
     "running_workloads": 48,
     "workload_counts": {"trainingJob": 40, "aid": 8}
   },
+  "user_summaries": [{
+    "user": "<user>",
+    "workload_count": 4,
+    "workload_counts": {"aid": 3, "trainingJob": 1},
+    "allocated_gpu": 5,
+    "allocated_cpu": 64,
+    "allocated_memory_gib": 256.0,
+    "gpu_utilization": {
+      "allocated_gpu_count": 5,
+      "reported_gpu_count": 4,
+      "gpu_compute_util_avg_pct": 53.4,
+      "gpu_compute_util_min_pct": 41.2,
+      "gpu_compute_util_max_pct": 65.6,
+      "gpu_memory_util_avg_pct": 72.3,
+      "gpu_memory_util_min_pct": 70.1,
+      "gpu_memory_util_max_pct": 74.5
+    }
+  }],
   "analysis": {
     "needs_repacking": true,
     "resource_scope": "gpu",
