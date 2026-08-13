@@ -100,7 +100,9 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_p
 
 持续观察队列时使用 `--refresh-seconds S`。刷新采用固定节拍且不会并发查询；
 如果一次完整查询跨过一个或多个刷新时刻，这些刷新会被跳过。结合 `--json`
-时 stdout 输出 NDJSON；`--out` 始终覆盖保存最新的完整 JSON 快照。
+时 stdout 输出 NDJSON；`--out` 始终覆盖保存最新的完整 JSON 快照。交互式
+Rich 终端会自动进入全屏仪表盘并原地更新，退出后恢复原终端且只完整打印
+最后一份快照；非 TTY 或缺少 Rich 时按快照追加纯文本。
 
 汇总表默认显示 `--minutes` 窗口内每个 workload 的 GPU 算力、显存平均利用率
 及单卡范围。需要定位具体卡时增加 `--show-gpu-details`；JSON 始终保留逐卡

@@ -1231,23 +1231,21 @@ def render_text(report: dict[str, Any], *, show_gpu_details: bool = False) -> st
     return "\n".join(lines) + "\n"
 
 
-def render_rich(
-    report: dict[str, Any], *, console: Any | None = None,
-    show_gpu_details: bool = False,
-) -> bool:
-    """Render a colored terminal report; return False when Rich is unavailable."""
+def _build_rich_renderable(
+    report: dict[str, Any], *, show_gpu_details: bool = False,
+) -> Any | None:
+    """Build one Rich renderable, or return None when Rich is unavailable."""
     try:
         from rich import box
-        from rich.console import Console
         from rich.console import Group
         from rich.panel import Panel
         from rich.rule import Rule
         from rich.table import Table
         from rich.text import Text
     except ImportError:
-        return False
+        return None
 
-    console = console or Console()
+    renderables: list[Any] = []
     target = report["target"]
     summary = report["summary"]
     schedulable = summary["currently_schedulable_nodes"]
@@ -1307,12 +1305,12 @@ def render_rich(
     overview_content = (
         Group(overview, user_table) if report.get("user_summaries") else overview
     )
-    console.print(Panel(
+    renderables.append(Panel(
         overview_content, title="[bold]ClusterX Queue Packing[/]",
         border_style="cyan",
     ))
     for warning in report.get("warnings", []):
-        console.print(f"[bold yellow]Warning:[/] {warning}")
+        renderables.append(f"[bold yellow]Warning:[/] {warning}")
 
     analysis = report["analysis"]
     search = Table.grid(expand=True, padding=(0, 2))
@@ -1328,7 +1326,7 @@ def render_rich(
         "Time", f"{analysis['search_elapsed_seconds']:.3f}s / {analysis['search_budget_seconds']:g}s",
         "States", f"{analysis['states_examined']} examined / {analysis['estimated_states']} estimated",
     )
-    console.print(Panel(search, title="[bold]Search diagnostics[/]", border_style="blue"))
+    renderables.append(Panel(search, title="[bold]Search diagnostics[/]", border_style="blue"))
 
     fragments = report.get("fragmented_nodes") or []
     if fragments:
@@ -1370,7 +1368,7 @@ def render_rich(
                     _format_utilization(item.get("gpu_utilization"), "gpu_memory_util"),
                     str(item.get("gpu", 0)),
                 )
-        console.print(table)
+        renderables.append(table)
 
     if show_gpu_details:
         gpu_table = Table(
@@ -1404,17 +1402,17 @@ def render_rich(
                     ),
                 )
         if detail_count:
-            console.print(gpu_table)
+            renderables.append(gpu_table)
         else:
-            console.print("[yellow]No per-GPU telemetry is available.[/]")
+            renderables.append("[yellow]No per-GPU telemetry is available.[/]")
 
     if target_met:
-        console.print("[bold green]✓ Enough nodes are already schedulable; no pause is needed.[/]")
-        return True
+        renderables.append("[bold green]✓ Enough nodes are already schedulable; no pause is needed.[/]")
+        return Group(*renderables)
     suggestions = report.get("suggestions") or []
     if not suggestions:
-        console.print("[bold red]No eligible candidate suggestion satisfies the target.[/]")
-        return True
+        renderables.append("[bold red]No eligible candidate suggestion satisfies the target.[/]")
+        return Group(*renderables)
 
     labels = {"min-gpu": "Coordinated GPU", "min-workloads": "Workloads", "min-users": "Users"}
     colors = {"min-gpu": "cyan", "min-workloads": "blue", "min-users": "magenta"}
@@ -1424,7 +1422,7 @@ def render_rich(
         if not group:
             continue
         color = colors[strategy]
-        console.print(Rule(f"[bold {color}]{strategy} · {labels[strategy]}[/]", style=color))
+        renderables.append(Rule(f"[bold {color}]{strategy} · {labels[strategy]}[/]", style=color))
         for suggestion in group:
             plan_index += 1
             display_strategy = suggestion["strategy"]
@@ -1480,12 +1478,30 @@ def render_rich(
                         str(placement.get("gpu", 0)), str(placement.get("cpu", 0)),
                         str(placement.get("memory_gib", 0)),
                     )
-            console.print(Panel(
+            renderables.append(Panel(
                 Group(summary_grid, jobs_table, placement_table),
                 title=f"[bold {color}]Plan {plan_index} · Rank {suggestion['rank']} · {qualifier} · {suggestion['optimality']}[/]",
                 border_style=color,
             ))
-    console.print(Panel("[bold green]Read-only report:[/] no workload was stopped or modified.", border_style="green"))
+    renderables.append(Panel("[bold green]Read-only report:[/] no workload was stopped or modified.", border_style="green"))
+    return Group(*renderables)
+
+
+def render_rich(
+    report: dict[str, Any], *, console: Any | None = None,
+    show_gpu_details: bool = False,
+) -> bool:
+    """Render a colored terminal report; return False when Rich is unavailable."""
+    renderable = _build_rich_renderable(
+        report, show_gpu_details=show_gpu_details
+    )
+    if renderable is None:
+        return False
+    if console is None:
+        from rich.console import Console
+
+        console = Console()
+    console.print(renderable)
     return True
 
 
@@ -1587,27 +1603,31 @@ def _collect_report(
     return report
 
 
-def _emit_report(
-    report: dict[str, Any], args: argparse.Namespace, *,
-    console: Any | None = None, clear: bool = False,
-) -> None:
+def _save_report(report: dict[str, Any], args: argparse.Namespace) -> str:
     payload = json.dumps(report, ensure_ascii=False, indent=2)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(payload + "\n", encoding="utf-8")
+    return payload
+
+
+def _emit_report(
+    report: dict[str, Any], args: argparse.Namespace, *,
+    console: Any | None = None, append: bool = False,
+    force_plain: bool = False,
+) -> None:
+    payload = _save_report(report, args)
     if args.as_json:
         if args.refresh_seconds is not None:
             payload = json.dumps(report, ensure_ascii=False, separators=(",", ":"))
         sys.stdout.write(payload + "\n")
         sys.stdout.flush()
         return
-    if clear and console is not None and console.is_terminal:
-        console.clear()
-    if render_rich(
+    if not force_plain and render_rich(
         report, console=console, show_gpu_details=args.show_gpu_details
     ):
         return
-    if clear:
+    if append:
         sys.stdout.write("\n--- refreshed queue snapshot ---\n")
     sys.stdout.write(render_text(report, show_gpu_details=args.show_gpu_details))
     sys.stdout.flush()
@@ -1622,12 +1642,48 @@ def _next_refresh_deadline(
     return deadline + skipped * interval, skipped
 
 
+def _run_rich_live_reports(
+    cluster: Any, args: argparse.Namespace, queue: str, cluster_name: str, *,
+    console: Any, clock: Callable[[], float], sleep: Callable[[float], None],
+) -> int:
+    from rich.live import Live
+    from rich.text import Text
+
+    live = Live(
+        Text("Collecting first queue snapshot…", style="bold cyan", justify="center"),
+        console=console, screen=True, auto_refresh=False,
+        vertical_overflow="ellipsis", redirect_stdout=False, redirect_stderr=False,
+    )
+    deadline = clock()
+    last_renderable: Any | None = None
+    live.start(refresh=True)
+    try:
+        while True:
+            report = _collect_report(cluster, args, queue, cluster_name)
+            _save_report(report, args)
+            renderable = _build_rich_renderable(
+                report, show_gpu_details=args.show_gpu_details
+            )
+            if renderable is None:
+                raise RuntimeError("Rich became unavailable during live rendering")
+            last_renderable = renderable
+            live.update(renderable, refresh=True)
+            finished_at = clock()
+            deadline, _ = _next_refresh_deadline(
+                deadline, args.refresh_seconds, finished_at
+            )
+            sleep(max(0.0, deadline - finished_at))
+    finally:
+        live.stop()
+        if last_renderable is not None:
+            console.print(last_renderable)
+
+
 def _run_reports(
     cluster: Any, args: argparse.Namespace, queue: str, cluster_name: str, *,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
-    console = None
     if args.refresh_seconds is not None and not args.as_json:
         try:
             from rich.console import Console
@@ -1635,12 +1691,19 @@ def _run_reports(
             console = Console()
         except ImportError:
             pass
+        else:
+            if console.is_terminal:
+                return _run_rich_live_reports(
+                    cluster, args, queue, cluster_name, console=console,
+                    clock=clock, sleep=sleep,
+                )
     deadline = clock()
     refresh_index = 0
     while True:
         report = _collect_report(cluster, args, queue, cluster_name)
         _emit_report(
-            report, args, console=console, clear=refresh_index > 0,
+            report, args, append=refresh_index > 0,
+            force_plain=args.refresh_seconds is not None and not args.as_json,
         )
         if args.refresh_seconds is None:
             return 0

@@ -235,10 +235,14 @@ the budget, elapsed time, estimated and examined states, and switch reason.
 `--refresh-seconds` enables a fixed-rate monitor while preserving complete
 snapshot collection and consistency checks. Queries never overlap: if a full
 collection and render crosses one or more scheduled ticks, those ticks are
-skipped and the next future deadline is used. Rich terminals refresh in place;
-plain-text output appends labeled snapshots. With `--json`, each refresh is one
-compact NDJSON record. `--out` is overwritten with the latest complete,
-pretty-printed report after every successful refresh.
+skipped and the next future deadline is used. Interactive Rich terminals
+automatically use an alternate-screen live dashboard: the previous complete
+snapshot remains visible while the next query runs, new results replace it in
+place, and over-height content is clipped with an ellipsis. On exit, the
+original terminal is restored and only the last complete report is printed in
+full. Non-TTY or no-Rich output appends labeled plain-text snapshots. With
+`--json`, each refresh is one compact NDJSON record. `--out` is overwritten
+with the latest complete, pretty-printed report after every successful refresh.
 
 Only workloads placed on nodes selected by `--candidate-scope` are candidates.
 Exact search is controlled by the measured time budget rather than a fixed

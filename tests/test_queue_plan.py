@@ -4,6 +4,7 @@ import io
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
+import tempfile
 import threading
 import types
 import unittest
@@ -798,6 +799,142 @@ class QueuePlanTests(unittest.TestCase):
         with mock.patch.object(sys, "stdout", stream):
             m._emit_report({"schema_version": 2}, args)
         self.assertEqual(stream.getvalue(), '{"schema_version":2}\n')
+
+    def test_refresh_uses_one_full_screen_live_display_on_tty(self):
+        m = self.module
+        args = argparse.Namespace(
+            refresh_seconds=5, as_json=False, out=None,
+            show_gpu_details=False,
+        )
+        console = mock.Mock(is_terminal=True)
+        live = mock.Mock()
+        reports = [{"snapshot": 1}, {"snapshot": 2}]
+        renderables = [object(), object()]
+        clock_values = iter((0, 3, 11))
+        sleeps = []
+
+        with mock.patch("rich.console.Console", return_value=console), \
+                mock.patch("rich.live.Live", return_value=live) as live_class, \
+                mock.patch.object(
+                    m, "_collect_report",
+                    side_effect=[*reports, KeyboardInterrupt],
+                ), mock.patch.object(m, "_save_report") as save, \
+                mock.patch.object(
+                    m, "_build_rich_renderable", side_effect=renderables,
+                ):
+            with self.assertRaises(KeyboardInterrupt):
+                m._run_reports(
+                    object(), args, "queue", "cluster",
+                    clock=lambda: next(clock_values), sleep=sleeps.append,
+                )
+
+        live_class.assert_called_once()
+        live_kwargs = live_class.call_args.kwargs
+        self.assertTrue(live_kwargs["screen"])
+        self.assertFalse(live_kwargs["auto_refresh"])
+        self.assertEqual(live_kwargs["vertical_overflow"], "ellipsis")
+        self.assertIn("Collecting first queue snapshot", str(live_class.call_args.args[0]))
+        live.start.assert_called_once_with(refresh=True)
+        self.assertEqual(
+            live.update.call_args_list,
+            [
+                mock.call(renderables[0], refresh=True),
+                mock.call(renderables[1], refresh=True),
+            ],
+        )
+        live.stop.assert_called_once_with()
+        console.clear.assert_not_called()
+        console.print.assert_called_once_with(renderables[-1])
+        self.assertEqual(save.call_args_list, [
+            mock.call(reports[0], args), mock.call(reports[1], args),
+        ])
+        self.assertEqual(sleeps, [2, 4])
+
+    def test_live_first_collection_failure_restores_without_final_snapshot(self):
+        m = self.module
+        args = argparse.Namespace(
+            refresh_seconds=5, as_json=False, out=None,
+            show_gpu_details=False,
+        )
+        console = mock.Mock(is_terminal=True)
+        live = mock.Mock()
+        with mock.patch("rich.console.Console", return_value=console), \
+                mock.patch("rich.live.Live", return_value=live), \
+                mock.patch.object(
+                    m, "_collect_report", side_effect=RuntimeError("failed"),
+                ), mock.patch.object(m, "_save_report") as save, \
+                mock.patch.object(m, "_build_rich_renderable") as build:
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                m._run_reports(
+                    object(), args, "queue", "cluster",
+                    clock=lambda: 0, sleep=lambda unused: None,
+                )
+        live.start.assert_called_once_with(refresh=True)
+        live.stop.assert_called_once_with()
+        live.update.assert_not_called()
+        save.assert_not_called()
+        build.assert_not_called()
+        console.print.assert_not_called()
+
+    def test_refresh_non_tty_forces_labeled_plain_text(self):
+        m = self.module
+        args = argparse.Namespace(
+            refresh_seconds=5, as_json=False, out=None,
+            show_gpu_details=False,
+        )
+        console = mock.Mock(is_terminal=False)
+        with mock.patch("rich.console.Console", return_value=console), \
+                mock.patch.object(
+                    m, "_collect_report", side_effect=[{}, KeyboardInterrupt],
+                ), mock.patch.object(m, "_emit_report") as emit:
+            with self.assertRaises(KeyboardInterrupt):
+                m._run_reports(
+                    object(), args, "queue", "cluster",
+                    clock=StepClock(step=1), sleep=lambda unused: None,
+                )
+        emit.assert_called_once_with(
+            {}, args, append=False, force_plain=True,
+        )
+
+        stream = io.StringIO()
+        with mock.patch.object(m, "_save_report", return_value="{}"), \
+                mock.patch.object(m, "render_rich") as rich_render, \
+                mock.patch.object(m, "render_text", return_value="plain\n"), \
+                mock.patch.object(sys, "stdout", stream):
+            m._emit_report({}, args, append=True, force_plain=True)
+        rich_render.assert_not_called()
+        self.assertEqual(
+            stream.getvalue(), "\n--- refreshed queue snapshot ---\nplain\n"
+        )
+
+    def test_refresh_without_rich_uses_plain_text_fallback(self):
+        m = self.module
+        args = argparse.Namespace(
+            refresh_seconds=5, as_json=False, out=None,
+            show_gpu_details=False,
+        )
+        with mock.patch.dict(sys.modules, {"rich.console": None}), \
+                mock.patch.object(
+                    m, "_collect_report", side_effect=[{}, KeyboardInterrupt],
+                ), mock.patch.object(m, "_emit_report") as emit:
+            with self.assertRaises(KeyboardInterrupt):
+                m._run_reports(
+                    object(), args, "queue", "cluster",
+                    clock=StepClock(step=1), sleep=lambda unused: None,
+                )
+        emit.assert_called_once_with(
+            {}, args, append=False, force_plain=True,
+        )
+
+    def test_save_report_overwrites_latest_complete_snapshot(self):
+        m = self.module
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "latest.json"
+            args = argparse.Namespace(out=output)
+            m._save_report({"snapshot": 1}, args)
+            payload = m._save_report({"snapshot": 2}, args)
+            self.assertEqual(payload, '{\n  "snapshot": 2\n}')
+            self.assertEqual(output.read_text(), payload + "\n")
 
     def test_full_scope_includes_shared_full_node(self):
         m = self.module

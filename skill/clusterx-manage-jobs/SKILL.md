@@ -122,8 +122,11 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   capacity attribution, candidate ranking, or stopping decisions.
   Add `--refresh-seconds S` for a fixed-rate read-only monitor. Refreshes are
   serialized; scheduled ticks that occur while a complete query is still
-  running are skipped rather than overlapped. In refresh JSON mode, stdout is
-  NDJSON and `--out` keeps the latest complete pretty-printed snapshot.
+  running are skipped rather than overlapped. Interactive Rich terminals use
+  an alternate-screen live dashboard and print only the last complete report
+  after restoring the original screen. Non-TTY or no-Rich output appends labeled
+  plain-text snapshots. In refresh JSON mode, stdout is NDJSON and `--out` keeps
+  the latest complete pretty-printed snapshot.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
   pagination, filter, and ordering options when the result set is large. Treat
   Worker fields as runtime observations and do not infer missing nodes.
