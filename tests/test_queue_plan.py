@@ -449,6 +449,110 @@ class QueuePlanTests(unittest.TestCase):
         self.assertIn("Node util", output)
         self.assertIn("GPU mem", output)
 
+    def test_user_summaries_aggregate_workloads_resources_and_utilization(self):
+        m = self.module
+        jobs = {
+            "bob-dev": job("bob-dev", "bob", 3),
+            "bob-train": job("bob-train", "bob", 1),
+            "alice-job": job("alice-job", "alice", 2),
+            "unknown-task": job("unknown-task", "", 0),
+        }
+        jobs["bob-dev"].update({
+            "type": "aid",
+            "placements": [
+                {"node": "n1", "gpu": 2, "cpu": 8, "memory_gib": 32},
+                {"node": "n2", "gpu": 1, "cpu": 4, "memory_gib": 16},
+            ],
+            "gpus": [
+                {"gpu_compute_util_pct": 10, "gpu_memory_util_pct": 40},
+                {"gpu_compute_util_pct": 30, "gpu_memory_util_pct": 60},
+            ],
+        })
+        jobs["bob-train"].update({
+            "type": "trainingJob",
+            "placements": [
+                {"node": "n1", "gpu": 1, "cpu": 2, "memory_gib": 8},
+            ],
+            "gpus": [
+                {"gpu_compute_util_pct": 50, "gpu_memory_util_pct": 80},
+            ],
+        })
+        jobs["alice-job"].update({
+            "type": "inference",
+            "placements": [
+                {"node": "n2", "gpu": 2, "cpu": 100, "memory_gib": 200},
+            ],
+        })
+        jobs["unknown-task"].update({
+            "placements": [
+                {"node": "n3", "gpu": 0, "cpu": 120, "memory_gib": 10},
+            ],
+        })
+        nodes = {
+            "n1": node(
+                "n1", 3, {"bob-dev": {"gpu": 2}, "bob-train": {"gpu": 1}},
+                cpu=10, memory=40,
+            ),
+            "n2": node(
+                "n2", 3, {"bob-dev": {"gpu": 1}, "alice-job": {"gpu": 2}},
+                cpu=104, memory=216,
+            ),
+            "n3": node(
+                "n3", 0, {"unknown-task": {"gpu": 0, "cpu": 120}},
+                cpu=120, memory=10,
+            ),
+        }
+        report = m.build_report(
+            {"nodes": nodes, "jobs": jobs}, m.Target(1, 8), "queue", "cluster"
+        )
+
+        self.assertEqual(
+            [item["user"] for item in report["user_summaries"]],
+            ["bob", "alice", "unknown"],
+        )
+        bob = report["user_summaries"][0]
+        self.assertEqual(bob["workload_count"], 2)
+        self.assertEqual(
+            bob["workload_counts"], {"aid": 1, "trainingJob": 1}
+        )
+        self.assertEqual(
+            (bob["allocated_gpu"], bob["allocated_cpu"],
+             bob["allocated_memory_gib"]),
+            (4, 14, 56),
+        )
+        self.assertEqual(bob["gpu_utilization"], {
+            "allocated_gpu_count": 4,
+            "reported_gpu_count": 3,
+            "gpu_compute_util_avg_pct": 30.0,
+            "gpu_compute_util_min_pct": 10.0,
+            "gpu_compute_util_max_pct": 50.0,
+            "gpu_memory_util_avg_pct": 60.0,
+            "gpu_memory_util_min_pct": 40.0,
+            "gpu_memory_util_max_pct": 80.0,
+        })
+        unknown = report["user_summaries"][2]
+        self.assertEqual(unknown["workload_counts"], {"unknown": 1})
+        self.assertEqual(unknown["allocated_cpu"], 120)
+
+        plain = m.render_text(report)
+        self.assertIn("Attributed resources by user:", plain)
+        self.assertIn("bob: 2 · aid 1, trainingJob 1", plain)
+        self.assertIn("4 GPU, 14 CPU, 56 GiB memory", plain)
+        self.assertIn("GPU util 30.0% [10.0–50.0] (3/4)", plain)
+
+        from rich.console import Console
+        for width in (80, 120, 160):
+            stream = io.StringIO()
+            console = Console(file=stream, force_terminal=False, width=width)
+            self.assertTrue(m.render_rich(report, console=console))
+            output = stream.getvalue()
+            self.assertIn("Attributed resources by user · 5m", output)
+            for user in ("bob", "alice", "unknown"):
+                self.assertIn(user, output)
+            overview_output = output.split("Search diagnostics", 1)[0]
+            self.assertIn("trainingJob", overview_output)
+            self.assertNotIn("…", overview_output)
+
     def test_gpu_utilization_ignores_stale_and_reports_partial_coverage(self):
         m = self.module
         jobs = {"current": job("current", "user", 2)}

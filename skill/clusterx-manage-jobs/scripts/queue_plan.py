@@ -107,6 +107,65 @@ def _summarize_gpu_utilization(
     }
 
 
+def _build_user_summaries(jobs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    users: dict[str, dict[str, Any]] = {}
+    for workload in jobs.values():
+        user = str(workload.get("user") or "unknown")
+        summary = users.setdefault(user, {
+            "user": user,
+            "workload_count": 0,
+            "workload_counts": {},
+            "allocated_gpu": 0.0,
+            "allocated_cpu": 0.0,
+            "allocated_memory_gib": 0.0,
+            "gpus": [],
+        })
+        summary["workload_count"] += 1
+        kind = str(workload.get("type") or "unknown")
+        summary["workload_counts"][kind] = (
+            summary["workload_counts"].get(kind, 0) + 1
+        )
+        for placement in workload.get("placements") or []:
+            summary["allocated_gpu"] += float(placement.get("gpu") or 0)
+            summary["allocated_cpu"] += float(placement.get("cpu") or 0)
+            summary["allocated_memory_gib"] += float(
+                placement.get("memory_gib") or 0
+            )
+        summary["gpus"].extend(workload.get("gpus") or [])
+
+    result = []
+    for summary in users.values():
+        allocated_gpu = _clean_number(summary.pop("allocated_gpu"))
+        result.append({
+            "user": summary["user"],
+            "workload_count": summary["workload_count"],
+            "workload_counts": dict(sorted(summary["workload_counts"].items())),
+            "allocated_gpu": allocated_gpu,
+            "allocated_cpu": _clean_number(summary.pop("allocated_cpu")),
+            "allocated_memory_gib": _clean_number(
+                summary.pop("allocated_memory_gib")
+            ),
+            "gpu_utilization": _summarize_gpu_utilization(
+                summary.pop("gpus"), allocated_gpu
+            ),
+        })
+    return sorted(result, key=lambda item: (
+        -float(item["allocated_gpu"]),
+        -float(item["allocated_cpu"]),
+        -float(item["allocated_memory_gib"]),
+        str(item["user"]),
+    ))
+
+
+def _format_workload_counts(summary: dict[str, Any]) -> str:
+    counts = ", ".join(
+        f"{kind} {count}"
+        for kind, count in (summary.get("workload_counts") or {}).items()
+    )
+    total = str(summary.get("workload_count") or 0)
+    return f"{total} · {counts}" if counts else total
+
+
 def _format_utilization(summary: dict[str, Any] | None, prefix: str) -> str:
     summary = summary or {}
     average = summary.get(f"{prefix}_avg_pct")
@@ -965,6 +1024,7 @@ def build_report(
         )
         if float(jobs[workload_id].get("total_gpu") or 0) > 0
     ]
+    user_summaries = _build_user_summaries(jobs)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
@@ -987,6 +1047,7 @@ def build_report(
             "running_workloads": len(jobs),
             "workload_counts": dict(sorted(type_counts.items())),
         },
+        "user_summaries": user_summaries,
         "analysis": {
             "needs_repacking": free_nodes < target.nodes,
             "resource_scope": "+".join(
@@ -1036,16 +1097,29 @@ def render_text(report: dict[str, Any], *, show_gpu_details: bool = False) -> st
             f"{report['gpu_utilization']['allocated_gpu_count']} attributed GPUs; "
             f"window={report['gpu_utilization']['window_minutes']}m"
         ),
-        (
-            "Search: "
-            f"{report['analysis']['optimality']}; "
-            f"{report['analysis']['search_elapsed_seconds']:.3f}s / "
-            f"{report['analysis']['search_budget_seconds']:g}s; "
-            f"{report['analysis']['states_examined']} / "
-            f"{report['analysis']['estimated_states']} states; "
-            f"switch={report['analysis']['switch_reason']}"
-        ),
     ]
+    lines.append("Attributed resources by user:")
+    if report.get("user_summaries"):
+        for user in report["user_summaries"]:
+            utilization = user["gpu_utilization"]
+            lines.append(
+                f"  - {user['user']}: {_format_workload_counts(user)}; "
+                f"{user['allocated_gpu']} GPU, {user['allocated_cpu']} CPU, "
+                f"{user['allocated_memory_gib']} GiB memory; "
+                f"GPU util {_format_utilization(utilization, 'gpu_compute_util')}; "
+                f"GPU mem {_format_utilization(utilization, 'gpu_memory_util')}"
+            )
+    else:
+        lines.append("  No attributed workloads.")
+    lines.append(
+        "Search: "
+        f"{report['analysis']['optimality']}; "
+        f"{report['analysis']['search_elapsed_seconds']:.3f}s / "
+        f"{report['analysis']['search_budget_seconds']:g}s; "
+        f"{report['analysis']['states_examined']} / "
+        f"{report['analysis']['estimated_states']} states; "
+        f"switch={report['analysis']['switch_reason']}"
+    )
     lines.extend(f"Warning: {warning}" for warning in report.get("warnings", []))
     fragments = report.get("fragmented_nodes") or []
     if fragments:
@@ -1174,7 +1248,37 @@ def render_rich(
         "[bold cyan]Window[/]",
         f"{gpu_telemetry['window_minutes']}m",
     )
-    console.print(Panel(overview, title="[bold]ClusterX Queue Packing[/]", border_style="cyan"))
+    user_table = Table(
+        title=f"Attributed resources by user · {gpu_telemetry['window_minutes']}m",
+        box=box.SIMPLE, expand=True, header_style="bold cyan",
+    )
+    user_table.add_column("User", overflow="fold", min_width=8)
+    user_table.add_column("Workloads", overflow="fold", ratio=2, min_width=14)
+    user_table.add_column("GPU", justify="right", width=3)
+    user_table.add_column("CPU", justify="right", width=3)
+    user_table.add_column("Memory GiB", justify="right", min_width=10)
+    user_table.add_column(
+        "GPU util", justify="right", overflow="fold", min_width=12
+    )
+    user_table.add_column(
+        "GPU mem", justify="right", overflow="fold", min_width=12
+    )
+    for user in report.get("user_summaries") or []:
+        utilization = user["gpu_utilization"]
+        user_table.add_row(
+            str(user["user"]), _format_workload_counts(user),
+            str(user["allocated_gpu"]), str(user["allocated_cpu"]),
+            str(user["allocated_memory_gib"]),
+            _format_utilization(utilization, "gpu_compute_util"),
+            _format_utilization(utilization, "gpu_memory_util"),
+        )
+    overview_content = (
+        Group(overview, user_table) if report.get("user_summaries") else overview
+    )
+    console.print(Panel(
+        overview_content, title="[bold]ClusterX Queue Packing[/]",
+        border_style="cyan",
+    ))
     for warning in report.get("warnings", []):
         console.print(f"[bold yellow]Warning:[/] {warning}")
 

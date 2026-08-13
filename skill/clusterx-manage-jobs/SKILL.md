@@ -115,8 +115,10 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   The default workload summaries include the last `--minutes` window's per-GPU
   compute and memory utilization average plus the per-card range. Add
   `--show-gpu-details` to expand a deduplicated per-card terminal table; JSON
-  always includes per-card telemetry. Utilization is observational and must
-  never affect capacity attribution, candidate ranking, or stopping decisions.
+  always includes per-card telemetry. The opening overview groups attributed
+  workload counts and allocated GPU, CPU, and memory by user; unattributed node
+  resources remain separate. Utilization is observational and must never affect
+  capacity attribution, candidate ranking, or stopping decisions.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
   pagination, filter, and ordering options when the result set is large. Treat
   Worker fields as runtime observations and do not infer missing nodes.
