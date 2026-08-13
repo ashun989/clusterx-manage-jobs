@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import itertools
@@ -15,7 +16,7 @@ from pathlib import Path
 import re
 import sys
 import time
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from config_resolver import inspect_config, resolve_config
 from redact import redact
@@ -25,6 +26,7 @@ SCHEMA_VERSION = 2
 CALIBRATION_STATES = 1_000
 GPU_COMPUTE_UTIL = "gpu-compute-util"
 GPU_MEMORY_UTIL = "gpu-memory-util"
+HTTP_POOL_SIZE = 16
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,31 @@ class Target:
     gpus: int
     cpus: int | None = None
     memory_gib: int | None = None
+
+
+@contextmanager
+def _pooled_http_session(pool_size: int = HTTP_POOL_SIZE) -> Iterator[None]:
+    """Reuse HTTP connections for Clusterx SDK calls within this process."""
+    import requests
+    from requests.adapters import HTTPAdapter
+
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=pool_size, pool_maxsize=pool_size, max_retries=0,
+        pool_block=True,
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    original_request = requests.request
+    original_get = requests.get
+    requests.request = session.request
+    requests.get = session.get
+    try:
+        yield
+    finally:
+        requests.request = original_request
+        requests.get = original_get
+        session.close()
 
 
 def _parse_utc_timestamp(value: Any) -> datetime | None:
@@ -432,7 +459,7 @@ def solve_candidates(
     target: Target,
     *,
     candidate_scope: str = "fragmented",
-    alternatives: int = 3,
+    alternatives: int = 1,
     search_seconds: float = 10.0,
     clock: Callable[[], float] = time.monotonic,
     search_stats: dict[str, Any] | None = None,
@@ -795,12 +822,6 @@ def collect_snapshot(
     if failures:
         raise RuntimeError(f"pod workload mapping failed for {len(failures)} occupied nodes")
 
-    after_nodes = cluster.client.list_queue_nodes(
-        cluster=cluster_name, queue=queue, page_size=100, is_bound=True
-    ).get("nodes") or []
-    if _node_signature(nodes_list) != _node_signature(after_nodes):
-        raise RuntimeError("queue node allocation changed during collection; retry the command")
-
     jobs: dict[str, dict[str, Any]] = {}
     hostname_to_node: dict[str, str] = {}
     for node_name, node in nodes.items():
@@ -864,37 +885,48 @@ def collect_snapshot(
     for item in jobs.values():
         item["total_gpu"] = _clean_number(sum(float(p["gpu"]) for p in item["placements"]))
 
-    if any(float(item["total_gpu"]) > 0 for item in jobs.values()):
-        try:
-            utilization_series = _query_gpu_utilization(
-                cluster, queue, cluster_name, minutes
-            )
-            warnings.extend(_attach_gpu_utilization(
-                jobs, utilization_series, hostname_to_node
-            ))
-        except Exception:
-            _attach_gpu_utilization(jobs, [], hostname_to_node)
-            warnings.append(
-                "Per-GPU utilization was unavailable; allocation analysis is still valid"
-            )
-    else:
-        _attach_gpu_utilization(jobs, [], hostname_to_node)
-
-    try:
-        metric_rows = cluster.stats_prometheus(
-            scope="queue", metric="all", minutes=minutes, queue=queue,
-            cluster=cluster_name, verbose=False,
+    with ThreadPoolExecutor(max_workers=1) as consistency_pool:
+        after_nodes_future = consistency_pool.submit(
+            cluster.client.list_queue_nodes,
+            cluster=cluster_name, queue=queue, page_size=100, is_bound=True,
         )
-        for row in metric_rows:
-            node_name = hostname_to_node.get(str(row.get("hostname") or ""))
-            if not node_name:
-                continue
-            nodes[node_name]["metrics"] = {
-                key: value for key, value in row.items()
-                if key not in {"hostname", "scope", "granularity", "window"}
-            }
-    except Exception:
-        warnings.append("Prometheus node metrics were unavailable; allocation analysis is still valid")
+        if any(float(item["total_gpu"]) > 0 for item in jobs.values()):
+            try:
+                utilization_series = _query_gpu_utilization(
+                    cluster, queue, cluster_name, minutes
+                )
+                warnings.extend(_attach_gpu_utilization(
+                    jobs, utilization_series, hostname_to_node
+                ))
+            except Exception:
+                _attach_gpu_utilization(jobs, [], hostname_to_node)
+                warnings.append(
+                    "Per-GPU utilization was unavailable; allocation analysis is still valid"
+                )
+        else:
+            _attach_gpu_utilization(jobs, [], hostname_to_node)
+
+        try:
+            metric_rows = cluster.stats_prometheus(
+                scope="queue", metric="all", minutes=minutes, queue=queue,
+                cluster=cluster_name, verbose=False,
+            )
+            for row in metric_rows:
+                node_name = hostname_to_node.get(str(row.get("hostname") or ""))
+                if not node_name:
+                    continue
+                nodes[node_name]["metrics"] = {
+                    key: value for key, value in row.items()
+                    if key not in {"hostname", "scope", "granularity", "window"}
+                }
+        except Exception:
+            warnings.append(
+                "Prometheus node metrics were unavailable; allocation analysis is still valid"
+            )
+
+        after_nodes = (after_nodes_future.result().get("nodes") or [])
+    if _node_signature(nodes_list) != _node_signature(after_nodes):
+        raise RuntimeError("queue node allocation changed during collection; retry the command")
 
     return {
         "nodes": nodes,
@@ -906,7 +938,7 @@ def collect_snapshot(
 def build_report(
     snapshot: dict[str, Any], target: Target, queue: str, cluster_name: str,
     candidate_scope: str = "fragmented",
-    alternatives: int = 3,
+    alternatives: int = 1,
     search_seconds: float = 10.0,
     clock: Callable[[], float] = time.monotonic,
     now: Callable[[], datetime] | None = None,
@@ -1474,8 +1506,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--strategy",
         choices=("all", "min-gpu", "min-workloads", "min-jobs", "min-users"),
-        default="all",
-        help="Suggestion strategy; min-jobs is a deprecated alias for min-workloads",
+        default="min-gpu",
+        help="Suggestion strategy (default: min-gpu); min-jobs is a deprecated alias for min-workloads",
     )
     parser.add_argument(
         "--candidate-scope",
@@ -1484,8 +1516,8 @@ def parse_args() -> argparse.Namespace:
         help="Nodes whose workloads may be coordination candidates (default: fragmented)",
     )
     parser.add_argument(
-        "--alternatives", type=int, default=3,
-        help="Maximum plans per strategy, including rank 1 (default: 3)",
+        "--alternatives", type=int, default=1,
+        help="Maximum plans per strategy, including rank 1 (default: 1)",
     )
     parser.add_argument(
         "--search-seconds", type=float, default=10.0,
@@ -1494,6 +1526,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--show-gpu-details", action="store_true",
         help="Expand per-GPU utilization in terminal output; JSON always includes it",
+    )
+    parser.add_argument(
+        "--refresh-seconds", type=float,
+        help="Repeat full queries on a fixed interval; ticks that arrive while a query is running are skipped",
     )
     parser.add_argument("--json", action="store_true", dest="as_json", help="Print schema-versioned JSON instead of a terminal report")
     parser.add_argument("--out", type=Path, help="Also save the complete JSON report to this path")
@@ -1510,9 +1546,110 @@ def parse_args() -> argparse.Namespace:
         parser.error("--alternatives must be between 1 and 10")
     if args.search_seconds <= 0:
         parser.error("--search-seconds must be positive")
+    if args.refresh_seconds is not None and args.refresh_seconds <= 0:
+        parser.error("--refresh-seconds must be positive")
     if args.strategy == "min-jobs":
         args.strategy = "min-workloads"
     return args
+
+
+def _collect_report(
+    cluster: Any, args: argparse.Namespace, queue: str, cluster_name: str
+) -> dict[str, Any]:
+    try:
+        snapshot, warnings = collect_snapshot(
+            cluster, queue, cluster_name, minutes=args.minutes
+        )
+    except RuntimeError as error:
+        if "queue node allocation changed" not in str(error):
+            raise
+        snapshot, warnings = collect_snapshot(
+            cluster, queue, cluster_name, minutes=args.minutes
+        )
+        warnings.append(
+            "Node allocation changed during the first collection; report uses one retry"
+        )
+    target = Target(
+        args.nodes, args.gpus_per_node, args.cpus_per_node,
+        args.memory_per_node_gib,
+    )
+    report = build_report(
+        snapshot, target, queue, cluster_name, args.candidate_scope,
+        args.alternatives, args.search_seconds,
+    )
+    report["warnings"].extend(warnings)
+    report["analysis"]["requested_strategy"] = args.strategy
+    if args.strategy != "all":
+        report["suggestions"] = [
+            suggestion for suggestion in report["suggestions"]
+            if args.strategy == suggestion["strategy"]
+        ]
+    return report
+
+
+def _emit_report(
+    report: dict[str, Any], args: argparse.Namespace, *,
+    console: Any | None = None, clear: bool = False,
+) -> None:
+    payload = json.dumps(report, ensure_ascii=False, indent=2)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(payload + "\n", encoding="utf-8")
+    if args.as_json:
+        if args.refresh_seconds is not None:
+            payload = json.dumps(report, ensure_ascii=False, separators=(",", ":"))
+        sys.stdout.write(payload + "\n")
+        sys.stdout.flush()
+        return
+    if clear and console is not None and console.is_terminal:
+        console.clear()
+    if render_rich(
+        report, console=console, show_gpu_details=args.show_gpu_details
+    ):
+        return
+    if clear:
+        sys.stdout.write("\n--- refreshed queue snapshot ---\n")
+    sys.stdout.write(render_text(report, show_gpu_details=args.show_gpu_details))
+    sys.stdout.flush()
+
+
+def _next_refresh_deadline(
+    previous_deadline: float, interval: float, finished_at: float
+) -> tuple[float, int]:
+    deadline = previous_deadline + interval
+    lag = finished_at - deadline
+    skipped = math.ceil(lag / interval) if lag > 0 else 0
+    return deadline + skipped * interval, skipped
+
+
+def _run_reports(
+    cluster: Any, args: argparse.Namespace, queue: str, cluster_name: str, *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    console = None
+    if args.refresh_seconds is not None and not args.as_json:
+        try:
+            from rich.console import Console
+
+            console = Console()
+        except ImportError:
+            pass
+    deadline = clock()
+    refresh_index = 0
+    while True:
+        report = _collect_report(cluster, args, queue, cluster_name)
+        _emit_report(
+            report, args, console=console, clear=refresh_index > 0,
+        )
+        if args.refresh_seconds is None:
+            return 0
+        finished_at = clock()
+        deadline, _ = _next_refresh_deadline(
+            deadline, args.refresh_seconds, finished_at
+        )
+        sleep(max(0.0, deadline - finished_at))
+        refresh_index += 1
 
 
 def main() -> int:
@@ -1526,43 +1663,15 @@ def main() -> int:
     try:
         from clusterx.launcher.ssp.ssp import SSPCluster
 
-        cluster = SSPCluster()
-        queue = args.queue or cluster.cfg.get("queue") or cluster.cfg.get("partition")
-        cluster_name = args.cluster_name or cluster.cfg.get("cluster")
-        if not queue or not cluster_name:
-            raise ValueError("queue and cluster name are required")
-        try:
-            snapshot, warnings = collect_snapshot(
-                cluster, str(queue), str(cluster_name), minutes=args.minutes
-            )
-        except RuntimeError as error:
-            if "queue node allocation changed" not in str(error):
-                raise
-            snapshot, warnings = collect_snapshot(
-                cluster, str(queue), str(cluster_name), minutes=args.minutes
-            )
-            warnings.append("Node allocation changed during the first collection; report uses one retry")
-        target = Target(args.nodes, args.gpus_per_node, args.cpus_per_node, args.memory_per_node_gib)
-        report = build_report(
-            snapshot, target, str(queue), str(cluster_name), args.candidate_scope,
-            args.alternatives, args.search_seconds,
-        )
-        report["warnings"].extend(warnings)
-        report["analysis"]["requested_strategy"] = args.strategy
-        if args.strategy != "all":
-            report["suggestions"] = [
-                suggestion for suggestion in report["suggestions"]
-                if args.strategy == suggestion["strategy"]
-            ]
-        payload = json.dumps(report, ensure_ascii=False, indent=2)
-        if args.out:
-            args.out.parent.mkdir(parents=True, exist_ok=True)
-            args.out.write_text(payload + "\n", encoding="utf-8")
-        if args.as_json:
-            sys.stdout.write(payload + "\n")
-        elif not render_rich(report, show_gpu_details=args.show_gpu_details):
-            sys.stdout.write(render_text(report, show_gpu_details=args.show_gpu_details))
-        return 0
+        with _pooled_http_session():
+            cluster = SSPCluster()
+            queue = args.queue or cluster.cfg.get("queue") or cluster.cfg.get("partition")
+            cluster_name = args.cluster_name or cluster.cfg.get("cluster")
+            if not queue or not cluster_name:
+                raise ValueError("queue and cluster name are required")
+            return _run_reports(cluster, args, str(queue), str(cluster_name))
+    except KeyboardInterrupt:
+        return 130
     except (OSError, RuntimeError, ValueError) as error:
         print(redact(f"queue analysis failed: {error}"), file=sys.stderr)
         return 1

@@ -1,8 +1,10 @@
+import argparse
 import importlib.util
 import io
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
+import threading
 import types
 import unittest
 from unittest import mock
@@ -104,6 +106,30 @@ class QueuePlanTests(unittest.TestCase):
         self.assertEqual(by_strategy["min-gpu"]["gpus"], 3)
         self.assertEqual(by_strategy["min-workloads"]["workload_count"], 2)
         self.assertEqual(by_strategy["min-users"]["users"], 1)
+
+    def test_pooled_http_session_installs_and_restores_requests(self):
+        import requests
+
+        m = self.module
+        original_request = requests.request
+        original_get = requests.get
+        session = mock.Mock()
+        session.request = mock.Mock()
+        session.get = mock.Mock()
+        with mock.patch("requests.Session", return_value=session), mock.patch(
+            "requests.adapters.HTTPAdapter"
+        ) as adapter:
+            with m._pooled_http_session(pool_size=7):
+                self.assertIs(requests.request, session.request)
+                self.assertIs(requests.get, session.get)
+            adapter.assert_called_once_with(
+                pool_connections=7, pool_maxsize=7, max_retries=0,
+                pool_block=True,
+            )
+        self.assertIs(requests.request, original_request)
+        self.assertIs(requests.get, original_get)
+        self.assertEqual(session.mount.call_count, 2)
+        session.close.assert_called_once_with()
 
     def test_existing_free_nodes_need_no_pause(self):
         m = self.module
@@ -295,6 +321,57 @@ class QueuePlanTests(unittest.TestCase):
 
         snapshot, _ = m.collect_snapshot(Cluster(), "queue", "cluster")
         self.assertEqual(snapshot["jobs"]["shared"]["create_time"], "2026-08-12T10:00:00Z")
+
+    def test_consistency_snapshot_overlaps_prometheus_collection(self):
+        m = self.module
+        raw_nodes = [raw_node("n1", gpu=1)]
+        second_snapshot_started = threading.Event()
+        release_second_snapshot = threading.Event()
+        overlap_observed = []
+
+        class Client:
+            subscription = "s"
+            resource_group = "r"
+            region = "z"
+            calls = 0
+
+            def list_queue_nodes(self, **kwargs):
+                self.calls += 1
+                if self.calls == 2:
+                    second_snapshot_started.set()
+                    release_second_snapshot.wait(timeout=2)
+                return {"nodes": raw_nodes, "total_size": 1}
+
+            def _make_management_request(self, method, path, *, params):
+                return {
+                    "pods": [{
+                        "name": "pod-0",
+                        "resource": {"accelerate_device_count": 1},
+                        "workload": {
+                            "uid": "job", "name": "job",
+                            "type": "trainingJob",
+                        },
+                        "ownership": {"creator_name": "user"},
+                    }],
+                    "total_size": 1,
+                }
+
+        class Cluster:
+            client = Client()
+
+            def stats_prometheus(self, **kwargs):
+                overlap_observed.append(second_snapshot_started.is_set())
+                release_second_snapshot.set()
+                return []
+
+        def query_utilization(*args, **kwargs):
+            overlap_observed.append(second_snapshot_started.wait(timeout=1))
+            return []
+
+        with mock.patch.object(m, "_query_gpu_utilization", query_utilization):
+            snapshot, _ = m.collect_snapshot(Cluster(), "queue", "cluster")
+        self.assertEqual(snapshot["jobs"]["job"]["total_gpu"], 1)
+        self.assertEqual(overlap_observed, [True, True])
 
     def test_gpu_utilization_query_combines_compute_and_memory_once(self):
         m = self.module
@@ -677,11 +754,50 @@ class QueuePlanTests(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["queue_plan.py", "--nodes", "2"]):
             args = self.module.parse_args()
         self.assertEqual(args.gpus_per_node, 8)
-        self.assertEqual(args.strategy, "all")
+        self.assertEqual(args.strategy, "min-gpu")
         self.assertEqual(args.candidate_scope, "fragmented")
-        self.assertEqual(args.alternatives, 3)
+        self.assertEqual(args.alternatives, 1)
         self.assertEqual(args.search_seconds, 10.0)
         self.assertFalse(args.show_gpu_details)
+        self.assertIsNone(args.refresh_seconds)
+
+    def test_refresh_deadline_skips_ticks_during_full_queries(self):
+        m = self.module
+        self.assertEqual(m._next_refresh_deadline(0, 5, 3), (5, 0))
+        self.assertEqual(m._next_refresh_deadline(0, 5, 5), (5, 0))
+        self.assertEqual(m._next_refresh_deadline(0, 5, 11), (15, 2))
+
+        args = argparse.Namespace(refresh_seconds=5, as_json=True)
+        clock_values = iter((0, 11, 26))
+        sleeps = []
+        collections = []
+
+        def collect(*unused):
+            collections.append(len(collections))
+            if len(collections) == 3:
+                raise KeyboardInterrupt
+            return {}
+
+        with mock.patch.object(m, "_collect_report", side_effect=collect), \
+                mock.patch.object(m, "_emit_report") as emit:
+            with self.assertRaises(KeyboardInterrupt):
+                m._run_reports(
+                    object(), args, "queue", "cluster",
+                    clock=lambda: next(clock_values), sleep=sleeps.append,
+                )
+        self.assertEqual(sleeps, [4, 4])
+        self.assertEqual(emit.call_count, 2)
+
+    def test_refresh_json_is_compact_ndjson(self):
+        m = self.module
+        args = argparse.Namespace(
+            out=None, as_json=True, refresh_seconds=5,
+            show_gpu_details=False,
+        )
+        stream = io.StringIO()
+        with mock.patch.object(sys, "stdout", stream):
+            m._emit_report({"schema_version": 2}, args)
+        self.assertEqual(stream.getvalue(), '{"schema_version":2}\n')
 
     def test_full_scope_includes_shared_full_node(self):
         m = self.module
@@ -839,6 +955,10 @@ class QueuePlanTests(unittest.TestCase):
                 self.module.parse_args()
         with mock.patch.object(
             sys, "argv", ["queue_plan.py", "--nodes", "2", "--search-seconds", "0"]
+        ), self.assertRaises(SystemExit):
+            self.module.parse_args()
+        with mock.patch.object(
+            sys, "argv", ["queue_plan.py", "--nodes", "2", "--refresh-seconds", "0"]
         ), self.assertRaises(SystemExit):
             self.module.parse_args()
 

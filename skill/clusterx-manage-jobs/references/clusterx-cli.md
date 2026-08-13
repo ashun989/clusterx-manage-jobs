@@ -202,11 +202,12 @@ Complete options:
 | `--config` | Explicit protected Clusterx YAML | Config discovery when omitted |
 | `--cwd` | Config discovery starting directory | Current directory |
 | `--minutes` | Prometheus lookback window only | `5`, positive integer |
-| `--strategy` | `all`, `min-gpu`, `min-workloads`, `min-users`; `min-jobs` is a compatibility alias | `all` |
+| `--strategy` | `all`, `min-gpu`, `min-workloads`, `min-users`; `min-jobs` is a compatibility alias | `min-gpu` |
 | `--candidate-scope` | `fragmented`, `full`, or `all` occupied nodes | `fragmented` |
-| `--alternatives` | Maximum ranked plans per strategy, including rank 1 | `3`, integer from `1` through `10` |
+| `--alternatives` | Maximum ranked plans per strategy, including rank 1 | `1`, integer from `1` through `10` |
 | `--search-seconds` | Local solver time budget | `10`, positive number |
 | `--show-gpu-details` | Expand a deduplicated per-GPU terminal table | Disabled; JSON always includes per-GPU data |
+| `--refresh-seconds` | Fixed interval for serialized full-query refreshes | Unset; positive number when supplied |
 | `--json` | Write schema-versioned JSON to stdout instead of terminal UI | Disabled |
 | `--out` | Also save the complete JSON report | Unset |
 
@@ -217,10 +218,11 @@ optimization. A full node may be occupied by one workload or shared by multiple
 workloads. Workloads remain indivisible: selecting any placement charges the
 workload's total GPU allocation and evaluates every node released by it.
 
-`--alternatives` defaults to `3` and accepts `1` through `10`. It returns that
-many ranked, distinct workload sets per selected strategy; `--strategy all` groups
-results independently under `min-gpu`, `min-workloads`, and `min-users` without
-cross-strategy deduplication, so the default can display up to nine plan cards.
+`--strategy` defaults to `min-gpu`, and `--alternatives` defaults to `1` while
+accepting `1` through `10`. It returns that many ranked, distinct workload sets
+per selected strategy. Explicit `--strategy all` groups results independently
+under `min-gpu`, `min-workloads`, and `min-users` without cross-strategy deduplication,
+so `--strategy all --alternatives 3` can display up to nine plan cards.
 The same workload set may appear in more than one strategy group with a separate
 rank. Exact ranks use `Minimum` / `Alternative`;
 heuristic ranks use `Lowest found` / `Alternative found`.
@@ -229,6 +231,14 @@ heuristic ranks use `Lowest found` / `Alternative found`.
 measures the first 1,000 states, estimates whether enumeration fits within 80%
 of the budget, and reserves 20% for heuristic fallback. JSON analysis reports
 the budget, elapsed time, estimated and examined states, and switch reason.
+
+`--refresh-seconds` enables a fixed-rate monitor while preserving complete
+snapshot collection and consistency checks. Queries never overlap: if a full
+collection and render crosses one or more scheduled ticks, those ticks are
+skipped and the next future deadline is used. Rich terminals refresh in place;
+plain-text output appends labeled snapshots. With `--json`, each refresh is one
+compact NDJSON record. `--out` is overwritten with the latest complete,
+pretty-printed report after every successful refresh.
 
 Only workloads placed on nodes selected by `--candidate-scope` are candidates.
 Exact search is controlled by the measured time budget rather than a fixed
@@ -299,7 +309,7 @@ Schema version 2 has this top-level shape (values abbreviated):
     "estimated_states": 368830,
     "states_examined": 10270,
     "switch_reason": "estimated-time",
-    "requested_strategy": "all"
+    "requested_strategy": "min-gpu"
   },
   "gpu_utilization": {
     "window_minutes": 5,

@@ -47,14 +47,15 @@ cp -a skill/clusterx-manage-jobs \
   "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs"
 ```
 
-复制完成后安装终端美化依赖：
+复制完成后安装运行依赖（包括终端美化和 HTTP 连接复用）：
 
 ```bash
 python3 -m pip install -r \
   "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/requirements.txt"
 ```
 
-`rich` 缺失时队列分析 CLI 会自动回退到无颜色纯文本，不影响只读分析。
+`rich` 缺失时队列分析 CLI 会自动回退到无颜色纯文本，不影响只读分析；
+`requests` 用于复用 Clusterx SDK 的 HTTP 连接。
 
 开发期间也可以把安装路径软链接到源码目录；仓库移动或目录重构后，应同步
 检查软链接目标下是否仍能直接看到 `SKILL.md`。
@@ -92,9 +93,14 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_p
 
 默认只分析碎片节点；如需让已占满 GPU 的节点任务也参与只读候选优化，增加
 `--candidate-scope all`。也可使用 `--candidate-scope full` 仅比较完整节点。
-每个策略默认返回最多 3 个方案；可用 `--alternatives 1..10` 调整。求解阶段
+默认使用 `min-gpu` 策略并返回 1 个方案；需要同时比较三种策略时显式使用
+`--strategy all`，可用 `--alternatives 1..10` 调整每种策略的方案数。求解阶段
 默认使用 `--search-seconds 10`，根据当前机器实测状态吞吐在精确搜索和启发式
 搜索之间切换。
+
+持续观察队列时使用 `--refresh-seconds S`。刷新采用固定节拍且不会并发查询；
+如果一次完整查询跨过一个或多个刷新时刻，这些刷新会被跳过。结合 `--json`
+时 stdout 输出 NDJSON；`--out` 始终覆盖保存最新的完整 JSON 快照。
 
 汇总表默认显示 `--minutes` 窗口内每个 workload 的 GPU 算力、显存平均利用率
 及单卡范围。需要定位具体卡时增加 `--show-gpu-details`；JSON 始终保留逐卡
@@ -140,8 +146,8 @@ python3 \
 ```
 
 官方 `quick_validate.py` 需要 PyYAML；若要在 base 环境直接运行校验器，
-需先在可访问的内部软件源安装 `PyYAML`。运行时核心逻辑使用 Python 标准库；
-`requirements.txt` 中的 `rich` 用于彩色表格，并有纯文本降级路径。
+需先在可访问的内部软件源安装 `PyYAML`。`requirements.txt` 中的 `rich`
+用于彩色表格并有纯文本降级路径，`requests` 用于 HTTP Session/连接池。
 
 脱敏器从标准输入读取，避免凭据出现在进程参数中：
 
