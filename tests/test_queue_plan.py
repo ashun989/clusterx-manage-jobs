@@ -1201,17 +1201,24 @@ class QueuePlanTests(unittest.TestCase):
         selection = types.SimpleNamespace(path=Path("/tmp/clusterx-test.yaml"))
         cluster = mock.Mock()
         cluster.cfg = {"queue": "queue", "cluster": "cluster"}
-        with mock.patch.object(m, "parse_args", return_value=args), \
+        modules = {
+            name: types.ModuleType(name) for name in (
+                "clusterx", "clusterx.launcher", "clusterx.launcher.ssp",
+                "clusterx.launcher.ssp.ssp",
+            )
+        }
+        modules["clusterx.launcher.ssp.ssp"].SSPCluster = mock.Mock(
+            return_value=cluster
+        )
+        with mock.patch.dict(sys.modules, modules), \
+                mock.patch.object(m, "parse_args", return_value=args), \
                 mock.patch.object(
                     m, "resolve_config", return_value=selection,
                 ), mock.patch.object(
                     m, "inspect_config",
                     return_value={"exists": True, "permissions_safe": True},
                 ), mock.patch.object(m, "_pooled_http_session"), \
-                mock.patch(
-                    "clusterx.launcher.ssp.ssp.SSPCluster",
-                    return_value=cluster,
-                ), mock.patch.object(
+                mock.patch.object(
                     m, "_run_reports", side_effect=KeyboardInterrupt,
                 ):
             self.assertEqual(m.main(), 130)
