@@ -18,7 +18,8 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 - For queue packing, per-user/per-workload node allocation, GPU fragmentation, or
   full-node scheduling analysis, run `python3 scripts/queue_plan.py`. This is a
   read-only report and must never stop jobs. Install `requirements.txt` for
-  colored Rich tables; retain the built-in plain-text fallback when unavailable.
+  HTTP connection reuse and colored Rich tables; retain the built-in plain-text
+  fallback when Rich is unavailable.
 - Run Clusterx through `python3 scripts/clusterx_exec.py --cwd <project> --`
   so project configuration overrides the persistent global configuration and
   Clusterx stdout/stderr are redacted before they are returned.
@@ -99,7 +100,7 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   `--memory-per-node-gib` only when the target workload specifies them. Treat
   every suggestion as a coordination candidate, not authorization to stop
   anything. Use `--strategy all|min-gpu|min-workloads|min-users`; default to
-  `all`; `min-jobs` remains a deprecated compatibility alias for
+  `min-gpu`; `min-jobs` remains a deprecated compatibility alias for
   `min-workloads`. Use `--candidate-scope fragmented|full|all`; default to `fragmented`
   for backward-compatible fragment cleanup. A `full` node is any occupied node
   whose allocated GPUs equal or exceed its GPU capacity, including nodes shared
@@ -108,7 +109,7 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   (`aid`), inference workloads, and unknown workload types are attributed and
   may be coordination candidates. Node allocation remains the capacity source
   of truth; unattributed resources are displayed but never claimed as releasable.
-  Use `--alternatives N` (default `3`, range `1` to `10`) for ranked plans per
+  Use `--alternatives N` (default `1`, range `1` to `10`) for ranked plans per
   strategy. Use `--search-seconds S` (default `10`) to bound only local solving;
   exact search calibrates itself from measured state throughput and reserves
   time for a heuristic fallback.
@@ -119,6 +120,15 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   workload counts and allocated GPU, CPU, and memory by user; unattributed node
   resources remain separate. Utilization is observational and must never affect
   capacity attribution, candidate ranking, or stopping decisions.
+  Add `--refresh-seconds S` for a fixed-rate read-only monitor. Refreshes are
+  serialized; scheduled ticks that occur while a complete query is still
+  running are skipped rather than overlapped. Interactive Rich terminals use
+  an alternate-screen live dashboard. Arrow keys, Page Up/Down, Home/End, and
+  the mouse wheel scroll the report; `q` or Ctrl-C exits. Other terminal input
+  is consumed without echo and terminal modes are restored before printing only
+  the last complete report. Non-TTY stdin/stdout or no-Rich output appends
+  labeled plain-text snapshots. In refresh JSON mode, stdout is NDJSON and
+  `--out` keeps the latest complete pretty-printed snapshot.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
   pagination, filter, and ordering options when the result set is large. Treat
   Worker fields as runtime observations and do not infer missing nodes.

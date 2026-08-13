@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import itertools
@@ -13,9 +14,12 @@ import math
 import os
 from pathlib import Path
 import re
+import select
+import signal
 import sys
+import threading
 import time
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from config_resolver import inspect_config, resolve_config
 from redact import redact
@@ -25,6 +29,12 @@ SCHEMA_VERSION = 2
 CALIBRATION_STATES = 1_000
 GPU_COMPUTE_UTIL = "gpu-compute-util"
 GPU_MEMORY_UTIL = "gpu-memory-util"
+HTTP_POOL_SIZE = 16
+_MOUSE_SCROLL_LINES = 3
+_PASTE_START = b"\x1b[200~"
+_PASTE_END = b"\x1b[201~"
+_ENABLE_DASHBOARD_INPUT = "\x1b[?1000h\x1b[?1006h\x1b[?2004h"
+_DISABLE_DASHBOARD_INPUT = "\x1b[?2004l\x1b[?1006l\x1b[?1000l"
 
 
 @dataclass(frozen=True)
@@ -33,6 +43,31 @@ class Target:
     gpus: int
     cpus: int | None = None
     memory_gib: int | None = None
+
+
+@contextmanager
+def _pooled_http_session(pool_size: int = HTTP_POOL_SIZE) -> Iterator[None]:
+    """Reuse HTTP connections for Clusterx SDK calls within this process."""
+    import requests
+    from requests.adapters import HTTPAdapter
+
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=pool_size, pool_maxsize=pool_size, max_retries=0,
+        pool_block=True,
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    original_request = requests.request
+    original_get = requests.get
+    requests.request = session.request
+    requests.get = session.get
+    try:
+        yield
+    finally:
+        requests.request = original_request
+        requests.get = original_get
+        session.close()
 
 
 def _parse_utc_timestamp(value: Any) -> datetime | None:
@@ -432,7 +467,7 @@ def solve_candidates(
     target: Target,
     *,
     candidate_scope: str = "fragmented",
-    alternatives: int = 3,
+    alternatives: int = 1,
     search_seconds: float = 10.0,
     clock: Callable[[], float] = time.monotonic,
     search_stats: dict[str, Any] | None = None,
@@ -795,12 +830,6 @@ def collect_snapshot(
     if failures:
         raise RuntimeError(f"pod workload mapping failed for {len(failures)} occupied nodes")
 
-    after_nodes = cluster.client.list_queue_nodes(
-        cluster=cluster_name, queue=queue, page_size=100, is_bound=True
-    ).get("nodes") or []
-    if _node_signature(nodes_list) != _node_signature(after_nodes):
-        raise RuntimeError("queue node allocation changed during collection; retry the command")
-
     jobs: dict[str, dict[str, Any]] = {}
     hostname_to_node: dict[str, str] = {}
     for node_name, node in nodes.items():
@@ -864,37 +893,48 @@ def collect_snapshot(
     for item in jobs.values():
         item["total_gpu"] = _clean_number(sum(float(p["gpu"]) for p in item["placements"]))
 
-    if any(float(item["total_gpu"]) > 0 for item in jobs.values()):
-        try:
-            utilization_series = _query_gpu_utilization(
-                cluster, queue, cluster_name, minutes
-            )
-            warnings.extend(_attach_gpu_utilization(
-                jobs, utilization_series, hostname_to_node
-            ))
-        except Exception:
-            _attach_gpu_utilization(jobs, [], hostname_to_node)
-            warnings.append(
-                "Per-GPU utilization was unavailable; allocation analysis is still valid"
-            )
-    else:
-        _attach_gpu_utilization(jobs, [], hostname_to_node)
-
-    try:
-        metric_rows = cluster.stats_prometheus(
-            scope="queue", metric="all", minutes=minutes, queue=queue,
-            cluster=cluster_name, verbose=False,
+    with ThreadPoolExecutor(max_workers=1) as consistency_pool:
+        after_nodes_future = consistency_pool.submit(
+            cluster.client.list_queue_nodes,
+            cluster=cluster_name, queue=queue, page_size=100, is_bound=True,
         )
-        for row in metric_rows:
-            node_name = hostname_to_node.get(str(row.get("hostname") or ""))
-            if not node_name:
-                continue
-            nodes[node_name]["metrics"] = {
-                key: value for key, value in row.items()
-                if key not in {"hostname", "scope", "granularity", "window"}
-            }
-    except Exception:
-        warnings.append("Prometheus node metrics were unavailable; allocation analysis is still valid")
+        if any(float(item["total_gpu"]) > 0 for item in jobs.values()):
+            try:
+                utilization_series = _query_gpu_utilization(
+                    cluster, queue, cluster_name, minutes
+                )
+                warnings.extend(_attach_gpu_utilization(
+                    jobs, utilization_series, hostname_to_node
+                ))
+            except Exception:
+                _attach_gpu_utilization(jobs, [], hostname_to_node)
+                warnings.append(
+                    "Per-GPU utilization was unavailable; allocation analysis is still valid"
+                )
+        else:
+            _attach_gpu_utilization(jobs, [], hostname_to_node)
+
+        try:
+            metric_rows = cluster.stats_prometheus(
+                scope="queue", metric="all", minutes=minutes, queue=queue,
+                cluster=cluster_name, verbose=False,
+            )
+            for row in metric_rows:
+                node_name = hostname_to_node.get(str(row.get("hostname") or ""))
+                if not node_name:
+                    continue
+                nodes[node_name]["metrics"] = {
+                    key: value for key, value in row.items()
+                    if key not in {"hostname", "scope", "granularity", "window"}
+                }
+        except Exception:
+            warnings.append(
+                "Prometheus node metrics were unavailable; allocation analysis is still valid"
+            )
+
+        after_nodes = (after_nodes_future.result().get("nodes") or [])
+    if _node_signature(nodes_list) != _node_signature(after_nodes):
+        raise RuntimeError("queue node allocation changed during collection; retry the command")
 
     return {
         "nodes": nodes,
@@ -906,7 +946,7 @@ def collect_snapshot(
 def build_report(
     snapshot: dict[str, Any], target: Target, queue: str, cluster_name: str,
     candidate_scope: str = "fragmented",
-    alternatives: int = 3,
+    alternatives: int = 1,
     search_seconds: float = 10.0,
     clock: Callable[[], float] = time.monotonic,
     now: Callable[[], datetime] | None = None,
@@ -1199,23 +1239,21 @@ def render_text(report: dict[str, Any], *, show_gpu_details: bool = False) -> st
     return "\n".join(lines) + "\n"
 
 
-def render_rich(
-    report: dict[str, Any], *, console: Any | None = None,
-    show_gpu_details: bool = False,
-) -> bool:
-    """Render a colored terminal report; return False when Rich is unavailable."""
+def _build_rich_renderable(
+    report: dict[str, Any], *, show_gpu_details: bool = False,
+) -> Any | None:
+    """Build one Rich renderable, or return None when Rich is unavailable."""
     try:
         from rich import box
-        from rich.console import Console
         from rich.console import Group
         from rich.panel import Panel
         from rich.rule import Rule
         from rich.table import Table
         from rich.text import Text
     except ImportError:
-        return False
+        return None
 
-    console = console or Console()
+    renderables: list[Any] = []
     target = report["target"]
     summary = report["summary"]
     schedulable = summary["currently_schedulable_nodes"]
@@ -1275,12 +1313,12 @@ def render_rich(
     overview_content = (
         Group(overview, user_table) if report.get("user_summaries") else overview
     )
-    console.print(Panel(
+    renderables.append(Panel(
         overview_content, title="[bold]ClusterX Queue Packing[/]",
         border_style="cyan",
     ))
     for warning in report.get("warnings", []):
-        console.print(f"[bold yellow]Warning:[/] {warning}")
+        renderables.append(f"[bold yellow]Warning:[/] {warning}")
 
     analysis = report["analysis"]
     search = Table.grid(expand=True, padding=(0, 2))
@@ -1296,7 +1334,7 @@ def render_rich(
         "Time", f"{analysis['search_elapsed_seconds']:.3f}s / {analysis['search_budget_seconds']:g}s",
         "States", f"{analysis['states_examined']} examined / {analysis['estimated_states']} estimated",
     )
-    console.print(Panel(search, title="[bold]Search diagnostics[/]", border_style="blue"))
+    renderables.append(Panel(search, title="[bold]Search diagnostics[/]", border_style="blue"))
 
     fragments = report.get("fragmented_nodes") or []
     if fragments:
@@ -1338,7 +1376,7 @@ def render_rich(
                     _format_utilization(item.get("gpu_utilization"), "gpu_memory_util"),
                     str(item.get("gpu", 0)),
                 )
-        console.print(table)
+        renderables.append(table)
 
     if show_gpu_details:
         gpu_table = Table(
@@ -1372,17 +1410,17 @@ def render_rich(
                     ),
                 )
         if detail_count:
-            console.print(gpu_table)
+            renderables.append(gpu_table)
         else:
-            console.print("[yellow]No per-GPU telemetry is available.[/]")
+            renderables.append("[yellow]No per-GPU telemetry is available.[/]")
 
     if target_met:
-        console.print("[bold green]✓ Enough nodes are already schedulable; no pause is needed.[/]")
-        return True
+        renderables.append("[bold green]✓ Enough nodes are already schedulable; no pause is needed.[/]")
+        return Group(*renderables)
     suggestions = report.get("suggestions") or []
     if not suggestions:
-        console.print("[bold red]No eligible candidate suggestion satisfies the target.[/]")
-        return True
+        renderables.append("[bold red]No eligible candidate suggestion satisfies the target.[/]")
+        return Group(*renderables)
 
     labels = {"min-gpu": "Coordinated GPU", "min-workloads": "Workloads", "min-users": "Users"}
     colors = {"min-gpu": "cyan", "min-workloads": "blue", "min-users": "magenta"}
@@ -1392,7 +1430,7 @@ def render_rich(
         if not group:
             continue
         color = colors[strategy]
-        console.print(Rule(f"[bold {color}]{strategy} · {labels[strategy]}[/]", style=color))
+        renderables.append(Rule(f"[bold {color}]{strategy} · {labels[strategy]}[/]", style=color))
         for suggestion in group:
             plan_index += 1
             display_strategy = suggestion["strategy"]
@@ -1448,13 +1486,342 @@ def render_rich(
                         str(placement.get("gpu", 0)), str(placement.get("cpu", 0)),
                         str(placement.get("memory_gib", 0)),
                     )
-            console.print(Panel(
+            renderables.append(Panel(
                 Group(summary_grid, jobs_table, placement_table),
                 title=f"[bold {color}]Plan {plan_index} · Rank {suggestion['rank']} · {qualifier} · {suggestion['optimality']}[/]",
                 border_style=color,
             ))
-    console.print(Panel("[bold green]Read-only report:[/] no workload was stopped or modified.", border_style="green"))
+    renderables.append(Panel("[bold green]Read-only report:[/] no workload was stopped or modified.", border_style="green"))
+    return Group(*renderables)
+
+
+def render_rich(
+    report: dict[str, Any], *, console: Any | None = None,
+    show_gpu_details: bool = False,
+) -> bool:
+    """Render a colored terminal report; return False when Rich is unavailable."""
+    renderable = _build_rich_renderable(
+        report, show_gpu_details=show_gpu_details
+    )
+    if renderable is None:
+        return False
+    if console is None:
+        from rich.console import Console
+
+        console = Console()
+    console.print(renderable)
     return True
+
+
+class _ScrollableRichReport:
+    """A full report rendered through a vertically scrollable terminal window."""
+
+    def __init__(self, renderable: Any, *, refreshing: bool = True) -> None:
+        self._renderable = renderable
+        self._refreshing = refreshing
+        self._offset = 0
+        self._total_lines = 0
+        self._body_height = 1
+        self._lock = threading.RLock()
+
+    def update(self, renderable: Any, *, refreshing: bool) -> None:
+        with self._lock:
+            self._renderable = renderable
+            self._refreshing = refreshing
+
+    def set_refreshing(self, refreshing: bool) -> None:
+        with self._lock:
+            self._refreshing = refreshing
+
+    def scroll_lines(self, delta: int) -> bool:
+        with self._lock:
+            maximum = max(0, self._total_lines - self._body_height)
+            updated = min(maximum, max(0, self._offset + delta))
+            changed = updated != self._offset
+            self._offset = updated
+            return changed
+
+    def scroll_page(self, direction: int) -> bool:
+        with self._lock:
+            amount = max(1, self._body_height - 1)
+        return self.scroll_lines(direction * amount)
+
+    def home(self) -> bool:
+        with self._lock:
+            changed = self._offset != 0
+            self._offset = 0
+            return changed
+
+    def end(self) -> bool:
+        with self._lock:
+            updated = max(0, self._total_lines - self._body_height)
+            changed = updated != self._offset
+            self._offset = updated
+            return changed
+
+    @property
+    def position(self) -> tuple[int, int, int]:
+        with self._lock:
+            start = 0 if self._total_lines == 0 else self._offset + 1
+            end = min(self._total_lines, self._offset + self._body_height)
+            return start, end, self._total_lines
+
+    def __rich_console__(self, console: Any, options: Any) -> Iterable[Any]:
+        from rich.segment import Segment
+        from rich.text import Text
+
+        with self._lock:
+            body_height = max(1, options.size.height - 1)
+            report_options = options.copy()
+            report_options.height = None
+            report_options.max_height = 1_000_000
+            lines = console.render_lines(
+                self._renderable, report_options, pad=True, new_lines=False
+            )
+            total_lines = len(lines)
+            maximum = max(0, total_lines - body_height)
+            self._offset = min(maximum, max(0, self._offset))
+            self._total_lines = total_lines
+            self._body_height = body_height
+            visible = lines[self._offset:self._offset + body_height]
+            if len(visible) < body_height:
+                blank = [Segment(" " * options.size.width)]
+                visible.extend([blank] * (body_height - len(visible)))
+            start = 0 if total_lines == 0 else self._offset + 1
+            end = min(total_lines, self._offset + body_height)
+            state = "refreshing" if self._refreshing else "ready"
+            footer = Text(
+                f" {state} · lines {start}-{end}/{total_lines} · "
+                "↑↓/wheel scroll · PgUp/PgDn page · Home/End · q quit ",
+                style="reverse", overflow="ellipsis", no_wrap=True,
+            )
+            footer_lines = console.render_lines(
+                footer, options.update(height=1), pad=True, new_lines=False
+            )
+            output_lines = visible + footer_lines[:1]
+
+        for index, line in enumerate(output_lines):
+            yield from line
+            if index + 1 < len(output_lines):
+                yield Segment.line()
+
+
+class _DashboardInputParser:
+    """Parse terminal input while discarding every unsupported byte sequence."""
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self._in_paste = False
+
+    @staticmethod
+    def _partial_suffix(buffer: bytearray, marker: bytes) -> int:
+        maximum = min(len(buffer), len(marker) - 1)
+        for size in range(maximum, 0, -1):
+            if bytes(buffer[-size:]) == marker[:size]:
+                return size
+        return 0
+
+    def feed(self, data: bytes) -> list[str]:
+        self._buffer.extend(data)
+        actions: list[str] = []
+        while self._buffer:
+            if self._in_paste:
+                end = self._buffer.find(_PASTE_END)
+                if end < 0:
+                    keep = self._partial_suffix(self._buffer, _PASTE_END)
+                    if keep:
+                        del self._buffer[:-keep]
+                    else:
+                        self._buffer.clear()
+                    break
+                del self._buffer[:end + len(_PASTE_END)]
+                self._in_paste = False
+                continue
+
+            if self._buffer[0] != 0x1B:
+                value = self._buffer.pop(0)
+                if value in (ord("q"), ord("Q")):
+                    actions.append("quit")
+                elif value == 0x03:
+                    actions.append("interrupt")
+                continue
+
+            if len(self._buffer) == 1:
+                break
+            if self._buffer[1] == ord("["):
+                final_index = next(
+                    (index for index in range(2, len(self._buffer))
+                     if 0x40 <= self._buffer[index] <= 0x7E),
+                    None,
+                )
+                if final_index is None:
+                    if len(self._buffer) > 128:
+                        self._buffer.clear()
+                    break
+                sequence = bytes(self._buffer[:final_index + 1])
+                del self._buffer[:final_index + 1]
+                body = sequence[2:-1]
+                final = sequence[-1:]
+                if sequence == _PASTE_START:
+                    self._in_paste = True
+                elif final == b"A":
+                    actions.append("up")
+                elif final == b"B":
+                    actions.append("down")
+                elif final == b"H" or (final == b"~" and body in (b"1", b"7")):
+                    actions.append("home")
+                elif final == b"F" or (final == b"~" and body in (b"4", b"8")):
+                    actions.append("end")
+                elif final == b"~" and body == b"5":
+                    actions.append("page-up")
+                elif final == b"~" and body == b"6":
+                    actions.append("page-down")
+                elif final == b"M" and body.startswith(b"<"):
+                    try:
+                        button = int(body[1:].split(b";", 1)[0])
+                    except ValueError:
+                        continue
+                    if button & 64:
+                        wheel = button & 3
+                        if wheel == 0:
+                            actions.append("mouse-up")
+                        elif wheel == 1:
+                            actions.append("mouse-down")
+                continue
+
+            if self._buffer[1] == ord("O"):
+                if len(self._buffer) < 3:
+                    break
+                final = bytes((self._buffer[2],))
+                del self._buffer[:3]
+                actions.extend({
+                    b"A": ["up"], b"B": ["down"],
+                    b"H": ["home"], b"F": ["end"],
+                }.get(final, []))
+                continue
+
+            # Discard Alt-key and other unknown two-byte escape sequences whole.
+            del self._buffer[:2]
+        return actions
+
+
+class _DashboardTerminalController:
+    """Own terminal input modes and refresh the scroll window on user input."""
+
+    def __init__(
+        self, *, fd: int, console: Any, live: Any,
+        viewport: _ScrollableRichReport,
+    ) -> None:
+        self.fd = fd
+        self.console = console
+        self.live = live
+        self.viewport = viewport
+        self.quit_requested = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._original_attributes: Any | None = None
+        self._parser = _DashboardInputParser()
+
+    def _write_terminal(self, value: str) -> None:
+        self.console.file.write(value)
+        self.console.file.flush()
+
+    def start(self) -> None:
+        import termios
+
+        original = termios.tcgetattr(self.fd)
+        attributes = list(original)
+        attributes[6] = list(original[6])
+        attributes[0] &= ~(termios.IXON | termios.IXOFF | termios.ICRNL)
+        attributes[3] &= ~(
+            termios.ECHO | termios.ECHONL | termios.ICANON
+            | termios.IEXTEN | termios.ISIG
+        )
+        attributes[6][termios.VMIN] = 0
+        attributes[6][termios.VTIME] = 1
+        self._original_attributes = original
+        try:
+            termios.tcsetattr(self.fd, termios.TCSAFLUSH, attributes)
+            self._write_terminal(_ENABLE_DASHBOARD_INPUT)
+            self._thread = threading.Thread(
+                target=self._read_input, name="queue-plan-input", daemon=True
+            )
+            self._thread.start()
+        except Exception:
+            self.stop()
+            raise
+
+    def stop(self) -> None:
+        import termios
+
+        self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=1)
+            self._thread = None
+        if self._original_attributes is not None:
+            try:
+                self._write_terminal(_DISABLE_DASHBOARD_INPUT)
+                termios.tcflush(self.fd, termios.TCIFLUSH)
+            finally:
+                termios.tcsetattr(
+                    self.fd, termios.TCSAFLUSH, self._original_attributes
+                )
+                self._original_attributes = None
+
+    def _refresh_if_changed(self, changed: bool) -> None:
+        if changed:
+            self.live.refresh()
+
+    def _dispatch(self, action: str) -> bool:
+        if action == "quit":
+            self.quit_requested.set()
+            self._stop.set()
+            os.kill(os.getpid(), signal.SIGINT)
+            return False
+        if action == "interrupt":
+            self._stop.set()
+            os.kill(os.getpid(), signal.SIGINT)
+            return False
+        if action == "up":
+            self._refresh_if_changed(self.viewport.scroll_lines(-1))
+        elif action == "down":
+            self._refresh_if_changed(self.viewport.scroll_lines(1))
+        elif action == "mouse-up":
+            self._refresh_if_changed(
+                self.viewport.scroll_lines(-_MOUSE_SCROLL_LINES)
+            )
+        elif action == "mouse-down":
+            self._refresh_if_changed(
+                self.viewport.scroll_lines(_MOUSE_SCROLL_LINES)
+            )
+        elif action == "page-up":
+            self._refresh_if_changed(self.viewport.scroll_page(-1))
+        elif action == "page-down":
+            self._refresh_if_changed(self.viewport.scroll_page(1))
+        elif action == "home":
+            self._refresh_if_changed(self.viewport.home())
+        elif action == "end":
+            self._refresh_if_changed(self.viewport.end())
+        return True
+
+    def _read_input(self) -> None:
+        last_size = self.console.size
+        try:
+            while not self._stop.is_set():
+                ready, _, _ = select.select([self.fd], [], [], 0.1)
+                if ready:
+                    data = os.read(self.fd, 4096)
+                    for action in self._parser.feed(data):
+                        if not self._dispatch(action):
+                            return
+                size = self.console.size
+                if size != last_size:
+                    last_size = size
+                    self.live.refresh()
+        except OSError:
+            if not self._stop.is_set():
+                self._stop.set()
+                os.kill(os.getpid(), signal.SIGINT)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1474,8 +1841,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--strategy",
         choices=("all", "min-gpu", "min-workloads", "min-jobs", "min-users"),
-        default="all",
-        help="Suggestion strategy; min-jobs is a deprecated alias for min-workloads",
+        default="min-gpu",
+        help="Suggestion strategy (default: min-gpu); min-jobs is a deprecated alias for min-workloads",
     )
     parser.add_argument(
         "--candidate-scope",
@@ -1484,8 +1851,8 @@ def parse_args() -> argparse.Namespace:
         help="Nodes whose workloads may be coordination candidates (default: fragmented)",
     )
     parser.add_argument(
-        "--alternatives", type=int, default=3,
-        help="Maximum plans per strategy, including rank 1 (default: 3)",
+        "--alternatives", type=int, default=1,
+        help="Maximum plans per strategy, including rank 1 (default: 1)",
     )
     parser.add_argument(
         "--search-seconds", type=float, default=10.0,
@@ -1494,6 +1861,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--show-gpu-details", action="store_true",
         help="Expand per-GPU utilization in terminal output; JSON always includes it",
+    )
+    parser.add_argument(
+        "--refresh-seconds", type=float,
+        help="Repeat full queries on a fixed interval; ticks that arrive while a query is running are skipped",
     )
     parser.add_argument("--json", action="store_true", dest="as_json", help="Print schema-versioned JSON instead of a terminal report")
     parser.add_argument("--out", type=Path, help="Also save the complete JSON report to this path")
@@ -1510,9 +1881,182 @@ def parse_args() -> argparse.Namespace:
         parser.error("--alternatives must be between 1 and 10")
     if args.search_seconds <= 0:
         parser.error("--search-seconds must be positive")
+    if args.refresh_seconds is not None and args.refresh_seconds <= 0:
+        parser.error("--refresh-seconds must be positive")
     if args.strategy == "min-jobs":
         args.strategy = "min-workloads"
     return args
+
+
+def _collect_report(
+    cluster: Any, args: argparse.Namespace, queue: str, cluster_name: str
+) -> dict[str, Any]:
+    try:
+        snapshot, warnings = collect_snapshot(
+            cluster, queue, cluster_name, minutes=args.minutes
+        )
+    except RuntimeError as error:
+        if "queue node allocation changed" not in str(error):
+            raise
+        snapshot, warnings = collect_snapshot(
+            cluster, queue, cluster_name, minutes=args.minutes
+        )
+        warnings.append(
+            "Node allocation changed during the first collection; report uses one retry"
+        )
+    target = Target(
+        args.nodes, args.gpus_per_node, args.cpus_per_node,
+        args.memory_per_node_gib,
+    )
+    report = build_report(
+        snapshot, target, queue, cluster_name, args.candidate_scope,
+        args.alternatives, args.search_seconds,
+    )
+    report["warnings"].extend(warnings)
+    report["analysis"]["requested_strategy"] = args.strategy
+    if args.strategy != "all":
+        report["suggestions"] = [
+            suggestion for suggestion in report["suggestions"]
+            if args.strategy == suggestion["strategy"]
+        ]
+    return report
+
+
+def _save_report(report: dict[str, Any], args: argparse.Namespace) -> str:
+    payload = json.dumps(report, ensure_ascii=False, indent=2)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(payload + "\n", encoding="utf-8")
+    return payload
+
+
+def _emit_report(
+    report: dict[str, Any], args: argparse.Namespace, *,
+    console: Any | None = None, append: bool = False,
+    force_plain: bool = False,
+) -> None:
+    payload = _save_report(report, args)
+    if args.as_json:
+        if args.refresh_seconds is not None:
+            payload = json.dumps(report, ensure_ascii=False, separators=(",", ":"))
+        sys.stdout.write(payload + "\n")
+        sys.stdout.flush()
+        return
+    if not force_plain and render_rich(
+        report, console=console, show_gpu_details=args.show_gpu_details
+    ):
+        return
+    if append:
+        sys.stdout.write("\n--- refreshed queue snapshot ---\n")
+    sys.stdout.write(render_text(report, show_gpu_details=args.show_gpu_details))
+    sys.stdout.flush()
+
+
+def _next_refresh_deadline(
+    previous_deadline: float, interval: float, finished_at: float
+) -> tuple[float, int]:
+    deadline = previous_deadline + interval
+    lag = finished_at - deadline
+    skipped = math.ceil(lag / interval) if lag > 0 else 0
+    return deadline + skipped * interval, skipped
+
+
+def _run_rich_live_reports(
+    cluster: Any, args: argparse.Namespace, queue: str, cluster_name: str, *,
+    console: Any, input_fd: int, clock: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> int:
+    from rich.live import Live
+    from rich.text import Text
+
+    viewport = _ScrollableRichReport(
+        Text("Collecting first queue snapshot…", style="bold cyan", justify="center")
+    )
+    live = Live(
+        viewport,
+        console=console, screen=True, auto_refresh=False,
+        vertical_overflow="crop", redirect_stdout=False, redirect_stderr=False,
+    )
+    controller = _DashboardTerminalController(
+        fd=input_fd, console=console, live=live, viewport=viewport,
+    )
+    deadline = clock()
+    last_renderable: Any | None = None
+    live.start(refresh=True)
+    try:
+        controller.start()
+        while True:
+            viewport.set_refreshing(True)
+            live.refresh()
+            report = _collect_report(cluster, args, queue, cluster_name)
+            _save_report(report, args)
+            renderable = _build_rich_renderable(
+                report, show_gpu_details=args.show_gpu_details
+            )
+            if renderable is None:
+                raise RuntimeError("Rich became unavailable during live rendering")
+            last_renderable = renderable
+            viewport.update(renderable, refreshing=False)
+            live.update(viewport, refresh=True)
+            finished_at = clock()
+            deadline, _ = _next_refresh_deadline(
+                deadline, args.refresh_seconds, finished_at
+            )
+            sleep(max(0.0, deadline - finished_at))
+    except KeyboardInterrupt:
+        if controller.quit_requested.is_set():
+            return 0
+        raise
+    finally:
+        try:
+            controller.stop()
+        finally:
+            live.stop()
+            if last_renderable is not None:
+                console.print(last_renderable)
+
+
+def _run_reports(
+    cluster: Any, args: argparse.Namespace, queue: str, cluster_name: str, *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    if args.refresh_seconds is not None and not args.as_json:
+        try:
+            from rich.console import Console
+
+            console = Console()
+        except ImportError:
+            pass
+        else:
+            try:
+                input_is_terminal = sys.stdin.isatty()
+                input_fd = sys.stdin.fileno()
+            except (AttributeError, OSError, ValueError):
+                input_is_terminal = False
+                input_fd = -1
+            if console.is_terminal and input_is_terminal:
+                return _run_rich_live_reports(
+                    cluster, args, queue, cluster_name, console=console,
+                    input_fd=input_fd,
+                    clock=clock, sleep=sleep,
+                )
+    deadline = clock()
+    refresh_index = 0
+    while True:
+        report = _collect_report(cluster, args, queue, cluster_name)
+        _emit_report(
+            report, args, append=refresh_index > 0,
+            force_plain=args.refresh_seconds is not None and not args.as_json,
+        )
+        if args.refresh_seconds is None:
+            return 0
+        finished_at = clock()
+        deadline, _ = _next_refresh_deadline(
+            deadline, args.refresh_seconds, finished_at
+        )
+        sleep(max(0.0, deadline - finished_at))
+        refresh_index += 1
 
 
 def main() -> int:
@@ -1526,43 +2070,15 @@ def main() -> int:
     try:
         from clusterx.launcher.ssp.ssp import SSPCluster
 
-        cluster = SSPCluster()
-        queue = args.queue or cluster.cfg.get("queue") or cluster.cfg.get("partition")
-        cluster_name = args.cluster_name or cluster.cfg.get("cluster")
-        if not queue or not cluster_name:
-            raise ValueError("queue and cluster name are required")
-        try:
-            snapshot, warnings = collect_snapshot(
-                cluster, str(queue), str(cluster_name), minutes=args.minutes
-            )
-        except RuntimeError as error:
-            if "queue node allocation changed" not in str(error):
-                raise
-            snapshot, warnings = collect_snapshot(
-                cluster, str(queue), str(cluster_name), minutes=args.minutes
-            )
-            warnings.append("Node allocation changed during the first collection; report uses one retry")
-        target = Target(args.nodes, args.gpus_per_node, args.cpus_per_node, args.memory_per_node_gib)
-        report = build_report(
-            snapshot, target, str(queue), str(cluster_name), args.candidate_scope,
-            args.alternatives, args.search_seconds,
-        )
-        report["warnings"].extend(warnings)
-        report["analysis"]["requested_strategy"] = args.strategy
-        if args.strategy != "all":
-            report["suggestions"] = [
-                suggestion for suggestion in report["suggestions"]
-                if args.strategy == suggestion["strategy"]
-            ]
-        payload = json.dumps(report, ensure_ascii=False, indent=2)
-        if args.out:
-            args.out.parent.mkdir(parents=True, exist_ok=True)
-            args.out.write_text(payload + "\n", encoding="utf-8")
-        if args.as_json:
-            sys.stdout.write(payload + "\n")
-        elif not render_rich(report, show_gpu_details=args.show_gpu_details):
-            sys.stdout.write(render_text(report, show_gpu_details=args.show_gpu_details))
-        return 0
+        with _pooled_http_session():
+            cluster = SSPCluster()
+            queue = args.queue or cluster.cfg.get("queue") or cluster.cfg.get("partition")
+            cluster_name = args.cluster_name or cluster.cfg.get("cluster")
+            if not queue or not cluster_name:
+                raise ValueError("queue and cluster name are required")
+            return _run_reports(cluster, args, str(queue), str(cluster_name))
+    except KeyboardInterrupt:
+        return 130
     except (OSError, RuntimeError, ValueError) as error:
         print(redact(f"queue analysis failed: {error}"), file=sys.stderr)
         return 1

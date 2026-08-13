@@ -72,6 +72,7 @@ python3 scripts/queue_plan.py --cwd <project-dir> --nodes 2 --strategy min-gpu
 python3 scripts/queue_plan.py --nodes 2 --strategy min-workloads
 python3 scripts/queue_plan.py --nodes 2 --candidate-scope all
 python3 scripts/queue_plan.py --nodes 2 --alternatives 3 --search-seconds 10
+python3 scripts/queue_plan.py --nodes 2 --refresh-seconds 30
 ```
 
 `--cwd` 可省略；省略时以当前工作目录为配置发现起点。安装 Skill 后从任意
