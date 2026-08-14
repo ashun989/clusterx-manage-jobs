@@ -64,18 +64,41 @@ python3 scripts/clusterx_exec.py --cwd <project-dir> -- log <job-id>
 
 包装器只报告配置来源和路径，不输出配置值。
 
-通过只读队列分析器检查完整节点调度和 GPU 碎片：
+训练任务提交还读取不含用户或分组信息的
+`assets/resource-policy.json`。有 GPU 时 CPU 上限为
+`GPU × cpu_per_gpu`，0 GPU 时使用 `zero_gpu_max_cpu_per_node`。可在包装器的
+`--` 之前传 `--resource-policy <path>`，也可设置
+`CLUSTERX_RESOURCE_POLICY`；显式参数优先于环境变量，环境变量优先于 Skill
+内置策略。该校验不依赖 monitor 服务。
+
+队列监控和调度模拟只访问本机 `clusterx-monitor` 服务的缓存，不读取上述
+Clusterx 配置，也不会在服务不可用时回退到实时采集：
 
 ```bash
-python3 scripts/queue_plan.py --nodes 2
-python3 scripts/queue_plan.py --cwd <project-dir> --nodes 2 --strategy min-gpu
-python3 scripts/queue_plan.py --nodes 2 --strategy min-workloads
-python3 scripts/queue_plan.py --nodes 2 --candidate-scope all
-python3 scripts/queue_plan.py --nodes 2 --alternatives 3 --search-seconds 10
-python3 scripts/queue_plan.py --nodes 2 --refresh-seconds 30
+python3 scripts/monitor_cli.py status --format json
+python3 scripts/monitor_cli.py overview
+python3 scripts/monitor_cli.py groups --violations-only
+python3 scripts/monitor_cli.py plan --nodes 2 --gpus-per-node 8 \
+  --strategy min-gpu --strategy min-workloads \
+  --candidate-scope all --alternatives 3
+python3 scripts/monitor_cli.py watch --view alerts --count 10 --format jsonl
 ```
 
-`--cwd` 可省略；省略时以当前工作目录为配置发现起点。安装 Skill 后从任意
-目录调用时，使用
-`${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/queue_plan.py`
+服务地址默认是 `http://127.0.0.1:8765`。可以在子命令之前传
+`--endpoint`，或设置 `CLUSTERX_MONITOR_URL`。安装 Skill 后从任意目录调用时，
+使用 `${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/monitor_cli.py`
 的完整路径。
+
+Monitor 服务端另外要求一份权限为 `600` 的本地私有分组文件。仓库开发时从
+`config/groups.example.yaml` 复制为被 Git 忽略的
+`config/groups.local.yaml`，只在本机填写真实组名、quota 和拼音用户名。
+服务通过 `--policy-config` 加载公共策略，通过 `--group-config` 加载私有分组；
+首次缺失或校验失败时服务进入受认证的 `setup-required`，管理员可在 Web 中查看
+损坏文件的原始 JSON/YAML 并修复；两份文件均有效后开始采集，无需重启。运行中
+的错误继续使用完整 last-known-good 组合。Monitor 对 Clusterx 只读，但管理员
+界面会以 revision 校验、备份和原子替换方式写入这两份本地配置。
+
+公共策略中的 `planning.default_cpu_per_gpu` 与
+`planning.default_memory_gib_per_gpu` 是标准调度画像。方案未显式给出 CPU/内存
+时由快照内画像推导；节点的 `effective_free_gpu`、`stranded_gpu` 和
+`cpu-memory-blocked` 也相对于该画像，不表示更小的显式任务一定无法调度。

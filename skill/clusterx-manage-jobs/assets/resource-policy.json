@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "refresh_seconds": 30,
+  "telemetry_lookback_minutes": 5,
+  "pending_pressure": {
+    "min_wait_minutes": 10,
+    "min_jobs": 1
+  },
+  "development": {
+    "zero_gpu_max_cpu_per_node": 8,
+    "zero_gpu_max_memory_gib_per_node": 140,
+    "one_gpu_max_cpu_per_node": 14,
+    "one_gpu_max_memory_gib_per_node": 240,
+    "max_gpu": 1,
+    "one_gpu_max_runtime_hours": 72
+  },
+  "training": {
+    "cpu_per_gpu": 14,
+    "memory_gib_per_gpu": 240,
+    "zero_gpu_max_cpu_per_node": 14,
+    "zero_gpu_max_memory_gib_per_node": 240
+  },
+  "planning": {
+    "default_cpu_per_gpu": 14,
+    "default_memory_gib_per_gpu": 240
+  },
+  "low_utilization": {
+    "window_hours": 24,
+    "refresh_minutes": 5,
+    "min_observation_minutes": 60,
+    "gpu_compute_threshold_pct": 20,
+    "gpu_memory_threshold_pct": 20
+  }
+}

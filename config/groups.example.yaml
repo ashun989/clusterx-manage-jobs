@@ -1,0 +1,11 @@
+schema_version: 1
+groups:
+  example-team:
+    gpu_quota: 8
+    members: [alice]
+  example-zero-quota:
+    gpu_quota: 0
+    members: [bob]
+  default:
+    gpu_quota: remainder
+    members: []

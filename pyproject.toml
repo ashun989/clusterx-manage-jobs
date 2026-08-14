@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clusterx-monitor"
+version = "0.3.0"
+description = "Read-only Clusterx queue monitor and scheduling simulator"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "pydantic>=2.8,<3",
+  "PyYAML>=6,<7",
+  "requests>=2.31,<3",
+  "rich>=13,<15",
+  "argon2-cffi>=23.1,<26",
+]
+
+[project.scripts]
+clusterx-monitor = "clusterx_monitor.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+clusterx_monitor = ["static/**/*"]

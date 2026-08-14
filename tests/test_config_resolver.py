@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 import stat
@@ -281,6 +282,74 @@ class ConfigResolverTests(unittest.TestCase):
                     "/workspace/run.sh",
                 ],
             )
+
+    def test_wrapper_enforces_training_cpu_boundaries_before_clusterx(self):
+        allowed = (
+            [],
+            ["--gpus-per-task", "0", "--cpus-per-task", "14"],
+            ["--gpus-per-task", "1", "--cpus-per-task", "14"],
+            ["--gpus-per-task=8", "--cpus-per-task=112"],
+            ["-N", "4", "--gpus-per-task", "8", "--cpus-per-task", "112"],
+        )
+        rejected = (
+            ["--gpus-per-task", "0", "--cpus-per-task", "15"],
+            ["--gpus-per-task", "1", "--cpus-per-task", "15"],
+            ["--gpus-per-task=8", "--cpus-per-task=113"],
+            ["--gpus-per-task", "1.5", "--cpus-per-task", "4"],
+            ["--gpus-per-task", "1", "--cpus-per-task", "nan"],
+        )
+        cases = [(item, 0) for item in allowed] + [(item, 2) for item in rejected]
+        for resource_args, expected in cases:
+            with self.subTest(resource_args=resource_args), tempfile.TemporaryDirectory() as directory:
+                temp = Path(directory)
+                project = temp / "project"
+                self._config(project / ".clusterx/clusterx.yaml")
+                invoked = temp / "invoked"
+                binary = temp / "clusterx"
+                binary.write_text("#!/bin/sh\ntouch \"$WRAPPER_INVOKED\"\n", encoding="utf-8")
+                binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+                env = os.environ.copy()
+                env["PATH"] = f"{temp}{os.pathsep}{env.get('PATH', '')}"
+                env["WRAPPER_INVOKED"] = str(invoked)
+                run = subprocess.run(
+                    [
+                        sys.executable, str(SCRIPTS / "clusterx_exec.py"),
+                        "--cwd", str(project), "--", "run", *resource_args, "true",
+                    ],
+                    text=True, capture_output=True, env=env,
+                )
+                self.assertEqual(run.returncode, expected, run.stderr)
+                self.assertEqual(invoked.exists(), expected == 0)
+
+    def test_resource_policy_precedence_is_explicit_then_environment_then_builtin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            project = temp / "project"
+            self._config(project / ".clusterx/clusterx.yaml")
+            binary = temp / "clusterx"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            restrictive = temp / "restrictive.json"
+            permissive = temp / "permissive.json"
+            base = {"training": {"cpu_per_gpu": 1, "zero_gpu_max_cpu_per_node": 1}}
+            restrictive.write_text(json.dumps(base), encoding="utf-8")
+            base["training"] = {"cpu_per_gpu": 2, "zero_gpu_max_cpu_per_node": 2}
+            permissive.write_text(json.dumps(base), encoding="utf-8")
+            env = os.environ.copy()
+            env["PATH"] = f"{temp}{os.pathsep}{env.get('PATH', '')}"
+            env["CLUSTERX_RESOURCE_POLICY"] = str(restrictive)
+            command = [
+                sys.executable, str(SCRIPTS / "clusterx_exec.py"),
+                "--cwd", str(project), "--resource-policy", str(permissive), "--",
+                "run", "--gpus-per-task", "1", "--cpus-per-task", "2", "true",
+            ]
+            explicit = subprocess.run(command, text=True, capture_output=True, env=env)
+            self.assertEqual(explicit.returncode, 0, explicit.stderr)
+            environment = subprocess.run(
+                [part for part in command if part not in {"--resource-policy", str(permissive)}],
+                text=True, capture_output=True, env=env,
+            )
+            self.assertEqual(environment.returncode, 2)
 
 
 if __name__ == "__main__":
