@@ -17,6 +17,11 @@ dependencies = [
   "argon2-cffi>=23.1,<26",
 ]
 
+[project.optional-dependencies]
+test = [
+  "httpx>=0.27,<1",
+]
+
 [project.scripts]
 clusterx-monitor = "clusterx_monitor.cli:main"
 
