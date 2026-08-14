@@ -5,6 +5,7 @@ import type { Alert, DetailRef, GroupSummary, NodeSummary, PolicyFinding, Snapsh
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
 const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
 const allWorkloads = (snapshot: Snapshot) => [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])];
+const workloadResources = (workload: Workload) => `${number(workload.total_gpu)} GPU · ${number(workload.total_cpu)} CPU · ${number(workload.total_memory_gib)} GiB`;
 
 export const alertIdentity = (alert: Alert) => [alert.severity, alert.kind, alert.subject, alert.message].join("\u0000");
 
@@ -54,7 +55,7 @@ function GroupDetail({ group, snapshot, open }: { group: GroupSummary; snapshot:
       <Metric label="超限资源" value={group.over_resources.length ? group.over_resources.join(", ") : "无"} />
     </Metrics>
     <RelatedList title="当前活跃用户" kind="user" open={open} items={group.members.map((user) => ({ id: user, label: user, meta: snapshot.users.some((item) => item.user === user) ? undefined : "当前无资源" }))} />
-    <RelatedList title="关联 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.user} · ${item.total_gpu} GPU` }))} />
+    <RelatedList title="关联 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.user} · ${workloadResources(item)}` }))} />
     <FindingsPanel findings={group.policy_findings} />
     <TelemetryPanel telemetry={group.telemetry} />
   </>;
@@ -70,7 +71,7 @@ function UserDetail({ user, snapshot, open }: { user: UserSummary; snapshot: Sna
       <Metric label="CPU" value={number(user.allocated_cpu)} />
       <Metric label="内存 GiB" value={number(user.allocated_memory_gib)} />
     </Metrics>
-    <RelatedList title="关联 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.type} · ${item.total_gpu} GPU` }))} />
+    <RelatedList title="关联 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.type} · ${workloadResources(item)}` }))} />
     <FindingsPanel findings={user.policy_findings} />
     <TelemetryPanel telemetry={user.telemetry} />
   </>;
@@ -94,7 +95,7 @@ function NodeDetail({ node, snapshot, open }: { node: NodeSummary; snapshot: Sna
       <Metric label="未归属 GPU / CPU / GiB" value={`${number(node.unattributed.gpu)} / ${number(node.unattributed.cpu)} / ${number(node.unattributed.memory_gib)}`} />
       <Metric label="归属超额 GPU / CPU / GiB" value={`${number(node.attribution_excess.gpu)} / ${number(node.attribution_excess.cpu)} / ${number(node.attribution_excess.memory_gib)}`} />
     </Metrics></section>
-    <RelatedList title="节点 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.user} · ${item.total_gpu} GPU` }))} />
+    <RelatedList title="节点 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.user} · ${workloadResources(item)}` }))} />
     <TelemetryPanel telemetry={node.telemetry} />
   </>;
 }
@@ -106,11 +107,15 @@ function WorkloadDetail({ workload, open }: { workload: Workload; open: (ref: De
     {(workload.policy_reasons ?? []).map((reason) => <p className="error" key={reason}>{reason}</p>)}
     <Metrics>
       <Metric label="GPU" value={number(workload.total_gpu)} />
+      <Metric label="CPU" value={number(workload.total_cpu)} />
+      <Metric label="内存 GiB" value={number(workload.total_memory_gib)} />
+      <Metric label="资源口径" value={workload.resource_basis === "requested" ? "申请资源" : "Pod 归属资源"} />
       <Metric label="运行时间" value={workload.runtime_hours == null ? "—" : `${number(workload.runtime_hours)}h${workload.runtime_estimated ? "（估算）" : ""}`} />
       <Metric label="Workspace" value={workload.workspace || "—"} />
       <Metric label="创建时间" value={workload.create_time ? new Date(workload.create_time).toLocaleString() : "—"} />
     </Metrics>
-    <section className="detail-section"><h3>Placements<span className="section-count">{workload.placements.length}</span></h3><div className="placement-list">{workload.placements.map((placement, index) => <button type="button" key={`${placement.node}-${placement.pod ?? index}`} onClick={() => open({ kind: "node", id: placement.node, label: placement.node })}><span><b>{placement.node}</b><small>{placement.pod || "—"}</small></span><em>{number(placement.gpu)} GPU · {number(placement.cpu)} CPU · {number(placement.memory_gib)} GiB</em></button>)}</div></section>
+    {workload.resource_basis === "requested" && <section className="detail-section"><h3>Task 请求<span className="section-count">{workload.task_resources?.length ?? 0}</span></h3>{workload.task_resources?.length ? <div className="plan-workloads"><table><thead><tr><th>Task</th><th>角色</th><th>副本数</th><th>每副本 GPU</th><th>每副本 CPU</th><th>每副本内存 GiB</th></tr></thead><tbody>{workload.task_resources.map((task, index) => <tr key={`${task.name}:${task.role}:${index}`}><td>{task.name}</td><td>{task.role || "—"}</td><td>{number(task.replicas)}</td><td>{number(task.gpu_per_replica)}</td><td>{number(task.cpu_per_replica)}</td><td>{number(task.memory_gib_per_replica)}</td></tr>)}</tbody></table></div> : <p className="muted">无 Task 资源明细</p>}</section>}
+    {workload.resource_basis === "attributed" && <section className="detail-section"><h3>Placements（当前归属）<span className="section-count">{workload.placements.length}</span></h3><div className="placement-list">{workload.placements.map((placement, index) => <button type="button" key={`${placement.node}-${placement.pod ?? index}`} onClick={() => open({ kind: "node", id: placement.node, label: placement.node })}><span><b>{placement.node}</b><small>{placement.pod || "—"}</small></span><em>{number(placement.gpu)} GPU · {number(placement.cpu)} CPU · {number(placement.memory_gib)} GiB</em></button>)}</div></section>}
     <TelemetryPanel telemetry={workload.telemetry} />
     {workload.historical_telemetry && <section className="detail-section"><h3>历史 GPU 遥测</h3><Metrics>
       <Metric label="评估状态" value={<span className={statusClass(workload.historical_telemetry.evaluation_status)}>{workload.historical_telemetry.evaluation_status}</span>} />

@@ -126,6 +126,13 @@ clusterx-monitor admin init \
 采集失败时继续提供最后完整快照并标记 stale。GPU compute、显存和功率使用
 最近 5 分钟滚动平均，并显示逐卡遥测覆盖率。
 
+Workload 快照统一提供 `total_gpu`、`total_cpu`、`total_memory_gib` 和
+`resource_basis`。Running 资源按 Pod placement 归属汇总；Pending 资源按全部
+task 的副本申请汇总，并在 `task_resources` 中保留每个 task 的资源规格。无法
+取得 CPU 或内存时返回 `null`，不会将未知资源显示为零。
+Group 与 User 的已分配资源均汇总全部活跃 workload 类型（包括 `trainingJob`、
+`aid` 和 `air`）；Pending 仍只展示申请量，不计入当前已分配资源。
+
 服务另按 workload UID 从 Prometheus 聚合过去 24 小时的历史 GPU 利用率，默认
 每 5 分钟刷新；该缓存只驻留内存，重启后立即重建，不使用数据库。历史查询失败
 不会阻止快照和 5 分钟遥测发布，但会产生结构化遥测告警。

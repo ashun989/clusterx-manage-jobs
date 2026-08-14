@@ -16,9 +16,21 @@ export type ResourceUsage = {
   memory_gib: number;
 };
 
-export type Placement = ResourceUsage & {
+export type Placement = {
+  gpu: number;
+  cpu: number | null;
+  memory_gib: number | null;
   node: string;
   pod?: string;
+};
+
+export type TaskResource = {
+  name: string;
+  role: string;
+  replicas: number;
+  gpu_per_replica: number;
+  cpu_per_replica: number | null;
+  memory_gib_per_replica: number | null;
 };
 
 export type PolicyFinding = {
@@ -60,10 +72,19 @@ export type Workload = FindingFacets & {
   type: string;
   workspace?: string;
   create_time?: string | null;
+  queue_age_seconds?: number | null;
   start_time?: string | null;
   runtime_hours?: number | null;
   runtime_estimated?: boolean;
   total_gpu: number;
+  total_cpu: number | null;
+  total_memory_gib: number | null;
+  resource_basis: "requested" | "attributed";
+  task_resources?: TaskResource[];
+  num_nodes?: number;
+  gpus_per_node?: number | null;
+  cpus_per_node?: number | null;
+  memory_per_node_gib?: number | null;
   policy_status: string;
   policy_reasons: string[];
   historical_telemetry?: HistoricalTelemetry;
@@ -82,8 +103,8 @@ export type GroupSummary = FindingFacets & {
   cpu_quota: number | null;
   memory_quota_gib: number | null;
   allocated_gpu: number;
-  allocated_cpu: number;
-  allocated_memory_gib: number;
+  allocated_cpu: number | null;
+  allocated_memory_gib: number | null;
   members: string[];
   over_resources: string[];
   telemetry: Telemetry;
@@ -94,8 +115,8 @@ export type UserSummary = FindingFacets & {
   group: string;
   workload_count: number;
   allocated_gpu: number;
-  allocated_cpu: number;
-  allocated_memory_gib: number;
+  allocated_cpu: number | null;
+  allocated_memory_gib: number | null;
   status: string;
   telemetry: Telemetry;
 };
@@ -193,8 +214,8 @@ export type PlanItem = {
   users: number;
   groups: number;
   gpus: number;
-  cpus: number;
-  memory_gib: number;
+  cpus: number | null;
+  memory_gib: number | null;
   freed_nodes: string[];
   workload_details: Workload[];
 };

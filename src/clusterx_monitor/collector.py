@@ -50,6 +50,33 @@ def _clean(value: float) -> int | float:
     return int(round(value)) if math.isclose(value, round(value), abs_tol=1e-9) else round(value, 6)
 
 
+def _optional_number(value: Any) -> int | float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return _clean(number) if math.isfinite(number) and number >= 0 else None
+
+
+def _optional_resource_number(value: Any, *, memory: bool = False) -> int | float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = resource_number(value, memory=memory)
+    except (TypeError, ValueError):
+        return None
+    return _clean(number) if math.isfinite(number) and number >= 0 else None
+
+
+def _resource_total(rows: Iterable[dict[str, Any]], key: str) -> int | float | None:
+    values = [row.get(key) for row in rows]
+    if not values or any(value is None for value in values):
+        return None
+    return _clean(sum(float(value) for value in values))
+
+
 def _resource_map(node: dict[str, Any]) -> dict[str, tuple[float, float]]:
     result: dict[str, tuple[float, float]] = {}
     for item in node.get("summary_data") or []:
@@ -320,21 +347,53 @@ def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], 
     for job in jobs:
         spec = job.get("spec") or {}
         tasks = ((spec.get("vc_job") or {}).get("tasks") or [])
-        task = tasks[0] if tasks else {}
-        resource = task.get("resource_spec") or {}
-        metadata = job.get("metadata") or {}
-        created = _parse_time(metadata.get("created_at") or job.get("create_time"))
+        task_resources = []
+        for index, task in enumerate(tasks):
+            resource = task.get("resource_spec") or {}
+            replicas = max(0, int(task.get("replicas") or 0))
+            task_resources.append({
+                "name": str(task.get("name") or f"task-{index + 1}"),
+                "role": str(task.get("role") or ""),
+                "replicas": replicas,
+                "gpu_per_replica": _optional_number(resource.get("accelerate_device_count")) or 0,
+                "cpu_per_replica": _optional_number(resource.get("cpu_count")),
+                "memory_gib_per_replica": _optional_number(resource.get("memory_gib")),
+            })
+        resource_shapes = {
+            (
+                item["gpu_per_replica"],
+                item["cpu_per_replica"],
+                item["memory_gib_per_replica"],
+            )
+            for item in task_resources
+        }
+        homogeneous = len(resource_shapes) == 1
+        per_replica = task_resources[0] if homogeneous and task_resources else {}
+        active_tasks = [item for item in task_resources if item["replicas"] > 0]
+
+        def requested_total(key: str) -> int | float | None:
+            if not active_tasks or any(item[key] is None for item in active_tasks):
+                return None
+            return _clean(sum(float(item[key]) * item["replicas"] for item in active_tasks))
+
+        status = job.get("status") or {}
+        created = _parse_time(status.get("create_time"))
         result.append({
             "workload_id": str(job.get("name") or ""),
             "workload_name": str(job.get("display_name") or job.get("name") or ""),
             "user": str((job.get("ownership") or {}).get("creator_name") or "unknown").lower(),
             "status": "PENDING",
             "create_time": created.isoformat() if created else None,
-            "queue_age_seconds": max(0, (now - created).total_seconds()) if created else 0,
-            "num_nodes": sum(int(item.get("replicas") or 0) for item in tasks),
-            "gpus_per_node": int(resource.get("accelerate_device_count") or 0),
-            "cpus_per_node": float(resource.get("cpu_count") or 0),
-            "memory_per_node_gib": float(resource.get("memory_gib") or 0),
+            "queue_age_seconds": max(0, (now - created).total_seconds()) if created else None,
+            "num_nodes": sum(item["replicas"] for item in task_resources),
+            "gpus_per_node": per_replica.get("gpu_per_replica"),
+            "cpus_per_node": per_replica.get("cpu_per_replica"),
+            "memory_per_node_gib": per_replica.get("memory_gib_per_replica"),
+            "total_gpu": requested_total("gpu_per_replica") or 0,
+            "total_cpu": requested_total("cpu_per_replica"),
+            "total_memory_gib": requested_total("memory_gib_per_replica"),
+            "resource_basis": "requested",
+            "task_resources": task_resources,
         })
     return result, complete
 
@@ -400,14 +459,16 @@ class ClusterCollector:
                 placement = {
                     "node": node["node"], "pod": str(pod.get("name") or ""),
                     "gpu": _clean(float(resource.get("accelerate_device_count") or 0)),
-                    "cpu": _clean(resource_number(resource.get("cpu"))),
-                    "memory_gib": _clean(resource_number(resource.get("memory"), memory=True)),
+                    "cpu": _optional_resource_number(resource.get("cpu")),
+                    "memory_gib": _optional_resource_number(resource.get("memory"), memory=True),
                 }
                 for key in attributed:
-                    attributed[key] += float(placement[key])
+                    if placement[key] is not None:
+                        attributed[key] += float(placement[key])
                 node_row = node["workloads"].setdefault(workload_id, {"gpu": 0, "cpu": 0, "memory_gib": 0})
                 for key in node_row:
-                    node_row[key] = _clean(float(node_row[key]) + float(placement[key]))
+                    if placement[key] is not None:
+                        node_row[key] = _clean(float(node_row[key]) + float(placement[key]))
                 ownership = pod.get("ownership") or {}
                 workspace = pod.get("workspace") or {}
                 workload = workloads.setdefault(workload_id, {
@@ -418,6 +479,8 @@ class ClusterCollector:
                     "workspace": str(workspace.get("name") or ""),
                     "create_time": None, "start_time": raw_workload.get("start_time"),
                     "placements": [], "gpus": [], "total_gpu": 0,
+                    "total_cpu": None, "total_memory_gib": None,
+                    "resource_basis": "attributed", "task_resources": [],
                 })
                 timestamp = _parse_time(pod.get("create_time"))
                 current = _parse_time(workload.get("create_time"))
@@ -441,6 +504,8 @@ class ClusterCollector:
                 node["planning_exclusion_reasons"] = ["attribution.resource_excess"]
         for workload in workloads.values():
             workload["total_gpu"] = _clean(sum(float(p["gpu"]) for p in workload["placements"]))
+            workload["total_cpu"] = _resource_total(workload["placements"], "cpu")
+            workload["total_memory_gib"] = _resource_total(workload["placements"], "memory_gib")
 
         try:
             telemetry = _query_gpu_telemetry(self.cluster, self.queue, self.cluster_name, telemetry_minutes)

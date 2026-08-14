@@ -41,7 +41,8 @@ def raw_snapshot():
         }],
         "workloads": [{
             "workload_id": "w", "workload_name": "w", "user": "alice",
-            "type": "trainingJob", "total_gpu": 1,
+            "type": "trainingJob", "total_gpu": 1, "total_cpu": 4,
+            "total_memory_gib": 10, "resource_basis": "attributed", "task_resources": [],
             "placements": [{"node": "n1", "pod": "p", "gpu": 1, "cpu": 4, "memory_gib": 10}],
             "gpus": [{"node": "n1", "pod": "p", "device_index": "0", "gpu_uuid": "u",
                       "gpu_compute_util_pct": 50, "gpu_memory_util_pct": 60, "gpu_power_w": 300}],
@@ -96,6 +97,9 @@ class MonitorApiTests(unittest.TestCase):
         self.assertEqual(status_response.headers["x-content-type-options"], "nosniff")
         snapshot = client.get("/api/v1/snapshots/latest").json()
         self.assertEqual(snapshot["snapshot_id"], "api-snapshot")
+        self.assertEqual(snapshot["workloads"][0]["total_cpu"], 4)
+        self.assertEqual(snapshot["workloads"][0]["total_memory_gib"], 10)
+        self.assertEqual(snapshot["workloads"][0]["resource_basis"], "attributed")
         self.assertTrue(client.get("/api/v1/policy").json()["valid"])
         policy_response = client.get("/api/v1/policy")
         public_policy = policy_response.json()["policy"]

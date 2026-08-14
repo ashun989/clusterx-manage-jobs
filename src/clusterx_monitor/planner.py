@@ -10,6 +10,14 @@ from .models import PlanRequest
 SCHEDULABLE_STATES = {"RUNNING", "IDLE", "MIXED", "running", "idle", "mixed"}
 
 
+def _optional_total(items: Iterable[dict[str, Any]], key: str) -> float | int | None:
+    values = [item.get(key) for item in items]
+    if any(value is None for value in values):
+        return None
+    total = sum(float(value) for value in values)
+    return int(total) if total.is_integer() else round(total, 6)
+
+
 def _workload_map(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(item["workload_id"]): item for item in snapshot.get("workloads", [])}
 
@@ -132,8 +140,8 @@ def _candidate(
         "users": len({str(item.get("user")) for item in details}),
         "groups": len({str(item.get("group")) for item in details}),
         "gpus": sum(float(item.get("total_gpu") or 0) for item in details),
-        "cpus": sum(float(p.get("cpu") or 0) for item in details for p in item.get("placements", [])),
-        "memory_gib": sum(float(p.get("memory_gib") or 0) for item in details for p in item.get("placements", [])),
+        "cpus": _optional_total(details, "total_cpu"),
+        "memory_gib": _optional_total(details, "total_memory_gib"),
         "freed_nodes": sorted(freed)[: request.target.nodes],
         "workload_details": details,
     }

@@ -44,7 +44,7 @@ RULE_CATALOG = [
     {"code": "node.fragmented", "category": "node-classification", "applies_to": "node", "title": "Fragmented node", "description": "The node is partially allocated and its free GPU capacity remains usable for the configured standard planning profile."},
     {"code": "node.cpu_memory_blocked", "category": "node-classification", "applies_to": "node", "title": "CPU/memory-blocked node", "description": "Raw free GPUs exceed the number usable for the configured standard planning profile; smaller explicit requests may still fit."},
     {"code": "attribution.resource_excess", "category": "attribution", "applies_to": "node", "title": "Inconsistent resource attribution", "description": "Pod-attributed resources exceed node allocated resources; the node and touching workloads are excluded from planning."},
-    {"code": "quota.pending_pressure", "category": "quota", "applies_to": "queue", "title": "Pending pressure", "description": "Pressure becomes active when the configured number of pending training jobs individually reach the wait threshold; 0-GPU jobs count."},
+    {"code": "quota.pending_pressure", "category": "quota", "applies_to": "queue", "title": "Pending pressure", "description": "Pressure becomes active when the configured number of pending training jobs individually reach the wait threshold; 0-GPU jobs count. Missing queue timestamps make pressure unknown."},
 ]
 
 
@@ -232,6 +232,7 @@ class PolicyManager:
                 "rule_catalog": RULE_CATALOG,
                 "evaluation_behavior": {
                     "configuration_error": "Missing or invalid initial files enter authenticated setup-required mode. A later hot-reload error keeps the complete last-known-good resource and group policy.",
+                    "pending_pressure_unavailable": "An incomplete pending inventory or any unavailable queue timestamp makes pending pressure unknown instead of inactive.",
                     "historical_telemetry_unavailable": "The snapshot is still published, historical low-utilization evaluation is skipped, and a telemetry warning is emitted.",
                     "historical_scope": "Only currently running GPU trainingJob and aid workloads are evaluated; no completed-workload history is stored.",
                     "default_group": "The default GPU quota is max(0, current bound GPU capacity minus all explicit group GPU quotas).",
@@ -415,6 +416,29 @@ def _sum(values: Iterable[Any]) -> float:
 
 def _clean(value: float) -> int | float:
     return int(value) if float(value).is_integer() else round(float(value), 3)
+
+
+def _optional_sum(values: Iterable[Any]) -> int | float | None:
+    items = list(values)
+    if any(value is None for value in items):
+        return None
+    return _clean(_sum(items))
+
+
+def _normalize_workload_resources(workload: dict[str, Any]) -> None:
+    placements = workload.get("placements") or []
+    if placements:
+        workload["total_gpu"] = _clean(_sum(item.get("gpu") for item in placements))
+        workload["total_cpu"] = _optional_sum(item.get("cpu") for item in placements)
+        workload["total_memory_gib"] = _optional_sum(
+            item.get("memory_gib") for item in placements
+        )
+    else:
+        workload.setdefault("total_gpu", 0)
+        workload.setdefault("total_cpu", None)
+        workload.setdefault("total_memory_gib", None)
+    workload.setdefault("resource_basis", "attributed")
+    workload.setdefault("task_resources", [])
 
 
 def _telemetry_summary(workloads: Iterable[dict[str, Any]]) -> dict[str, Any]:
@@ -603,6 +627,9 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         for member in group.members
     }
 
+    for workload in workloads:
+        _normalize_workload_resources(workload)
+
     for pending_item in snapshot.get("pending_workloads") or []:
         pending_user = str(pending_item.get("user") or "unknown").strip().lower()
         pending_item["user"] = pending_user
@@ -612,19 +639,38 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         pending_item["policy_findings"] = []
         pending_item["policy_reasons"] = []
         _set_finding_facets(pending_item)
-        pending_item["total_gpu"] = int(pending_item.get("num_nodes") or 0) * int(pending_item.get("gpus_per_node") or 0)
+        if "total_gpu" not in pending_item:
+            pending_item["total_gpu"] = int(pending_item.get("num_nodes") or 0) * int(pending_item.get("gpus_per_node") or 0)
+        if "total_cpu" not in pending_item:
+            pending_item["total_cpu"] = (
+                None if pending_item.get("cpus_per_node") is None else
+                _clean(float(pending_item.get("num_nodes") or 0) * float(pending_item["cpus_per_node"]))
+            )
+        if "total_memory_gib" not in pending_item:
+            pending_item["total_memory_gib"] = (
+                None if pending_item.get("memory_per_node_gib") is None else
+                _clean(float(pending_item.get("num_nodes") or 0) * float(pending_item["memory_per_node_gib"]))
+            )
+        pending_item.setdefault("resource_basis", "requested")
+        pending_item.setdefault("task_resources", [])
         pending_item["placements"] = []
         pending_item["gpus"] = []
         pending_item["telemetry"] = _telemetry_summary([])
 
+    pending_workloads = snapshot.get("pending_workloads") or []
+    unknown_age_pending = [
+        item for item in pending_workloads
+        if item.get("queue_age_seconds") is None
+    ]
     eligible_pending = [
-        item for item in snapshot.get("pending_workloads") or []
-        if float(item.get("queue_age_seconds") or 0)
+        item for item in pending_workloads
+        if item.get("queue_age_seconds") is not None
+        and float(item.get("queue_age_seconds") or 0)
         >= policy.pending_pressure.min_wait_minutes * 60
     ]
     pending_complete = bool(snapshot.get("pending_complete", True))
     pressure_state = (
-        "unknown" if not pending_complete else
+        "unknown" if not pending_complete or unknown_age_pending else
         "active" if len(eligible_pending) >= policy.pending_pressure.min_jobs else
         "inactive"
     )
@@ -661,10 +707,9 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
     alerts: list[dict[str, Any]] = []
     for group_name in [*policy.groups, *(name for name in by_group if name not in policy.groups)]:
         group_workloads = by_group.get(group_name, [])
-        training = [w for w in group_workloads if w.get("type") == "trainingJob"]
-        gpu = _sum(w.get("total_gpu") for w in training)
-        cpu = _sum(p.get("cpu") for w in training for p in w.get("placements", []))
-        memory = _sum(p.get("memory_gib") for w in training for p in w.get("placements", []))
+        gpu = _sum(w.get("total_gpu") for w in group_workloads)
+        cpu = _optional_sum(w.get("total_cpu") for w in group_workloads)
+        memory = _optional_sum(w.get("total_memory_gib") for w in group_workloads)
         if group_name == "default":
             quota = default_quota
         elif group_name in policy.groups and isinstance(policy.groups[group_name].gpu_quota, int):
@@ -675,9 +720,9 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         if quota is not None:
             if gpu > quota:
                 over.append("gpu")
-            if cpu > quota * policy.training.cpu_per_gpu:
+            if cpu is not None and cpu > quota * policy.training.cpu_per_gpu:
                 over.append("cpu")
-            if memory > quota * policy.training.memory_gib_per_gpu:
+            if memory is not None and memory > quota * policy.training.memory_gib_per_gpu:
                 over.append("memory")
         status = (
             "unknown" if group_name == "unattributed" else
@@ -707,8 +752,8 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             "cpu_quota": quota * policy.training.cpu_per_gpu if quota is not None else None,
             "memory_quota_gib": quota * policy.training.memory_gib_per_gpu if quota is not None else None,
             "allocated_gpu": _clean(gpu),
-            "allocated_cpu": _clean(cpu),
-            "allocated_memory_gib": _clean(memory),
+            "allocated_cpu": None if cpu is None else _clean(cpu),
+            "allocated_memory_gib": None if memory is None else _clean(memory),
             "members": sorted({str(w["user"]) for w in group_workloads}),
             "status": status,
             "over_resources": over,
@@ -760,8 +805,8 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             "group": group_name,
             "workload_count": len(items),
             "allocated_gpu": _clean(_sum(w.get("total_gpu") for w in items)),
-            "allocated_cpu": _clean(_sum(p.get("cpu") for w in items for p in w.get("placements", []))),
-            "allocated_memory_gib": _clean(_sum(p.get("memory_gib") for w in items for p in w.get("placements", []))),
+            "allocated_cpu": _optional_sum(w.get("total_cpu") for w in items),
+            "allocated_memory_gib": _optional_sum(w.get("total_memory_gib") for w in items),
             "status": (
                 "violation" if any(w["policy_status"] == "violation" for w in items)
                 or group_states.get(group_name) == "violation"
@@ -793,11 +838,21 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             tags=("quota", "capacity"),
         ))
     if pressure_state == "unknown":
+        pending_unknown_reasons = []
+        pending_unknown_tags = ["pending"]
+        if not pending_complete:
+            pending_unknown_reasons.append("pending workload list is incomplete")
+            pending_unknown_tags.append("incomplete")
+        if unknown_age_pending:
+            pending_unknown_reasons.append(
+                f"{len(unknown_age_pending)} pending workload timestamps are unavailable"
+            )
+            pending_unknown_tags.append("timestamp-unavailable")
         alerts.append(_alert(
             "warning", "pending", "queue",
-            "pending workload list is incomplete; quota pressure is unknown",
+            f"{' and '.join(pending_unknown_reasons)}; quota pressure is unknown",
             code="quota.pending_pressure_unknown", category="quota",
-            subject_type="queue", tags=("pending", "incomplete"),
+            subject_type="queue", tags=pending_unknown_tags,
         ))
     if snapshot.get("historical_telemetry_status") == "unavailable":
         alerts.append(_alert(
@@ -883,6 +938,7 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
     snapshot["pending_pressure"] = {
         "state": pressure_state,
         "eligible_jobs": len(eligible_pending),
+        "unknown_age_jobs": len(unknown_age_pending),
         "min_jobs": policy.pending_pressure.min_jobs,
         "min_wait_minutes": policy.pending_pressure.min_wait_minutes,
     }

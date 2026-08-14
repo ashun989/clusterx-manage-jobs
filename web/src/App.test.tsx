@@ -22,7 +22,8 @@ const telemetry = (allocated: number, util: number | null, watts: number | null)
 const workload = (id: string, name: string, user: string, group: string, gpu: number, node: string): Workload => ({
   workload_id: id, workload_name: name, user, group, type: "trainingJob", workspace: "workspace",
   create_time: "2026-08-14T00:00:00Z", start_time: "2026-08-14T00:10:00Z", runtime_hours: 2,
-  runtime_estimated: false, total_gpu: gpu, policy_status: "compliant", policy_reasons: [],
+  runtime_estimated: false, total_gpu: gpu, total_cpu: gpu * 14, total_memory_gib: gpu * 240,
+  resource_basis: "attributed", task_resources: [], policy_status: "compliant", policy_reasons: [],
   policy_findings: [], finding_categories: [], finding_codes: [], finding_tags: [],
   planning_eligible: true, planning_exclusion_reasons: [], planning_excluded_nodes: [],
   placements: [{ node, pod: `${name}-0`, gpu, cpu: gpu * 14, memory_gib: gpu * 240 }],
@@ -145,6 +146,37 @@ describe("Clusterx monitor dashboard", () => {
     expect(within(table).getByText("group-a")).toBeInTheDocument();
   });
 
+  it("shows sortable workload totals and pending task request details", async () => {
+    const pending: Workload = {
+      ...workload("pending-a", "pending-a", "charlie", "default", 3, "unused"),
+      policy_status: "pending", placements: [], gpus: [], telemetry: telemetry(0, null, null),
+      total_gpu: 3, total_cpu: null, total_memory_gib: 700, resource_basis: "requested",
+      task_resources: [
+        { name: "master", role: "PYTORCH_MASTER", replicas: 1, gpu_per_replica: 1, cpu_per_replica: null, memory_gib_per_replica: 100 },
+        { name: "worker", role: "PYTORCH_WORKER", replicas: 1, gpu_per_replica: 2, cpu_per_replica: null, memory_gib_per_replica: 600 },
+      ],
+    };
+    latestSnapshot = { ...latestSnapshot, pending_workloads: [pending] };
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "workloads" }));
+    const table = screen.getByRole("table");
+    expect(within(table).getByRole("button", { name: "排序 GPU 总量" })).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: "排序 CPU 总量" })).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: "排序 内存 GiB" })).toBeInTheDocument();
+    fireEvent.click(within(table).getByRole("button", { name: "排序 CPU 总量" }));
+    expect(within(table).getAllByRole("row").at(-1)).toHaveTextContent("pending-a");
+    expect(within(table).getByRole("row", { name: "查看 pending-a 详情" })).toHaveTextContent("—");
+
+    fireEvent.click(within(table).getByRole("row", { name: "查看 pending-a 详情" }));
+    const drawer = screen.getByRole("complementary", { name: "pending-a 详情" });
+    expect(drawer).toHaveTextContent("申请资源");
+    expect(drawer).toHaveTextContent("Task 请求");
+    expect(within(drawer).getByRole("cell", { name: "master" })).toBeInTheDocument();
+    expect(within(drawer).getByRole("cell", { name: "PYTORCH_WORKER" })).toBeInTheDocument();
+    expect(drawer).not.toHaveTextContent("Placements（当前归属）");
+  });
+
   it("opens all entity details, follows related objects, supports back and reports removed entities", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
@@ -212,6 +244,11 @@ describe("Clusterx monitor dashboard", () => {
     await waitFor(() => expect(first).toHaveAttribute("aria-expanded", "true"));
     expect(second).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByRole("row", { name: "查看 train-a 详情" })).toBeInTheDocument();
+    const planTable = screen.getByRole("row", { name: "查看 train-a 详情" }).closest("table")!;
+    expect(within(planTable).getByRole("columnheader", { name: "CPU" })).toBeInTheDocument();
+    expect(within(planTable).getByRole("columnheader", { name: "内存 GiB" })).toBeInTheDocument();
+    expect(within(planTable).getByRole("row", { name: "查看 train-a 详情" })).toHaveTextContent("56");
+    expect(within(planTable).getByRole("row", { name: "查看 train-a 详情" })).toHaveTextContent("960");
     fireEvent.click(second);
     expect(second).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("row", { name: "查看 train-b 详情" })).toBeInTheDocument();

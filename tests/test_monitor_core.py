@@ -126,7 +126,11 @@ def workload(
             })
     return {
         "workload_id": name, "workload_name": name, "user": user, "type": kind,
-        "total_gpu": gpu_count, "placements": placements, "gpus": cards,
+        "total_gpu": gpu_count,
+        "total_cpu": sum(item["cpu"] for item in placements),
+        "total_memory_gib": sum(item["memory_gib"] for item in placements),
+        "resource_basis": "attributed", "task_resources": [],
+        "placements": placements, "gpus": cards,
         "create_time": created.isoformat() if created else None, "start_time": None,
     }
 
@@ -201,6 +205,65 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(result["nodes"][0]["classification"], "cpu-memory-blocked")
         self.assertGreater(result["nodes"][0]["stranded_gpu"], 0)
 
+    def test_workload_totals_are_normalized_once_for_summaries(self):
+        item = workload("w", "alice", "trainingJob", [
+            placement("n1", 1, 4, 10), placement("n2", 2, 8, 20),
+        ])
+        item.update({"total_gpu": 99, "total_cpu": 99, "total_memory_gib": 99})
+        result = apply_policy(
+            snapshot([node("n1", 1, 4, 10), node("n2", 2, 8, 20)], [item]),
+            self.policy,
+        )
+        normalized = result["workloads"][0]
+        self.assertEqual(
+            (normalized["total_gpu"], normalized["total_cpu"], normalized["total_memory_gib"]),
+            (3, 12, 30),
+        )
+        group = next(row for row in result["groups"] if row["group"] == "example-team")
+        user = result["users"][0]
+        self.assertEqual(
+            (group["allocated_gpu"], group["allocated_cpu"], group["allocated_memory_gib"]),
+            (3, 12, 30),
+        )
+        self.assertEqual(
+            (user["allocated_gpu"], user["allocated_cpu"], user["allocated_memory_gib"]),
+            (3, 12, 30),
+        )
+
+    def test_group_summary_includes_air_aid_and_training_workloads(self):
+        items = [
+            workload("air", "alice", "air", [placement("n1", 2, 20, 400)]),
+            workload("aid", "alice", "aid", [placement("n2", 1, 6, 120)]),
+            workload("training", "alice", "trainingJob", [placement("n3", 1, 4, 240)]),
+        ]
+        result = apply_policy(
+            snapshot([
+                node("n1", 2, 20, 400), node("n2", 1, 6, 120), node("n3", 1, 4, 240),
+            ], items),
+            self.policy,
+        )
+        group = next(row for row in result["groups"] if row["group"] == "example-team")
+        user = result["users"][0]
+        expected = (4, 30, 760)
+        self.assertEqual(
+            (group["allocated_gpu"], group["allocated_cpu"], group["allocated_memory_gib"]),
+            expected,
+        )
+        self.assertEqual(
+            (user["allocated_gpu"], user["allocated_cpu"], user["allocated_memory_gib"]),
+            expected,
+        )
+
+    def test_missing_running_cpu_and_memory_stay_unknown(self):
+        item = workload("w", "alice", "trainingJob", [placement("n", 1)])
+        item["placements"][0]["cpu"] = None
+        item["placements"][0]["memory_gib"] = None
+        result = apply_policy(snapshot([node("n", 1)], [item]), self.policy)
+        self.assertIsNone(result["workloads"][0]["total_cpu"])
+        self.assertIsNone(result["workloads"][0]["total_memory_gib"])
+        self.assertIsNone(result["users"][0]["allocated_cpu"])
+        self.assertIsNone(result["users"][0]["allocated_memory_gib"])
+
     def test_zero_quota_bursts_then_violates_under_pressure(self):
         item = workload("w", "bob", "trainingJob", [placement("n", 1)])
         no_pressure = apply_policy(snapshot([node("n", 1)], [item]), self.policy)
@@ -217,6 +280,15 @@ class PolicyTests(unittest.TestCase):
         group = next(row for row in result["groups"] if row["group"] == "example-zero-quota")
         self.assertEqual(group["status"], "unknown")
         self.assertEqual(result["pending_pressure"]["state"], "unknown")
+
+    def test_pending_missing_age_is_unknown_instead_of_inactive(self):
+        pending = [{"queue_age_seconds": None, "workload_id": "pending"}]
+        result = apply_policy(snapshot([node("n", 1)], [], pending), self.policy)
+        self.assertEqual(result["pending_pressure"]["state"], "unknown")
+        self.assertEqual(result["pending_pressure"]["eligible_jobs"], 0)
+        self.assertEqual(result["pending_pressure"]["unknown_age_jobs"], 1)
+        alert = next(item for item in result["alerts"] if item["code"] == "quota.pending_pressure_unknown")
+        self.assertIn("timestamp-unavailable", alert["tags"])
 
     def test_development_and_zero_gpu_training_limits(self):
         old = datetime.now(timezone.utc) - timedelta(hours=73)
@@ -452,6 +524,8 @@ class PlannerTests(unittest.TestCase):
         })
         self.assertEqual(result["currently_schedulable_nodes"], [])
         self.assertEqual(result["plans"][0]["workloads"], ["a"])
+        self.assertEqual(result["plans"][0]["cpus"], 4)
+        self.assertEqual(result["plans"][0]["memory_gib"], 10)
 
     def test_planner_filters_structured_violations(self):
         old = datetime.now(timezone.utc) - timedelta(hours=2)
@@ -609,6 +683,45 @@ class StoreAndTelemetryTests(unittest.TestCase):
         self.assertEqual(history.call_count, 1)
         self.assertIn("historical workload GPU telemetry is unavailable", result["warnings"])
 
+    def test_collector_sums_running_resources_across_placements(self):
+        def raw_node(name, node_id, gpu, cpu, memory):
+            return {
+                "name": name, "id": node_id, "host_ip": f"10.0.0.{node_id[-1]}", "state": "RUNNING",
+                "summary_data": [
+                    {"resource_type": "DEVICE", "allocated": gpu, "total": 8},
+                    {"resource_type": "CPU", "allocated": cpu, "total": 112},
+                    {"resource_type": "MEMORY", "allocated": memory, "total": 1920, "unit": "GiB"},
+                ],
+            }
+
+        raw_nodes = [raw_node("n1", "id1", 1, 4, 10), raw_node("n2", "id2", 2, 8, 20)]
+        client = mock.Mock()
+        client.list_queue_nodes.return_value = {"nodes": raw_nodes, "total_size": 2}
+
+        def pods(_method, _path, *, params):
+            suffix = params["node_id"][-1]
+            gpu, cpu, memory = (1, "4000m", "10GiB") if suffix == "1" else (2, "8000m", "20GiB")
+            return {"total_size": 1, "pods": [{
+                "name": f"pod-{suffix}", "create_time": "2026-08-14T00:00:00Z",
+                "workload": {"uid": "w", "display_name": "train", "type": "trainingJob"},
+                "ownership": {"creator_name": "alice"}, "workspace": {"name": "ws"},
+                "resource": {"accelerate_device_count": gpu, "cpu": cpu, "memory": memory},
+            }]}
+
+        client._make_management_request.side_effect = pods
+        cluster = mock.Mock(client=client, cfg={"workspace": "ws"})
+        collector = ClusterCollector(cluster, "q", "c")
+        with mock.patch("clusterx_monitor.collector._query_gpu_telemetry", return_value=[]), mock.patch(
+            "clusterx_monitor.collector._pending_workloads", return_value=([], True)
+        ), mock.patch("clusterx_monitor.collector._query_workload_history", return_value={}):
+            result = collector.collect()
+        item = result["workloads"][0]
+        self.assertEqual(
+            (item["total_gpu"], item["total_cpu"], item["total_memory_gib"]),
+            (3, 12, 30),
+        )
+        self.assertEqual(item["resource_basis"], "attributed")
+
     def test_node_signature_detects_identity_state_totals_and_allocations(self):
         def raw(*, node_id="id", state="RUNNING", gpu_allocated=1, gpu_total=8):
             return [{
@@ -635,11 +748,12 @@ class StoreAndTelemetryTests(unittest.TestCase):
     def test_pending_inventory_tracks_completeness_and_zero_gpu_jobs(self):
         cluster = mock.Mock()
         cluster._get_queue_id.return_value = "queue-id"
+        created = datetime.now(timezone.utc) - timedelta(minutes=15)
         cluster.client.list_training_jobs.return_value = {
             "total_size": 2,
             "training_jobs": [{
                 "name": "cpu-only", "ownership": {"creator_name": "UserA"},
-                "metadata": {"created_at": datetime.now(timezone.utc).isoformat()},
+                "status": {"create_time": created.isoformat()},
                 "spec": {"vc_job": {"tasks": [{
                     "replicas": 1,
                     "resource_spec": {"accelerate_device_count": 0, "cpu_count": 14, "memory_gib": 240},
@@ -650,6 +764,89 @@ class StoreAndTelemetryTests(unittest.TestCase):
         self.assertFalse(complete)
         self.assertEqual(jobs[0]["gpus_per_node"], 0)
         self.assertEqual(jobs[0]["user"], "usera")
+        self.assertEqual(jobs[0]["create_time"], created.isoformat())
+        self.assertGreaterEqual(jobs[0]["queue_age_seconds"], 15 * 60)
+        self.assertEqual(jobs[0]["total_cpu"], 14)
+        self.assertEqual(jobs[0]["total_memory_gib"], 240)
+        self.assertEqual(jobs[0]["resource_basis"], "requested")
+
+    def test_pending_inventory_sums_heterogeneous_tasks_without_fake_per_node_shape(self):
+        cluster = mock.Mock()
+        cluster._get_queue_id.return_value = "queue-id"
+        cluster.client.list_training_jobs.return_value = {
+            "training_jobs": [{
+                "name": "distributed", "ownership": {"creator_name": "Alice"},
+                "spec": {"vc_job": {"tasks": [
+                    {"name": "master", "role": "PYTORCH_MASTER", "replicas": 1,
+                     "resource_spec": {"accelerate_device_count": 1, "cpu_count": 4, "memory_gib": 100}},
+                    {"name": "worker", "role": "PYTORCH_WORKER", "replicas": 3,
+                     "resource_spec": {"accelerate_device_count": 2, "cpu_count": 8, "memory_gib": 200}},
+                ]}},
+            }],
+        }
+        jobs, complete = _pending_workloads(cluster, "queue")
+        self.assertTrue(complete)
+        item = jobs[0]
+        self.assertEqual(item["num_nodes"], 4)
+        self.assertEqual((item["total_gpu"], item["total_cpu"], item["total_memory_gib"]), (7, 28, 700))
+        self.assertIsNone(item["gpus_per_node"])
+        self.assertIsNone(item["cpus_per_node"])
+        self.assertIsNone(item["memory_per_node_gib"])
+        self.assertEqual([row["name"] for row in item["task_resources"]], ["master", "worker"])
+
+    def test_pending_inventory_keeps_homogeneous_shape_and_null_missing_resources(self):
+        cluster = mock.Mock()
+        cluster._get_queue_id.return_value = "queue-id"
+        cluster.client.list_training_jobs.return_value = {
+            "training_jobs": [
+                {
+                    "name": "homogeneous", "spec": {"vc_job": {"tasks": [
+                        {"name": "master", "replicas": 1,
+                         "resource_spec": {"accelerate_device_count": 1, "cpu_count": 4, "memory_gib": 100}},
+                        {"name": "worker", "replicas": 2,
+                         "resource_spec": {"accelerate_device_count": 1, "cpu_count": 4, "memory_gib": 100}},
+                    ]}},
+                },
+                {
+                    "name": "missing", "spec": {"vc_job": {"tasks": [
+                        {"name": "worker", "replicas": 2,
+                         "resource_spec": {"accelerate_device_count": 1, "memory_gib": "invalid"}},
+                    ]}},
+                },
+            ],
+        }
+        jobs, _ = _pending_workloads(cluster, "queue")
+        homogeneous, item = jobs
+        self.assertEqual(
+            (homogeneous["gpus_per_node"], homogeneous["cpus_per_node"], homogeneous["memory_per_node_gib"]),
+            (1, 4, 100),
+        )
+        self.assertEqual(
+            (homogeneous["total_gpu"], homogeneous["total_cpu"], homogeneous["total_memory_gib"]),
+            (3, 12, 300),
+        )
+        self.assertEqual(item["gpus_per_node"], 1)
+        self.assertIsNone(item["cpus_per_node"])
+        self.assertIsNone(item["memory_per_node_gib"])
+        self.assertEqual(item["total_gpu"], 2)
+        self.assertIsNone(item["total_cpu"])
+        self.assertIsNone(item["total_memory_gib"])
+
+    def test_pending_inventory_ignores_removed_timestamp_fields(self):
+        cluster = mock.Mock()
+        cluster._get_queue_id.return_value = "queue-id"
+        old_timestamp = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        cluster.client.list_training_jobs.return_value = {
+            "training_jobs": [{
+                "name": "old-shape",
+                "metadata": {"created_at": old_timestamp},
+                "create_time": old_timestamp,
+            }],
+        }
+        jobs, complete = _pending_workloads(cluster, "queue")
+        self.assertTrue(complete)
+        self.assertIsNone(jobs[0]["create_time"])
+        self.assertIsNone(jobs[0]["queue_age_seconds"])
 
 
 class SkillCliTests(unittest.TestCase):
@@ -677,6 +874,14 @@ class SkillCliTests(unittest.TestCase):
             self.module.requests, "request", side_effect=self.module.requests.RequestException("down")
         ), mock.patch.object(sys, "argv", ["monitor_cli.py", "status"]), mock.patch("sys.stderr"):
             self.assertEqual(self.module.main(), 3)
+
+    def test_workload_table_includes_resource_totals_and_basis(self):
+        rendered = self.module._render_table([{
+            "workload_name": "train", "total_gpu": 2, "total_cpu": 8,
+            "total_memory_gib": 200, "resource_basis": "requested",
+        }], no_color=True)
+        for field in ("total_gpu", "total_cpu", "total_memory_gib", "resource_basis"):
+            self.assertIn(field, rendered)
 
     def test_api_validation_returns_two_and_filtered_stale_uses_snapshot(self):
         with mock.patch.object(
