@@ -106,7 +106,10 @@ class MonitorApiTests(unittest.TestCase):
         self.assertEqual(public_policy["groups"]["example-team"]["member_count"], 1)
         self.assertNotIn("members", public_policy["groups"]["example-team"])
         self.assertNotIn("alice", policy_response.text)
-        self.assertIn("utilization.low_gpu_activity", {item["code"] for item in policy_response.json()["rule_catalog"]})
+        self.assertEqual(public_policy["development"]["max_instances_per_user"], 1)
+        rule_codes = {item["code"] for item in policy_response.json()["rule_catalog"]}
+        self.assertIn("utilization.low_gpu_activity", rule_codes)
+        self.assertIn("quota.development.instances_per_user", rule_codes)
         self.assertIn("propagation", policy_response.json()["status_definitions"]["violation"])
         paths = self.app.openapi()["paths"]
         self.assertNotIn("delete", {method for spec in paths.values() for method in spec})

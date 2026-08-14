@@ -118,6 +118,7 @@ export type UserSummary = FindingFacets & {
   user: string;
   group: string;
   workload_count: number;
+  development_instance_count: number;
   allocated_gpu: number;
   allocated_cpu: number | null;
   allocated_memory_gib: number | null;

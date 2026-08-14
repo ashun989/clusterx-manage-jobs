@@ -56,6 +56,7 @@ const userColumns: ColumnDef<UserSummary>[] = [
   { key: "group", label: "分组", kind: "enum", value: (row) => row.group },
   { key: "status", label: "状态", kind: "enum", value: (row) => row.status },
   { key: "workload_count", label: "任务数", kind: "number", value: (row) => row.workload_count },
+  { key: "development_instance_count", label: "开发机数", kind: "number", value: (row) => row.development_instance_count },
   { key: "allocated_gpu", label: "GPU", kind: "number", value: (row) => row.allocated_gpu },
   { key: "allocated_cpu", label: "CPU", kind: "number", value: (row) => row.allocated_cpu },
   { key: "allocated_memory_gib", label: "内存 GiB", kind: "number", value: (row) => row.allocated_memory_gib },

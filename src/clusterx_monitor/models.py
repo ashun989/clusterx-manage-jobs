@@ -23,6 +23,7 @@ class DevelopmentConfig(FrozenModel):
     one_gpu_max_cpu_per_node: float = Field(default=14, gt=0, le=4096)
     one_gpu_max_memory_gib_per_node: float = Field(default=240, gt=0, le=65536)
     max_gpu: int = Field(default=1, ge=0, le=1024)
+    max_instances_per_user: int = Field(default=1, ge=1, le=1000)
     one_gpu_max_runtime_hours: float = Field(default=72, ge=0, le=8760)
 
 

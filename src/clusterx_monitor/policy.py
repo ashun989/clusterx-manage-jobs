@@ -23,12 +23,13 @@ from .models import GroupConfig, PolicyConfig
 STATUS_DEFINITIONS = {
     "compliant": {"description": "All applicable policy checks are within their inclusive limits.", "propagation": "Does not raise the status of a parent object."},
     "burst": {"description": "A group is above quota while no qualifying pending pressure is active.", "propagation": "Propagates from a group to its current users, but is not a violation."},
-    "violation": {"description": "A policy rule is violated, or a group is above quota while pending pressure is active.", "propagation": "Workload findings propagate to the user; quota findings propagate from group to user."},
+    "violation": {"description": "A policy rule is violated, or a group is above quota while pending pressure is active.", "propagation": "Workload findings propagate to the user; user findings remain user-scoped; quota findings propagate from group to user."},
     "unknown": {"description": "The available inventory or telemetry is insufficient to reach a policy conclusion.", "propagation": "A group quota unknown state propagates to its users; missing history alone does not."},
     "pending": {"description": "The workload is queued and is not evaluated as a running workload.", "propagation": "Pending jobs contribute to pressure only after the configured wait and count thresholds."},
 }
 
 RULE_CATALOG = [
+    {"code": "quota.development.instances_per_user", "category": "quota", "applies_to": "user", "title": "Development instances per-user limit", "description": "A known user may have at most the configured number of active aid development instances; equality is compliant."},
     {"code": "resource.development.gpu_limit", "category": "resource-shape", "applies_to": "aid", "title": "Development GPU limit", "description": "Development instances may use zero or one GPU; more GPUs are a violation."},
     {"code": "resource.development.cpu_limit", "category": "resource-shape", "applies_to": "aid", "title": "Development CPU per-node limit", "description": "CPU is checked per development instance against the separate zero-GPU and one-GPU limits."},
     {"code": "resource.development.memory_limit", "category": "resource-shape", "applies_to": "aid", "title": "Development memory per-node limit", "description": "Memory is checked per development instance against the separate zero-GPU and one-GPU limits."},
@@ -235,6 +236,7 @@ class PolicyManager:
                     "pending_pressure_unavailable": "An incomplete pending inventory or any unavailable queue timestamp makes pending pressure unknown instead of inactive.",
                     "historical_telemetry_unavailable": "The snapshot is still published, historical low-utilization evaluation is skipped, and a telemetry warning is emitted.",
                     "historical_scope": "Only currently running GPU trainingJob and aid workloads are evaluated; no completed-workload history is stored.",
+                    "development_instance_limit": "Only active aid workloads with known owners count toward the per-user development instance limit; the finding remains user-scoped.",
                     "default_group": "The default GPU quota is max(0, current bound GPU capacity minus all explicit group GPU quotas).",
                     "planning_profile": "Node effective/blocked capacity and omitted plan CPU/memory use the configurable standard planning profile; training ratios remain submission limits.",
                     "cluster_access": "Monitoring and planning are read-only against Clusterx; authenticated administrators may write only the configured local policy files.",
@@ -816,10 +818,26 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
     user_summaries: list[dict[str, Any]] = []
     for user, items in sorted(by_user.items()):
         group_name = items[0]["group"]
+        development_instance_count = sum(
+            1 for item in items if str(item.get("type") or "") == "aid"
+        )
+        direct_user_findings = []
+        if (
+            user != "unknown"
+            and development_instance_count > policy.development.max_instances_per_user
+        ):
+            direct_user_findings.append(_finding(
+                "quota.development.instances_per_user", "quota", "violation",
+                "active development instance count exceeds per-user limit",
+                tags=("development", "instance-count", "per-user", "quota"),
+                observed={"development_instances": development_instance_count},
+                limit={"max_instances_per_user": policy.development.max_instances_per_user},
+            ))
         user_findings = [
             {**finding, "source_type": "workload", "source_id": str(workload.get("workload_id"))}
             for workload in items for finding in workload.get("policy_findings", [])
         ]
+        user_findings.extend(direct_user_findings)
         user_findings.extend(
             {**finding, "source_type": "group", "source_id": group_name}
             for finding in group_summary_map.get(group_name, {}).get("policy_findings", [])
@@ -836,11 +854,13 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             "user": user,
             "group": group_name,
             "workload_count": len(items),
+            "development_instance_count": development_instance_count,
             "allocated_gpu": _clean(_sum(w.get("total_gpu") for w in items)),
             "allocated_cpu": _optional_sum(w.get("total_cpu") for w in items),
             "allocated_memory_gib": _optional_sum(w.get("total_memory_gib") for w in items),
             "status": (
-                "violation" if any(w["policy_status"] == "violation" for w in items)
+                "violation" if direct_user_findings
+                or any(w["policy_status"] == "violation" for w in items)
                 or group_states.get(group_name) == "violation"
                 else "unknown" if group_states.get(group_name) == "unknown"
                 else "burst" if group_states.get(group_name) == "burst"
@@ -852,6 +872,12 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         }
         _set_finding_facets(summary)
         user_summaries.append(summary)
+        for finding in direct_user_findings:
+            alerts.append(_alert(
+                "error", "user-policy", user, finding["message"],
+                code=finding["code"], category=finding["category"],
+                subject_type="user", tags=finding["tags"],
+            ))
     for workload in workloads:
         for finding in workload.get("policy_findings", []):
             if finding.get("status") != "violation":

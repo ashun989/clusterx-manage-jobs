@@ -193,6 +193,17 @@ class PolicyTests(unittest.TestCase):
         payload["planning"]["default_cpu_per_gpu"] = payload["training"]["cpu_per_gpu"] + 1
         with self.assertRaisesRegex(ValueError, "must not exceed"):
             PolicyConfig.model_validate(payload)
+        payload = self.policy.model_dump(mode="json")
+        payload["development"]["max_instances_per_user"] = 0
+        with self.assertRaises(ValueError):
+            PolicyConfig.model_validate(payload)
+
+        payload = self.policy.model_dump(mode="json")
+        payload["development"].pop("max_instances_per_user")
+        self.assertEqual(
+            PolicyConfig.model_validate(payload).development.max_instances_per_user,
+            1,
+        )
 
     def test_default_remainder_power_and_node_blocking(self):
         nodes = [node(f"n{i}", 0) for i in range(64)]
@@ -319,6 +330,60 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("development CPU per node exceeds limit", by_id["aid-zero-over"]["policy_reasons"])
         self.assertIn("development memory per node exceeds limit", by_id["aid-zero-over"]["policy_reasons"])
         self.assertIn("training CPU per node exceeds resource ratio", by_id["cpu"]["policy_reasons"])
+
+    def test_development_instance_limit_is_user_scoped(self):
+        items = [
+            workload("alice-a", "alice", "aid", [placement("n1", 1)]),
+            workload("alice-b", "alice", "aid", [placement("n2", 0)]),
+            workload("alice-training", "alice", "trainingJob", [placement("n3", 1)]),
+            workload("alice-air", "alice", "air", [placement("n4", 0)]),
+            workload("charlie-a", "charlie", "aid", [placement("n5", 1)]),
+            workload("unknown-a", "unknown", "aid", [placement("n6", 0)]),
+            workload("unknown-b", "unknown", "aid", [placement("n7", 0)]),
+        ]
+        result = apply_policy(
+            snapshot([node(f"n{index}", 1) for index in range(1, 8)], items),
+            self.policy,
+        )
+        users = {item["user"]: item for item in result["users"]}
+        alice = users["alice"]
+        self.assertEqual(alice["development_instance_count"], 2)
+        self.assertEqual(alice["status"], "violation")
+        finding = next(
+            item for item in alice["policy_findings"]
+            if item["code"] == "quota.development.instances_per_user"
+        )
+        self.assertEqual(finding["observed"], {"development_instances": 2})
+        self.assertEqual(finding["limit"], {"max_instances_per_user": 1})
+        self.assertEqual(users["charlie"]["development_instance_count"], 1)
+        self.assertEqual(users["charlie"]["status"], "compliant")
+        self.assertEqual(users["unknown"]["development_instance_count"], 2)
+        self.assertNotIn(
+            "quota.development.instances_per_user",
+            users["unknown"]["finding_codes"],
+        )
+        self.assertTrue(all(item["policy_status"] == "compliant" for item in result["workloads"]))
+        alice_group = next(item for item in result["groups"] if item["group"] == "example-team")
+        self.assertEqual(alice_group["status"], "compliant")
+        alert = next(
+            item for item in result["alerts"]
+            if item["code"] == "quota.development.instances_per_user"
+        )
+        self.assertEqual(
+            (alert["kind"], alert["subject"], alert["subject_type"]),
+            ("user-policy", "alice", "user"),
+        )
+        relaxed_policy = self.policy.model_copy(update={
+            "development": self.policy.development.model_copy(update={
+                "max_instances_per_user": 2,
+            }),
+        })
+        relaxed = apply_policy(
+            snapshot([node(f"n{index}", 1) for index in range(1, 8)], items),
+            relaxed_policy,
+        )
+        relaxed_alice = next(item for item in relaxed["users"] if item["user"] == "alice")
+        self.assertEqual(relaxed_alice["status"], "compliant")
 
     def test_runtime_quality_variants_are_preserved(self):
         now = datetime.now(timezone.utc)
@@ -596,6 +661,31 @@ class PlannerTests(unittest.TestCase):
             "filters": {"violation_categories": ["utilization"], "violation_tags": ["low-utilization"]},
         })
         self.assertEqual(result["plans"][0]["workloads"], ["low"])
+
+    def test_planner_maps_development_user_violation_only_to_aid_workloads(self):
+        jobs = [
+            workload("aid-a", "u", "aid", [placement("n1", 1)]),
+            workload("aid-b", "u", "aid", [placement("n2", 1)]),
+            workload("training", "u", "trainingJob", [placement("n3", 1)]),
+        ]
+        evaluated = apply_policy(
+            snapshot([node("n1", 1), node("n2", 1), node("n3", 1)], jobs),
+            self.policy,
+        )
+        result = solve_plan(evaluated, {
+            "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
+            "strategies": ["min-gpu"], "candidate_scope": "fragmented",
+            "filters": {"violation_codes": ["quota.development.instances_per_user"]},
+        })
+        self.assertTrue(result["plans"])
+        self.assertTrue(all(
+            item["type"] == "aid"
+            for plan in result["plans"] for item in plan["workload_details"]
+        ))
+        self.assertNotIn(
+            "training",
+            {workload_id for plan in result["plans"] for workload_id in plan["workloads"]},
+        )
 
     def test_planner_resolves_defaults_from_the_pinned_snapshot_profile(self):
         busy = node("n", 1, 4, 10)

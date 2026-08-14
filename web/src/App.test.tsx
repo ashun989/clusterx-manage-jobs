@@ -50,8 +50,8 @@ const baseSnapshot: Snapshot = {
     { group: "group-b", status: "violation", gpu_quota: 4, cpu_quota: 56, memory_quota_gib: 960, allocated_gpu: 8, allocated_cpu: 112, allocated_memory_gib: 1920, members: ["bob"], over_resources: ["gpu", "cpu", "memory"], policy_findings: [quotaFinding], finding_categories: ["quota"], finding_codes: ["quota.gpu"], finding_tags: ["quota", "gpu"], telemetry: telemetry(8, 80, 2600) },
   ],
   users: [
-    { user: "alice", group: "group-a", workload_count: 1, allocated_gpu: 4, allocated_cpu: 56, allocated_memory_gib: 960, status: "compliant", policy_findings: [], finding_categories: [], finding_codes: [], finding_tags: [], telemetry: telemetry(4, 50, 1000) },
-    { user: "bob", group: "group-b", workload_count: 1, allocated_gpu: 8, allocated_cpu: 112, allocated_memory_gib: 1920, status: "violation", policy_findings: [quotaFinding], finding_categories: ["quota"], finding_codes: ["quota.gpu"], finding_tags: ["quota", "gpu"], telemetry: telemetry(8, 80, 2600) },
+    { user: "alice", group: "group-a", workload_count: 1, development_instance_count: 0, allocated_gpu: 4, allocated_cpu: 56, allocated_memory_gib: 960, status: "compliant", policy_findings: [], finding_categories: [], finding_codes: [], finding_tags: [], telemetry: telemetry(4, 50, 1000) },
+    { user: "bob", group: "group-b", workload_count: 1, development_instance_count: 0, allocated_gpu: 8, allocated_cpu: 112, allocated_memory_gib: 1920, status: "violation", policy_findings: [quotaFinding], finding_categories: ["quota"], finding_codes: ["quota.gpu"], finding_tags: ["quota", "gpu"], telemetry: telemetry(8, 80, 2600) },
   ],
   nodes: [
     { node: "node-a", id: "node-id-a", host_ip: "10.0.0.1", state: "RUNNING", allocated_gpu: 4, total_gpu: 8, allocated_cpu: 56, total_cpu: 112, allocated_memory_gib: 960, total_memory_gib: 1920, workloads: { "workload-a": { gpu: 4, cpu: 56, memory_gib: 960 } }, unattributed: { gpu: 0, cpu: 0, memory_gib: 0 }, attribution_excess: { gpu: 0, cpu: 0, memory_gib: 0 }, planning_eligible: true, planning_exclusion_reasons: [], free_gpu: 4, effective_free_gpu: 4, stranded_gpu: 0, classification: "fragmented", telemetry: telemetry(4, 50, 1000) },
@@ -68,7 +68,7 @@ const policyResponse: PolicyResponse = {
   policy: {
     refresh_seconds: 30, telemetry_lookback_minutes: 5,
     pending_pressure: { min_wait_minutes: 10, min_jobs: 1 },
-    development: { zero_gpu_max_cpu_per_node: 8, zero_gpu_max_memory_gib_per_node: 140, one_gpu_max_cpu_per_node: 14, one_gpu_max_memory_gib_per_node: 240, max_gpu: 1, one_gpu_max_runtime_hours: 72 },
+    development: { zero_gpu_max_cpu_per_node: 8, zero_gpu_max_memory_gib_per_node: 140, one_gpu_max_cpu_per_node: 14, one_gpu_max_memory_gib_per_node: 240, max_gpu: 1, max_instances_per_user: 1, one_gpu_max_runtime_hours: 72 },
     training: { cpu_per_gpu: 14, memory_gib_per_gpu: 240, zero_gpu_max_cpu_per_node: 14, zero_gpu_max_memory_gib_per_node: 240 },
     planning: { default_cpu_per_gpu: 14, default_memory_gib_per_gpu: 240 },
     low_utilization: { window_hours: 24, refresh_minutes: 5, min_observation_minutes: 60, gpu_compute_threshold_pct: 20, gpu_memory_threshold_pct: 20 },
@@ -191,6 +191,13 @@ describe("Clusterx monitor dashboard", () => {
     expect(drawer).not.toHaveTextContent("Placements（当前归属）");
   });
 
+  it("shows the active development instance count in the user table", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "users" }));
+    expect(within(screen.getByRole("table")).getByRole("button", { name: "排序 开发机数" })).toBeInTheDocument();
+  });
+
   it("marks runtime quality in the list and shows lifecycle provenance in details", async () => {
     latestSnapshot.workloads[0].runtime_quality = "observed";
     latestSnapshot.workloads[0].runtime_source = "air_available_condition";
@@ -230,6 +237,7 @@ describe("Clusterx monitor dashboard", () => {
   });
 
   it("uses a full-width node workspace with filtering, numeric ordering and node details", async () => {
+    latestSnapshot.nodes[0].telemetry = telemetry(123456, 99.999, 123456789);
     const { container } = render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "nodes" }));
@@ -237,7 +245,15 @@ describe("Clusterx monitor dashboard", () => {
     expect(workspace).not.toHaveClass("nodes-workspace");
     expect(workspace.children[0]).toHaveClass("main-panel");
     expect(workspace.children[1]).toHaveClass("scheduler-panel");
-    expect(screen.getByRole("button", { name: "查看 node-a 详情" })).toBeInTheDocument();
+    const nodeCard = screen.getByRole("button", { name: "查看 node-a 详情" });
+    expect(nodeCard).toBeInTheDocument();
+    const telemetryCell = nodeCard.querySelector<HTMLElement>(".telemetry-cell")!;
+    const telemetryItems = telemetryCell.querySelectorAll(":scope > span");
+    expect(telemetryCell).toHaveTextContent("99.999% util");
+    expect(telemetryCell).toHaveTextContent("123456/123456");
+    expect(telemetryCell).toHaveTextContent("123456.8 kW");
+    expect(telemetryItems).toHaveLength(3);
+    expect(telemetryCell.querySelectorAll("small")).toHaveLength(3);
 
     fireEvent.click(screen.getByText("负载状态", { selector: "summary" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "fragmented" }));

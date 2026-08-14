@@ -171,6 +171,8 @@ export CLUSTERX_RESOURCE_POLICY="$PWD/config/resource-policy.local.json"
 
 ## 策略摘要
 
+- 每个已识别用户最多拥有 1 个当前活跃的 `aid` 开发机；超限产生用户级违规，
+  不将违规归因到某个具体 workload，未知所有者不参与该规则判断。
 - 0-GPU 开发机：每节点最多 8 CPU、140 GiB，不限制运行时长。
 - 1-GPU 开发机：每节点最多 14 CPU、240 GiB，最长 72 小时；更多 GPU 不允许。
 - 训练任务每 GPU 最多 14 CPU、240 GiB；0-GPU 任务最多一个等价 slice。

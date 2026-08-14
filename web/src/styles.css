@@ -64,6 +64,9 @@ tr.clickable:hover, tr.clickable:focus { background: #10252e; }
 .node-tile p { margin: 8px 0 2px; }
 .node-tile > small { display: block; margin-bottom: 10px; color: #78919b; }
 .node-tile em { display: inline-block; margin-top: 8px; color: #edc879; font-size: 11px; font-style: normal; }
+.node-tile .telemetry-cell { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px 6px; width: 100%; min-width: 0; white-space: normal; }
+.node-tile .telemetry-cell > span { min-width: 0; overflow-wrap: anywhere; }
+.node-tile .telemetry-cell small { display: block; margin-top: 2px; }
 .gpu-bar { height: 6px; overflow: hidden; border-radius: 9px; background: #172c35; }
 .gpu-bar i { display: block; height: 100%; background: #5bd3c7; }
 .node-gpu-full { border-left-color: #788993; }

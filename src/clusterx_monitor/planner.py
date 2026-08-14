@@ -72,6 +72,13 @@ def _filter_workloads(
         str(item.get("group")): item.get("policy_findings") or []
         for item in snapshot.get("groups", [])
     }
+    user_findings = {
+        str(item.get("user")): [
+            finding for finding in item.get("policy_findings") or []
+            if finding.get("code") == "quota.development.instances_per_user"
+        ]
+        for item in snapshot.get("users", [])
+    }
     result: dict[str, dict[str, Any]] = {}
     for workload_id, workload in _workload_map(snapshot).items():
         user = str(workload.get("user") or "")
@@ -105,6 +112,7 @@ def _filter_workloads(
             item for item in [
                 *(workload.get("policy_findings") or []),
                 *group_findings.get(group, []),
+                *(user_findings.get(user, []) if kind == "aid" else []),
             ]
             if item.get("status") == "violation"
         ]
