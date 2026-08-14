@@ -334,6 +334,138 @@ def _parse_time(value: Any) -> datetime | None:
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
 
+def _iso_time(value: Any) -> str | None:
+    parsed = _parse_time(value)
+    return parsed.isoformat() if parsed else None
+
+
+def _running_training_lifecycle(
+    cluster: Any, queue: str,
+) -> tuple[dict[str, dict[str, Any]], bool]:
+    queue_id = cluster._get_queue_id(queue)
+    response = cluster.client.list_training_jobs(
+        filter_str=f'queue_id="{queue_id}" AND state="RUNNING"', page_size=1000,
+    )
+    rows = response.get("training_jobs") or response.get("trainingJobs") or []
+    total = response.get("total_size") or response.get("total")
+    result = {}
+    for row in rows:
+        uid = str(row.get("uid") or "")
+        if not uid:
+            continue
+        status = row.get("status") or {}
+        result[uid] = {
+            "resource_create_time": _iso_time(status.get("create_time")),
+            "start_time": _iso_time(status.get("start_time")),
+            "runtime_source": "training_status_start",
+            "runtime_quality": "exact",
+        }
+    return result, total is None or int(total) <= len(rows)
+
+
+def _workspace_resource_lifecycle(
+    cluster: Any, *, api_prefix: str, resource_name: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    client = cluster.client
+    base_path = client._get_base_path().rstrip("/")
+    response = client._make_signed_base_request(
+        client.compute_base_endpoint,
+        "GET",
+        f"{api_prefix}{base_path}/{resource_name}",
+        params={"page_size": 1000, "skip": 0, "filter": 'state="RUNNING"'},
+    )
+    rows = list(response.get(resource_name) or [])
+    total = response.get("total_size") or response.get("total")
+    return rows, total is None or int(total) <= len(rows)
+
+
+def _running_aid_lifecycle(cluster: Any) -> tuple[dict[str, dict[str, Any]], bool]:
+    rows, complete = _workspace_resource_lifecycle(
+        cluster, api_prefix="/aid/v1", resource_name="aids",
+    )
+    result = {}
+    for row in rows:
+        uid = str(row.get("uid") or "")
+        if uid:
+            result[uid] = {"resource_create_time": _iso_time(row.get("create_time"))}
+    return result, complete
+
+
+def _available_transition(status: dict[str, Any]) -> str | None:
+    transitions = [
+        _parse_time(item.get("last_transition_time"))
+        for item in status.get("conditions") or []
+        if str(item.get("type") or "") == "Available"
+        and str(item.get("status") or "").lower() == "true"
+    ]
+    valid = [item for item in transitions if item is not None]
+    return max(valid).isoformat() if valid else None
+
+
+def _running_air_lifecycle(cluster: Any) -> tuple[dict[str, dict[str, Any]], bool]:
+    rows, complete = _workspace_resource_lifecycle(
+        cluster, api_prefix="/air/data/v1", resource_name="airs",
+    )
+    result = {}
+    for row in rows:
+        uid = str(row.get("uid") or "")
+        if not uid:
+            continue
+        status = row.get("status") or {}
+        result[uid] = {
+            "resource_create_time": _iso_time(status.get("create_time")),
+            "start_time": _available_transition(status),
+            "runtime_source": "air_available_condition",
+            "runtime_quality": "observed",
+        }
+    return result, complete
+
+
+def _aid_pod_start_times(
+    cluster: Any, resource_id: str, pod_uids: set[str],
+) -> dict[str, str]:
+    if not resource_id or not pod_uids:
+        return {}
+    client = cluster.client
+    path = f"/aid/v1/{resource_id.lstrip('/')}".rstrip("/") + "/events"
+    events: list[dict[str, Any]] = []
+    skip = 0
+    while True:
+        response = client._make_signed_base_request(
+            client.compute_base_endpoint,
+            "GET",
+            path,
+            params={"page_size": 100, "skip": skip, "order_by": "created_at asc"},
+        )
+        page = list(response.get("events") or [])
+        events.extend(page)
+        total = int(response.get("total_size") or response.get("total") or len(events))
+        if len(events) >= total:
+            break
+        if not page:
+            raise RuntimeError("AID event response is truncated")
+        skip += len(page)
+
+    starts: dict[str, list[datetime]] = {uid: [] for uid in pod_uids}
+    for event in events:
+        involved = event.get("involvedObject") or {}
+        uid = str(involved.get("uid") or "")
+        if (
+            uid not in starts
+            or str(event.get("type") or "") != "Normal"
+            or str(event.get("reason") or "") != "Started"
+        ):
+            continue
+        timestamp = _parse_time(event.get("firstTimestamp"))
+        if timestamp:
+            starts[uid].append(timestamp)
+    return {
+        uid: max(values).isoformat()
+        for uid, values in starts.items()
+        if values
+    }
+
+
 def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], bool]:
     queue_id = cluster._get_queue_id(queue)
     response = cluster.client.list_training_jobs(
@@ -408,6 +540,113 @@ class ClusterCollector:
         self._history_last_attempt_at: datetime | None = None
         self._history_window_hours: int | None = None
         self._history_query_available = False
+        self._lifecycle_cache: dict[str, dict[str, Any]] = {}
+        self._aid_pod_start_cache: dict[str, str] = {}
+
+    def _enrich_lifecycle(
+        self, workloads: dict[str, dict[str, Any]], warnings: list[str],
+    ) -> None:
+        current_ids = set(workloads)
+        self._lifecycle_cache = {
+            key: value for key, value in self._lifecycle_cache.items() if key in current_ids
+        }
+
+        fetchers = {
+            "trainingJob": lambda: _running_training_lifecycle(self.cluster, self.queue),
+            "aid": lambda: _running_aid_lifecycle(self.cluster),
+            "air": lambda: _running_air_lifecycle(self.cluster),
+        }
+        for kind, fetch in fetchers.items():
+            if not any(item.get("type") == kind for item in workloads.values()):
+                continue
+            try:
+                rows, complete = fetch()
+                for workload_id, values in rows.items():
+                    cached = self._lifecycle_cache.setdefault(workload_id, {})
+                    cached.update({key: value for key, value in values.items() if value is not None})
+                if not complete:
+                    warnings.append(f"{kind} lifecycle inventory is incomplete")
+            except Exception:
+                warnings.append(f"{kind} lifecycle inventory is unavailable")
+
+        aid_workloads = [item for item in workloads.values() if item.get("type") == "aid"]
+        current_aid_pods = {
+            str(placement.get("_pod_uid") or "")
+            for item in aid_workloads
+            for placement in item.get("placements") or []
+            if placement.get("_pod_uid")
+        }
+        self._aid_pod_start_cache = {
+            key: value for key, value in self._aid_pod_start_cache.items()
+            if key in current_aid_pods
+        }
+        unresolved = []
+        for workload in aid_workloads:
+            pod_uids = {
+                str(item.get("_pod_uid") or "")
+                for item in workload.get("placements") or []
+                if item.get("_pod_uid")
+            }
+            if pod_uids and not pod_uids.issubset(self._aid_pod_start_cache):
+                unresolved.append((workload, pod_uids))
+        failures = 0
+        if unresolved:
+            with ThreadPoolExecutor(max_workers=min(8, len(unresolved))) as pool:
+                futures = {
+                    pool.submit(
+                        _aid_pod_start_times,
+                        self.cluster,
+                        str(workload.get("_resource_id") or ""),
+                        pod_uids,
+                    ): pod_uids
+                    for workload, pod_uids in unresolved
+                }
+                for future in as_completed(futures):
+                    try:
+                        self._aid_pod_start_cache.update(future.result())
+                    except Exception:
+                        failures += 1
+        if failures:
+            warnings.append(f"AID start events are unavailable for {failures} workloads")
+
+        for workload_id, workload in workloads.items():
+            cached = self._lifecycle_cache.get(workload_id) or {}
+            workload["resource_create_time"] = cached.get("resource_create_time")
+            start_time = cached.get("start_time")
+            source = cached.get("runtime_source")
+            quality = cached.get("runtime_quality")
+            if workload.get("type") == "aid":
+                pod_uids = {
+                    str(item.get("_pod_uid") or "")
+                    for item in workload.get("placements") or []
+                    if item.get("_pod_uid")
+                }
+                if pod_uids and pod_uids.issubset(self._aid_pod_start_cache):
+                    start_time = max(self._aid_pod_start_cache[uid] for uid in pod_uids)
+                    source = "aid_pod_started_event"
+                    quality = "observed"
+            workload["start_time"] = start_time
+            if start_time:
+                anchor = start_time
+            elif workload.get("create_time"):
+                anchor = workload.get("create_time")
+                source = "pod_create_time"
+                quality = "estimated"
+            elif workload.get("resource_create_time"):
+                anchor = workload.get("resource_create_time")
+                source = "resource_create_time"
+                quality = "estimated"
+            else:
+                anchor = None
+                source = None
+                quality = "unavailable"
+            workload["runtime_anchor_time"] = anchor
+            workload["runtime_source"] = source
+            workload["runtime_quality"] = quality
+            workload["runtime_estimated"] = quality == "estimated"
+            workload.pop("_resource_id", None)
+            for placement in workload.get("placements") or []:
+                placement.pop("_pod_uid", None)
 
     def collect(
         self, *, telemetry_minutes: int = 5,
@@ -461,6 +700,7 @@ class ClusterCollector:
                     "gpu": _clean(float(resource.get("accelerate_device_count") or 0)),
                     "cpu": _optional_resource_number(resource.get("cpu")),
                     "memory_gib": _optional_resource_number(resource.get("memory"), memory=True),
+                    "_pod_uid": str(pod.get("uid") or ""),
                 }
                 for key in attributed:
                     if placement[key] is not None:
@@ -477,7 +717,8 @@ class ClusterCollector:
                     "user": str(ownership.get("creator_name") or "unknown").lower(),
                     "type": str(raw_workload.get("type") or "unknown"),
                     "workspace": str(workspace.get("name") or ""),
-                    "create_time": None, "start_time": raw_workload.get("start_time"),
+                    "create_time": None, "start_time": None,
+                    "_resource_id": str(raw_workload.get("id") or ""),
                     "placements": [], "gpus": [], "total_gpu": 0,
                     "total_cpu": None, "total_memory_gib": None,
                     "resource_basis": "attributed", "task_resources": [],
@@ -506,6 +747,7 @@ class ClusterCollector:
             workload["total_gpu"] = _clean(sum(float(p["gpu"]) for p in workload["placements"]))
             workload["total_cpu"] = _resource_total(workload["placements"], "cpu")
             workload["total_memory_gib"] = _resource_total(workload["placements"], "memory_gib")
+        self._enrich_lifecycle(workloads, warnings)
 
         try:
             telemetry = _query_gpu_telemetry(self.cluster, self.queue, self.cluster_name, telemetry_minutes)

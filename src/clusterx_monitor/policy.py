@@ -471,7 +471,12 @@ def _telemetry_summary(workloads: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _runtime_hours(workload: dict[str, Any], now: datetime) -> float | None:
-    timestamp = workload.get("start_time") or workload.get("create_time")
+    timestamp = (
+        workload.get("runtime_anchor_time")
+        or workload.get("start_time")
+        or workload.get("create_time")
+        or workload.get("resource_create_time")
+    )
     if not timestamp:
         return None
     try:
@@ -489,9 +494,29 @@ def _workload_limits(
     findings: list[dict[str, Any]] = []
     kind = str(workload.get("type") or "unknown")
     placements = workload.get("placements") or []
+    anchor = (
+        workload.get("runtime_anchor_time")
+        or workload.get("start_time")
+        or workload.get("create_time")
+        or workload.get("resource_create_time")
+    )
+    quality = workload.get("runtime_quality")
+    source = workload.get("runtime_source")
+    if quality not in {"exact", "observed", "estimated", "unavailable"}:
+        quality = "exact" if workload.get("start_time") else "estimated" if anchor else "unavailable"
+    if not source:
+        source = (
+            "training_status_start" if workload.get("start_time") else
+            "pod_create_time" if workload.get("create_time") else
+            "resource_create_time" if workload.get("resource_create_time") else
+            None
+        )
+    workload["runtime_anchor_time"] = anchor
+    workload["runtime_source"] = source
+    workload["runtime_quality"] = quality
     runtime = _runtime_hours(workload, now)
     workload["runtime_hours"] = round(runtime, 2) if runtime is not None else None
-    workload["runtime_estimated"] = not bool(workload.get("start_time"))
+    workload["runtime_estimated"] = quality == "estimated"
     if kind == "aid":
         cfg = policy.development
         total_gpu = float(workload.get("total_gpu") or 0)
@@ -532,7 +557,11 @@ def _workload_limits(
                 "runtime.development.one_gpu_limit", "runtime", "violation",
                 "one-GPU development runtime exceeds limit",
                 tags=("development", "gpu", "runtime"),
-                observed={"runtime_hours": round(runtime, 2)},
+                observed={
+                    "runtime_hours": round(runtime, 2),
+                    "runtime_quality": quality,
+                    "runtime_source": source,
+                },
                 limit={"max_runtime_hours": cfg.one_gpu_max_runtime_hours},
             ))
     elif kind == "trainingJob":
@@ -591,6 +620,9 @@ def _workload_limits(
                 observed={
                     "gpu_compute_util_pct": float(compute),
                     "gpu_memory_util_pct": float(memory),
+                    "runtime_hours": round(runtime, 2),
+                    "runtime_quality": quality,
+                    "runtime_source": source,
                 },
                 limit={
                     "gpu_compute_util_pct": policy.low_utilization.gpu_compute_threshold_pct,

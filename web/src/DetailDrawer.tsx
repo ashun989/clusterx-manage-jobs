@@ -6,6 +6,15 @@ const number = (value: unknown, suffix = "") => value == null ? "—" : `${Numbe
 const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
 const allWorkloads = (snapshot: Snapshot) => [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])];
 const workloadResources = (workload: Workload) => `${number(workload.total_gpu)} GPU · ${number(workload.total_cpu)} CPU · ${number(workload.total_memory_gib)} GiB`;
+const runtimeQuality = (value: Workload["runtime_quality"]) => ({ exact: "精确", observed: "观测", estimated: "估算", unavailable: "不可用" })[value ?? "unavailable"];
+const runtimeSourceLabels: Record<string, string> = {
+  training_status_start: "TrainingJob 状态",
+  aid_pod_started_event: "AID Pod 启动事件",
+  air_available_condition: "AIR Available 状态",
+  pod_create_time: "Pod 创建时间",
+  resource_create_time: "资源创建时间",
+};
+const runtimeSource = (value: Workload["runtime_source"]) => runtimeSourceLabels[value ?? ""] ?? "—";
 
 export const alertIdentity = (alert: Alert) => [alert.severity, alert.kind, alert.subject, alert.message].join("\u0000");
 
@@ -110,9 +119,12 @@ function WorkloadDetail({ workload, open }: { workload: Workload; open: (ref: De
       <Metric label="CPU" value={number(workload.total_cpu)} />
       <Metric label="内存 GiB" value={number(workload.total_memory_gib)} />
       <Metric label="资源口径" value={workload.resource_basis === "requested" ? "申请资源" : "Pod 归属资源"} />
-      <Metric label="运行时间" value={workload.runtime_hours == null ? "—" : `${number(workload.runtime_hours)}h${workload.runtime_estimated ? "（估算）" : ""}`} />
+      <Metric label="运行时间" value={workload.runtime_hours == null ? "—" : `${number(workload.runtime_hours)}h${workload.runtime_quality === "observed" ? "（观测）" : workload.runtime_quality === "estimated" || workload.runtime_estimated ? "（估算）" : ""}`} />
+      <Metric label="时间可信度" value={runtimeQuality(workload.runtime_quality)} />
+      <Metric label="时间来源" value={runtimeSource(workload.runtime_source)} />
+      <Metric label="开始时间" value={workload.start_time ? new Date(workload.start_time).toLocaleString() : "—"} />
+      <Metric label="资源创建时间" value={workload.resource_create_time ? new Date(workload.resource_create_time).toLocaleString() : "—"} />
       <Metric label="Workspace" value={workload.workspace || "—"} />
-      <Metric label="创建时间" value={workload.create_time ? new Date(workload.create_time).toLocaleString() : "—"} />
     </Metrics>
     {workload.resource_basis === "requested" && <section className="detail-section"><h3>Task 请求<span className="section-count">{workload.task_resources?.length ?? 0}</span></h3>{workload.task_resources?.length ? <div className="plan-workloads"><table><thead><tr><th>Task</th><th>角色</th><th>副本数</th><th>每副本 GPU</th><th>每副本 CPU</th><th>每副本内存 GiB</th></tr></thead><tbody>{workload.task_resources.map((task, index) => <tr key={`${task.name}:${task.role}:${index}`}><td>{task.name}</td><td>{task.role || "—"}</td><td>{number(task.replicas)}</td><td>{number(task.gpu_per_replica)}</td><td>{number(task.cpu_per_replica)}</td><td>{number(task.memory_gib_per_replica)}</td></tr>)}</tbody></table></div> : <p className="muted">无 Task 资源明细</p>}</section>}
     {workload.resource_basis === "attributed" && <section className="detail-section"><h3>Placements（当前归属）<span className="section-count">{workload.placements.length}</span></h3><div className="placement-list">{workload.placements.map((placement, index) => <button type="button" key={`${placement.node}-${placement.pod ?? index}`} onClick={() => open({ kind: "node", id: placement.node, label: placement.node })}><span><b>{placement.node}</b><small>{placement.pod || "—"}</small></span><em>{number(placement.gpu)} GPU · {number(placement.cpu)} CPU · {number(placement.memory_gib)} GiB</em></button>)}</div></section>}

@@ -13,6 +13,24 @@ const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
 const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
+const runtimeMark = (row: Workload) => row.runtime_quality === "observed" ? "（观测）" : row.runtime_quality === "estimated" || row.runtime_estimated ? "（估算）" : "";
+
+export function FreshnessBadge({ snapshotId, freshness }: { snapshotId: string; freshness: Snapshot["freshness"] }) {
+  const [anchor, setAnchor] = useState(() => ({ ageSeconds: freshness.age_seconds, receivedAt: Date.now() }));
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const receivedAt = Date.now();
+    setAnchor({ ageSeconds: freshness.age_seconds, receivedAt });
+    setNow(receivedAt);
+  }, [snapshotId, freshness.age_seconds, freshness.stale]);
+  useEffect(() => {
+    if (freshness.stale) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [freshness.stale]);
+  const ageSeconds = Math.max(0, Math.round(anchor.ageSeconds + (now - anchor.receivedAt) / 1_000));
+  return <div className={freshness.stale ? "fresh stale" : "fresh"}><span />{freshness.stale ? "数据过期" : `${ageSeconds}s 前更新`}</div>;
+}
 
 const telemetryColumns = <T extends { telemetry: Snapshot["telemetry"] }>(): ColumnDef<T>[] => [
   { key: "gpu_util", label: "GPU Util", kind: "number", value: (row) => row.telemetry.gpu_compute_util_avg_pct, format: (value) => number(value, "%") },
@@ -56,7 +74,7 @@ const workloadColumns: ColumnDef<Workload>[] = [
   { key: "total_gpu", label: "GPU 总量", kind: "number", value: (row) => row.total_gpu },
   { key: "total_cpu", label: "CPU 总量", kind: "number", value: (row) => row.total_cpu },
   { key: "total_memory_gib", label: "内存 GiB", kind: "number", value: (row) => row.total_memory_gib },
-  { key: "runtime_hours", label: "运行小时", kind: "number", value: (row) => row.runtime_hours, format: (value, row) => value == null ? "—" : `${number(value)}${row.runtime_estimated ? "*" : ""}` },
+  { key: "runtime_hours", label: "运行小时", kind: "number", value: (row) => row.runtime_hours, format: (value, row) => value == null ? "—" : `${number(value)}${runtimeMark(row)}` },
   { key: "finding_categories", label: "违规分类", kind: "enum", value: (row) => row.finding_categories, hidden: true },
   { key: "finding_codes", label: "规则代码", kind: "enum", value: (row) => row.finding_codes, hidden: true },
   { key: "finding_tags", label: "标签", kind: "enum", value: (row) => row.finding_tags, hidden: true },
@@ -280,7 +298,7 @@ export default function App() {
   const bannerMessages = [error, policyError, statusError, policy?.error, policy?.audit_error, serviceStatus?.policy.audit_error, serviceStatus?.snapshot.last_error, serviceStatus?.setup_required ? "服务处于 setup-required" : "", serviceStatus?.skipped_refreshes ? `已跳过 ${serviceStatus.skipped_refreshes} 次刷新` : "", snapshot.policy_config?.error, ...snapshot.warnings, ...coverageMessages, snapshot.historical_telemetry_status === "unavailable" ? "历史 GPU 遥测不可用，低利用率规则本轮未评估" : ""].filter(Boolean);
   const workloadRef = (workload: Workload): DetailRef => ({ kind: "workload", id: workload.workload_id, label: workload.workload_name });
   return <div className="app">
-    <header className="app-header"><div><span className="eyebrow">{snapshot.cluster} / {snapshot.queue}</span><h1>Queue Observatory</h1></div><div className="header-actions"><div className={snapshot.freshness.stale ? "fresh stale" : "fresh"}><span />{snapshot.freshness.stale ? "数据过期" : `${Math.round(snapshot.freshness.age_seconds)}s 前更新`}</div><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
+    <header className="app-header"><div><span className="eyebrow">{snapshot.cluster} / {snapshot.queue}</span><h1>Queue Observatory</h1></div><div className="header-actions"><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
     <section className="cards"><article><label>绑定容量</label><strong>{number(snapshot.capacity.bound_gpu)}</strong><small>{number(snapshot.capacity.planning_eligible_gpu)} planning eligible</small></article><article><label>已分配</label><strong>{number(snapshot.capacity.allocated_gpu)}</strong><small>{number(snapshot.capacity.free_gpu)} free</small></article><article><label>Pending pressure</label><strong className={statusClass(snapshot.pending_pressure.state)}>{String(snapshot.pending_pressure.state)}</strong><small>{number(snapshot.pending_pressure.eligible_jobs)} eligible jobs</small></article><article><label>GPU Power</label><strong>{power(snapshot.telemetry.gpu_power_total_w)}</strong><small>{snapshot.telemetry.power_reported_gpu_count}/{snapshot.telemetry.allocated_gpu_count} power covered · {snapshot.telemetry_status ?? "unknown"}</small></article></section>
     {bannerMessages.length > 0 && <div className="banner">{bannerMessages.join(" · ")}</div>}
     <section className="workspace"><div className="main-panel"><nav>{(["groups", "users", "nodes", "workloads", "alerts", "rules"] as Tab[]).map((name) => <button className={tab === name ? "active" : ""} key={name} onClick={() => setTab(name)}>{name === "rules" ? "规则说明" : name}</button>)}</nav>

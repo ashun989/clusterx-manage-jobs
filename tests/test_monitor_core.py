@@ -20,10 +20,14 @@ if str(SRC) not in sys.path:
 
 from clusterx_monitor.collector import (
     ClusterCollector,
+    _aid_pod_start_times,
     _attach_telemetry,
+    _available_transition,
     _node_signature,
     _pending_workloads,
     _query_workload_history,
+    _running_air_lifecycle,
+    _running_training_lifecycle,
     resource_number,
 )
 from clusterx_monitor.auth import AdminAuth, initialize_auth_config
@@ -304,10 +308,52 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(by_id["aid"]["policy_status"], "violation")
         self.assertIn("development CPU per node exceeds limit", by_id["aid"]["policy_reasons"])
         self.assertIn("one-GPU development runtime exceeds limit", by_id["aid"]["policy_reasons"])
+        runtime_finding = next(
+            item for item in by_id["aid"]["policy_findings"]
+            if item["code"] == "runtime.development.one_gpu_limit"
+        )
+        self.assertEqual(runtime_finding["observed"]["runtime_quality"], "estimated")
+        self.assertEqual(runtime_finding["observed"]["runtime_source"], "pod_create_time")
+        self.assertTrue(by_id["aid"]["runtime_estimated"])
         self.assertEqual(by_id["aid-zero-ok"]["policy_status"], "compliant")
         self.assertIn("development CPU per node exceeds limit", by_id["aid-zero-over"]["policy_reasons"])
         self.assertIn("development memory per node exceeds limit", by_id["aid-zero-over"]["policy_reasons"])
         self.assertIn("training CPU per node exceeds resource ratio", by_id["cpu"]["policy_reasons"])
+
+    def test_runtime_quality_variants_are_preserved(self):
+        now = datetime.now(timezone.utc)
+        exact = workload("exact", "alice", "trainingJob", [placement("n", 1)])
+        exact["start_time"] = (now - timedelta(hours=2)).isoformat()
+        exact["runtime_anchor_time"] = exact["start_time"]
+        exact["runtime_source"] = "training_status_start"
+        exact["runtime_quality"] = "exact"
+        observed = workload("observed", "alice", "aid", [placement("n", 1)])
+        observed["start_time"] = (now - timedelta(hours=73)).isoformat()
+        observed["runtime_anchor_time"] = observed["start_time"]
+        observed["runtime_source"] = "aid_pod_started_event"
+        observed["runtime_quality"] = "observed"
+        unavailable = workload("unavailable", "alice", "air", [placement("n", 1)])
+        resource_fallback = workload("resource", "alice", "air", [placement("n", 0)])
+        resource_fallback["resource_create_time"] = (now - timedelta(hours=3)).isoformat()
+
+        result = apply_policy(
+            snapshot([node("n", 3, 16, 40)], [exact, observed, unavailable, resource_fallback]),
+            self.policy,
+        )
+        by_id = {item["workload_id"]: item for item in result["workloads"]}
+        self.assertEqual(by_id["exact"]["runtime_quality"], "exact")
+        self.assertFalse(by_id["exact"]["runtime_estimated"])
+        observed_finding = next(
+            item for item in by_id["observed"]["policy_findings"]
+            if item["code"] == "runtime.development.one_gpu_limit"
+        )
+        self.assertEqual(observed_finding["observed"]["runtime_quality"], "observed")
+        self.assertEqual(observed_finding["observed"]["runtime_source"], "aid_pod_started_event")
+        self.assertIsNone(by_id["unavailable"]["runtime_hours"])
+        self.assertEqual(by_id["unavailable"]["runtime_quality"], "unavailable")
+        self.assertEqual(by_id["resource"]["runtime_source"], "resource_create_time")
+        self.assertEqual(by_id["resource"]["runtime_quality"], "estimated")
+        self.assertGreaterEqual(by_id["resource"]["runtime_hours"], 3)
 
     def test_partial_power_does_not_hide_other_telemetry_coverage(self):
         item = workload("w", "alice", "trainingJob", [placement("n", 1)])
@@ -329,6 +375,12 @@ class PolicyTests(unittest.TestCase):
         evaluated = result["workloads"][0]
         self.assertEqual(evaluated["historical_telemetry"]["evaluation_status"], "evaluated")
         self.assertIn("utilization.low_gpu_activity", evaluated["finding_codes"])
+        low_finding = next(
+            item for item in evaluated["policy_findings"]
+            if item["code"] == "utilization.low_gpu_activity"
+        )
+        self.assertEqual(low_finding["observed"]["runtime_quality"], "estimated")
+        self.assertEqual(low_finding["observed"]["runtime_source"], "pod_create_time")
         self.assertEqual(evaluated["policy_status"], "violation")
         self.assertEqual(result["users"][0]["status"], "violation")
         group = next(item for item in result["groups"] if item["group"] == "example-team")
@@ -604,6 +656,166 @@ class PlannerTests(unittest.TestCase):
         self.assertNotEqual(result["no_plan_reason"], "no-candidates-after-filters")
 
 
+class LifecycleTests(unittest.TestCase):
+    def test_training_lifecycle_uses_status_start_time_and_uid(self):
+        cluster = mock.Mock()
+        cluster._get_queue_id.return_value = "queue-id"
+        cluster.client.list_training_jobs.return_value = {
+            "total_size": 1,
+            "training_jobs": [{
+                "uid": "job-uid",
+                "status": {
+                    "create_time": "2026-08-13T06:28:12Z",
+                    "start_time": "2026-08-13T08:02:26Z",
+                },
+            }],
+        }
+        rows, complete = _running_training_lifecycle(cluster, "queue")
+        self.assertTrue(complete)
+        self.assertEqual(rows["job-uid"]["start_time"], "2026-08-13T08:02:26+00:00")
+        self.assertEqual(rows["job-uid"]["runtime_quality"], "exact")
+        cluster.client.list_training_jobs.assert_called_once_with(
+            filter_str='queue_id="queue-id" AND state="RUNNING"', page_size=1000,
+        )
+
+    def test_air_lifecycle_uses_latest_available_transition(self):
+        client = mock.Mock(compute_base_endpoint="https://compute.example")
+        client._get_base_path.return_value = "/subscriptions/s/workspaces/w/"
+        client._make_signed_base_request.return_value = {
+            "total_size": 1,
+            "airs": [{
+                "uid": "air-uid",
+                "status": {
+                    "create_time": "2026-08-14T08:00:00Z",
+                    "conditions": [
+                        {"type": "Available", "status": "False", "last_transition_time": "2026-08-14T08:01:00Z"},
+                        {"type": "Available", "status": "True", "last_transition_time": "2026-08-14T08:02:00Z"},
+                        {"type": "Available", "status": "True", "last_transition_time": "2026-08-14T08:03:00Z"},
+                    ],
+                },
+            }],
+        }
+        rows, complete = _running_air_lifecycle(mock.Mock(client=client))
+        self.assertTrue(complete)
+        self.assertEqual(rows["air-uid"]["start_time"], "2026-08-14T08:03:00+00:00")
+        self.assertEqual(rows["air-uid"]["runtime_quality"], "observed")
+        self.assertEqual(
+            _available_transition({"conditions": [{"type": "Available", "status": "False"}]}),
+            None,
+        )
+
+    def test_aid_start_events_match_current_pod_and_paginate(self):
+        client = mock.Mock(compute_base_endpoint="https://compute.example")
+        client._make_signed_base_request.side_effect = [
+            {"total_size": 4, "events": [
+                {"type": "Normal", "reason": "Started", "firstTimestamp": "2026-08-14T08:00:05Z", "lastTimestamp": "2026-08-14T09:00:00Z", "count": 2, "involvedObject": {"uid": "current"}},
+                {"type": "Normal", "reason": "Started", "firstTimestamp": "2026-08-14T08:00:10Z", "involvedObject": {"uid": "current"}},
+            ]},
+            {"total_size": 4, "events": [
+                {"type": "Warning", "reason": "Started", "firstTimestamp": "2026-08-14T08:00:20Z", "involvedObject": {"uid": "current"}},
+                {"type": "Normal", "reason": "Started", "firstTimestamp": "2026-08-13T08:00:00Z", "involvedObject": {"uid": "old"}},
+            ]},
+        ]
+        starts = _aid_pod_start_times(
+            mock.Mock(client=client), "/subscriptions/s/workspaces/w/aids/a", {"current"},
+        )
+        self.assertEqual(starts, {"current": "2026-08-14T08:00:10+00:00"})
+        self.assertEqual(client._make_signed_base_request.call_count, 2)
+        self.assertEqual(
+            client._make_signed_base_request.call_args_list[1].kwargs["params"]["skip"], 2,
+        )
+
+    def test_aid_start_cache_resets_only_when_pod_uid_changes(self):
+        collector = ClusterCollector(mock.Mock(), "queue", "cluster")
+
+        def aid_workload(pod_uid: str) -> dict:
+            return {
+                "workload_id": "aid", "type": "aid", "create_time": "2026-08-14T07:59:00Z",
+                "_resource_id": "/subscriptions/s/workspaces/w/aids/a",
+                "placements": [{"_pod_uid": pod_uid}],
+            }
+
+        with mock.patch("clusterx_monitor.collector._running_aid_lifecycle", return_value=({}, True)), mock.patch(
+            "clusterx_monitor.collector._aid_pod_start_times",
+            side_effect=[{"pod-1": "2026-08-14T08:00:00+00:00"}, {"pod-2": "2026-08-15T08:00:00+00:00"}],
+        ) as events:
+            first = {"aid": aid_workload("pod-1")}
+            collector._enrich_lifecycle(first, [])
+            self.assertEqual(first["aid"]["start_time"], "2026-08-14T08:00:00+00:00")
+
+            same = {"aid": aid_workload("pod-1")}
+            collector._enrich_lifecycle(same, [])
+            self.assertEqual(same["aid"]["start_time"], "2026-08-14T08:00:00+00:00")
+
+            rebuilt = {"aid": aid_workload("pod-2")}
+            collector._enrich_lifecycle(rebuilt, [])
+            self.assertEqual(rebuilt["aid"]["start_time"], "2026-08-15T08:00:00+00:00")
+            self.assertEqual(events.call_count, 2)
+
+    def test_lifecycle_failure_falls_back_to_estimated_pod_time(self):
+        collector = ClusterCollector(mock.Mock(), "queue", "cluster")
+        item = {
+            "workload_id": "job", "type": "trainingJob",
+            "create_time": "2026-08-14T07:59:00Z", "placements": [],
+        }
+        warnings = []
+        with mock.patch(
+            "clusterx_monitor.collector._running_training_lifecycle",
+            side_effect=RuntimeError("unavailable"),
+        ):
+            collector._enrich_lifecycle({"job": item}, warnings)
+        self.assertEqual(item["runtime_anchor_time"], item["create_time"])
+        self.assertEqual(item["runtime_source"], "pod_create_time")
+        self.assertEqual(item["runtime_quality"], "estimated")
+        self.assertTrue(item["runtime_estimated"])
+        self.assertIn("trainingJob lifecycle inventory is unavailable", warnings)
+
+    def test_lifecycle_failure_reuses_same_uid_trusted_start(self):
+        collector = ClusterCollector(mock.Mock(), "queue", "cluster")
+
+        def training_workload() -> dict:
+            return {
+                "workload_id": "job", "type": "trainingJob",
+                "create_time": "2026-08-14T07:59:00Z", "placements": [],
+            }
+
+        exact = {
+            "job": {
+                "resource_create_time": "2026-08-14T06:00:00+00:00",
+                "start_time": "2026-08-14T08:00:00+00:00",
+                "runtime_source": "training_status_start",
+                "runtime_quality": "exact",
+            },
+        }
+        with mock.patch(
+            "clusterx_monitor.collector._running_training_lifecycle",
+            side_effect=[(exact, True), RuntimeError("temporary failure")],
+        ):
+            first = {"job": training_workload()}
+            collector._enrich_lifecycle(first, [])
+            warnings = []
+            second = {"job": training_workload()}
+            collector._enrich_lifecycle(second, warnings)
+
+        self.assertEqual(second["job"]["start_time"], "2026-08-14T08:00:00+00:00")
+        self.assertEqual(second["job"]["runtime_quality"], "exact")
+        self.assertFalse(second["job"]["runtime_estimated"])
+        self.assertIn("trainingJob lifecycle inventory is unavailable", warnings)
+
+    def test_lifecycle_without_any_time_is_unavailable(self):
+        collector = ClusterCollector(mock.Mock(), "queue", "cluster")
+        item = {"workload_id": "job", "type": "trainingJob", "placements": []}
+        with mock.patch(
+            "clusterx_monitor.collector._running_training_lifecycle",
+            return_value=({}, True),
+        ):
+            collector._enrich_lifecycle({"job": item}, [])
+        self.assertIsNone(item["runtime_anchor_time"])
+        self.assertIsNone(item["runtime_source"])
+        self.assertEqual(item["runtime_quality"], "unavailable")
+        self.assertFalse(item["runtime_estimated"])
+
+
 class StoreAndTelemetryTests(unittest.TestCase):
     def test_snapshot_store_is_bounded_and_marks_stale(self):
         store = SnapshotStore(capacity=2)
@@ -876,11 +1088,17 @@ class SkillCliTests(unittest.TestCase):
             self.assertEqual(self.module.main(), 3)
 
     def test_workload_table_includes_resource_totals_and_basis(self):
-        rendered = self.module._render_table([{
-            "workload_name": "train", "total_gpu": 2, "total_cpu": 8,
-            "total_memory_gib": 200, "resource_basis": "requested",
-        }], no_color=True)
-        for field in ("total_gpu", "total_cpu", "total_memory_gib", "resource_basis"):
+        with mock.patch.dict("os.environ", {"COLUMNS": "240"}):
+            rendered = self.module._render_table([{
+                "workload_name": "train", "total_gpu": 2, "total_cpu": 8,
+                "total_memory_gib": 200, "resource_basis": "requested",
+                "start_time": "2026-08-14T08:00:00Z", "runtime_hours": 2.5,
+                "runtime_quality": "exact", "runtime_source": "training_status_start",
+            }], no_color=True)
+        for field in (
+            "total_gpu", "total_cpu", "total_memory_gib", "resource_basis",
+            "start_time", "runtime_hours", "runtime_quality", "runtime_source",
+        ):
             self.assertIn(field, rendered)
 
     def test_api_validation_returns_two_and_filtered_stale_uses_snapshot(self):

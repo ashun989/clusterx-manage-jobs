@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
+import App, { FreshnessBadge } from "./App";
 import type { PlanResult, PolicyFinding, PolicyResponse, Snapshot, Telemetry, Workload } from "./types";
 
 const quotaFinding: PolicyFinding = {
@@ -21,7 +21,9 @@ const telemetry = (allocated: number, util: number | null, watts: number | null)
 
 const workload = (id: string, name: string, user: string, group: string, gpu: number, node: string): Workload => ({
   workload_id: id, workload_name: name, user, group, type: "trainingJob", workspace: "workspace",
-  create_time: "2026-08-14T00:00:00Z", start_time: "2026-08-14T00:10:00Z", runtime_hours: 2,
+  create_time: "2026-08-14T00:00:00Z", resource_create_time: "2026-08-13T23:50:00Z",
+  start_time: "2026-08-14T00:10:00Z", runtime_anchor_time: "2026-08-14T00:10:00Z",
+  runtime_source: "training_status_start", runtime_quality: "exact", runtime_hours: 2,
   runtime_estimated: false, total_gpu: gpu, total_cpu: gpu * 14, total_memory_gib: gpu * 240,
   resource_basis: "attributed", task_resources: [], policy_status: "compliant", policy_reasons: [],
   policy_findings: [], finding_categories: [], finding_codes: [], finding_tags: [],
@@ -123,7 +125,18 @@ describe("Clusterx monitor dashboard", () => {
       return { ok: true, status: 200, json: async () => structuredClone(value) };
     }));
   });
-  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+  afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it("updates the snapshot age every second without waiting for another snapshot", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-14T01:00:00Z"));
+    render(<FreshnessBadge snapshotId="snapshot-1" freshness={{ stale: false, age_seconds: 3, last_error: null }} />);
+    expect(screen.getByText("3s 前更新")).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(2_000));
+
+    expect(screen.getByText("5s 前更新")).toBeInTheDocument();
+  });
 
   it("filters enum columns, sorts numeric columns and resets missing filter values", async () => {
     render(<App />);
@@ -164,6 +177,7 @@ describe("Clusterx monitor dashboard", () => {
     expect(within(table).getByRole("button", { name: "排序 GPU 总量" })).toBeInTheDocument();
     expect(within(table).getByRole("button", { name: "排序 CPU 总量" })).toBeInTheDocument();
     expect(within(table).getByRole("button", { name: "排序 内存 GiB" })).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: "排序 运行小时" })).toBeInTheDocument();
     fireEvent.click(within(table).getByRole("button", { name: "排序 CPU 总量" }));
     expect(within(table).getAllByRole("row").at(-1)).toHaveTextContent("pending-a");
     expect(within(table).getByRole("row", { name: "查看 pending-a 详情" })).toHaveTextContent("—");
@@ -175,6 +189,23 @@ describe("Clusterx monitor dashboard", () => {
     expect(within(drawer).getByRole("cell", { name: "master" })).toBeInTheDocument();
     expect(within(drawer).getByRole("cell", { name: "PYTORCH_WORKER" })).toBeInTheDocument();
     expect(drawer).not.toHaveTextContent("Placements（当前归属）");
+  });
+
+  it("marks runtime quality in the list and shows lifecycle provenance in details", async () => {
+    latestSnapshot.workloads[0].runtime_quality = "observed";
+    latestSnapshot.workloads[0].runtime_source = "air_available_condition";
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "workloads" }));
+    const table = screen.getByRole("table");
+    expect(within(table).getByRole("row", { name: "查看 train-a 详情" })).toHaveTextContent("2（观测）");
+
+    fireEvent.click(within(table).getByRole("row", { name: "查看 train-a 详情" }));
+    const drawer = screen.getByRole("complementary", { name: "train-a 详情" });
+    expect(drawer).toHaveTextContent("时间可信度观测");
+    expect(drawer).toHaveTextContent("时间来源AIR Available 状态");
+    expect(drawer).toHaveTextContent("开始时间");
+    expect(drawer).toHaveTextContent("资源创建时间");
   });
 
   it("opens all entity details, follows related objects, supports back and reports removed entities", async () => {
