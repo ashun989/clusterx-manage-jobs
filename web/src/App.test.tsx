@@ -192,6 +192,18 @@ describe("Clusterx monitor dashboard", () => {
   it("auto-expands the first plan, expands alternatives and opens plan workload details", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
+    const gpuInput = screen.getByLabelText("每节点 GPU") as HTMLInputElement;
+    const cpuInput = screen.getByLabelText("CPU（可覆盖）") as HTMLInputElement;
+    const memoryInput = screen.getByLabelText("内存 GiB（可覆盖）") as HTMLInputElement;
+    expect(cpuInput).toHaveValue(112);
+    expect(memoryInput).toHaveValue(1920);
+    fireEvent.change(gpuInput, { target: { value: "4" } });
+    expect(cpuInput).toHaveValue(56);
+    expect(memoryInput).toHaveValue(960);
+    fireEvent.change(cpuInput, { target: { value: "42" } });
+    fireEvent.change(gpuInput, { target: { value: "2" } });
+    expect(cpuInput).toHaveValue(42);
+    expect(memoryInput).toHaveValue(480);
     fireEvent.change(screen.getByLabelText("违规分类（逗号分隔）"), { target: { value: "utilization" } });
     fireEvent.change(screen.getByLabelText("规则代码（逗号分隔）"), { target: { value: "utilization.low_gpu_activity" } });
     fireEvent.click(screen.getByRole("button", { name: "计算方案" }));
@@ -207,6 +219,7 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByRole("complementary", { name: "train-b 详情" })).toBeInTheDocument();
     const planCall = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).endsWith("/plans") && init?.method === "POST");
     const payload = JSON.parse(String(planCall?.[1]?.body));
+    expect(payload.target).toEqual({ nodes: 2, gpus_per_node: 2, cpus_per_node: 42, memory_per_node_gib: 480 });
     expect(payload.filters.violation_categories).toEqual(["utilization"]);
     expect(payload.filters.violation_codes).toEqual(["utilization.low_gpu_activity"]);
   });

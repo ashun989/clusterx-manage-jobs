@@ -133,6 +133,16 @@ function NodeHeatmap({ nodes, state, onState, onNode }: { nodes: NodeSummary[]; 
 function Planner({ snapshot, onResult }: { snapshot: Snapshot; onResult: (value: PlanResult) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [gpus, setGpus] = useState("8");
+  const defaultFor = (perGpu: number) => String(Number(gpus) * perGpu);
+  const [cpus, setCpus] = useState(() => String(8 * snapshot.planning_profile.default_cpu_per_gpu));
+  const [memory, setMemory] = useState(() => String(8 * snapshot.planning_profile.default_memory_gib_per_gpu));
+  const [cpusUseDefault, setCpusUseDefault] = useState(true);
+  const [memoryUsesDefault, setMemoryUsesDefault] = useState(true);
+  useEffect(() => {
+    if (cpusUseDefault) setCpus(defaultFor(snapshot.planning_profile.default_cpu_per_gpu));
+    if (memoryUsesDefault) setMemory(defaultFor(snapshot.planning_profile.default_memory_gib_per_gpu));
+  }, [gpus, snapshot.planning_profile.default_cpu_per_gpu, snapshot.planning_profile.default_memory_gib_per_gpu, cpusUseDefault, memoryUsesDefault]);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setBusy(true); setError("");
     const data = new FormData(event.currentTarget);
@@ -154,8 +164,8 @@ function Planner({ snapshot, onResult }: { snapshot: Snapshot; onResult: (value:
     } catch (value) { setError(value instanceof Error ? value.message : String(value)); } finally { setBusy(false); }
   };
   return <form className="planner" onSubmit={submit}>
-    <label>节点数<input name="nodes" type="number" min="1" max="1024" defaultValue="2" /></label><label>每节点 GPU<input name="gpus" type="number" min="1" max="1024" defaultValue="8" /></label>
-    <label>CPU（可选）<input name="cpus" type="number" min="1" max="1000000" /></label><label>内存 GiB（可选）<input name="memory" type="number" min="1" max="10000000" /></label>
+    <label>节点数<input name="nodes" type="number" min="1" max="1024" defaultValue="2" /></label><label>每节点 GPU<input name="gpus" type="number" min="1" max="1024" value={gpus} onChange={(event) => setGpus(event.target.value)} /></label>
+    <label>CPU（可覆盖）<input name="cpus" type="number" min="1" max="1000000" value={cpus} onChange={(event) => { setCpusUseDefault(false); setCpus(event.target.value); }} /></label><label>内存 GiB（可覆盖）<input name="memory" type="number" min="1" max="10000000" value={memory} onChange={(event) => { setMemoryUsesDefault(false); setMemory(event.target.value); }} /></label>
     <label>候选范围<select name="scope" defaultValue="fragmented"><option value="fragmented">碎片节点</option><option value="full">满 GPU 节点</option><option value="all">全部</option></select></label><label>备选数<input name="alternatives" type="number" min="1" max="10" defaultValue="1" /></label>
     <label>搜索秒数<input name="searchSeconds" type="number" min="1" max="30" defaultValue="10" /></label>
     <label>类型（逗号分隔）<input name="types" placeholder="trainingJob,aid" /></label><label>分组（逗号分隔）<input name="groups" placeholder="example-team" /></label>
