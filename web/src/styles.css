@@ -8,6 +8,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 h1 { margin: 4px 0; color: #f1f8fa; font-size: 32px; letter-spacing: -.04em; }
 h2 { margin-top: 0; }
 .eyebrow { color: #5bd3c7; font: 700 11px/1.2 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .14em; }
+.brand { display: flex; gap: 13px; align-items: center; }
+.brand-icon { width: 49px; height: 49px; filter: drop-shadow(0 8px 18px #0007); }
+.brand h1 { margin: 1px 0 0; }
+.brand-block { display: grid; gap: 7px; }
+.cluster-context { margin-left: 62px; color: #78929d; font: 600 10px/1.2 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .12em; }
+.brand-compact { margin-bottom: 20px; }
+.brand-compact .brand-icon { width: 58px; height: 58px; }
+.brand-compact h1 { font-size: 28px; }
 .fresh { display: flex; flex: 0 0 auto; gap: 9px; align-items: center; color: #8aa2ad; font-size: 13px; }
 .fresh > span { width: 9px; height: 9px; border-radius: 50%; background: #43d39e; box-shadow: 0 0 14px #43d39e; }
 .fresh.stale > span { background: #ef735f; box-shadow: 0 0 14px #ef735f; }
@@ -187,6 +195,8 @@ tr.clickable:hover, tr.clickable:focus { background: #10252e; }
 .drawer-actions .close { font-size: 28px; line-height: 1; }
 .drawer h2 { margin: 7px 0 9px; overflow-wrap: anywhere; }
 .drawer pre { padding: 13px; overflow: auto; border-radius: 8px; color: #a9c3cc; background: #071117; font-size: 11px; }
+.console-link { display: inline-flex; gap: 5px; align-items: center; padding: 7px 10px; border: 1px solid #315b65; border-radius: 7px; color: #67d6cb; background: #10252d; font-size: 12px; font-weight: 700; text-decoration: none; }
+.console-link:hover { border-color: #5a909b; background: #15313a; }
 .inline-link { padding: 0; border: 0; color: #67d6cb; background: none; cursor: pointer; }
 .muted { color: #708994; }
 .detail-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 18px; }
@@ -206,6 +216,7 @@ tr.clickable:hover, tr.clickable:focus { background: #10252e; }
 .alert-message { padding: 14px; border-left: 3px solid #ef735f; color: #c7d7dc; background: #1e1717; line-height: 1.6; }
 .missing-detail { display: grid; min-height: 60vh; place-content: center; text-align: center; }
 .loading { display: grid; min-height: 100vh; place-items: center; align-content: center; }
+.loading > p { margin-top: 14px; color: #78929d; }
 .pulse { width: 24px; height: 24px; border-radius: 50%; background: #5bd3c7; animation: pulse 1.4s infinite; }
 @keyframes pulse { 50% { opacity: .25; transform: scale(.75); } }
 
@@ -229,6 +240,8 @@ tr.clickable:hover, tr.clickable:focus { background: #10252e; }
 @media (max-width: 520px) {
   .app { padding-inline: 11px; }
   .app-header { display: grid; }
+  .brand-icon { width: 43px; height: 43px; }
+  .cluster-context { margin-left: 56px; }
   .cards { grid-template-columns: minmax(0, 1fr); }
   .scheduler-panel { padding: 14px; }
   .planner { grid-template-columns: minmax(0, 1fr); }

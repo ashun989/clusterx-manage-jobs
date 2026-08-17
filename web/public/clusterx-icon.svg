@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">Clusterx Queue Observatory</title>
+  <desc id="desc">Three cluster nodes connected by an observatory orbit.</desc>
+  <defs>
+    <linearGradient id="surface" x1="8" y1="5" x2="56" y2="59" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#153848"/>
+      <stop offset="1" stop-color="#09151c"/>
+    </linearGradient>
+    <linearGradient id="orbit" x1="14" y1="15" x2="51" y2="50" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7ce4da"/>
+      <stop offset="1" stop-color="#43bfb5"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="url(#surface)" stroke="#294c59" stroke-width="2"/>
+  <path d="M13.5 35.5c2.5 10.4 13.4 17.2 24.1 14.2 4.8-1.4 8.7-4.3 11.3-8" fill="none" stroke="url(#orbit)" stroke-width="3" stroke-linecap="round"/>
+  <path d="M50.5 28.5C48 18.1 37.1 11.3 26.4 14.3c-4.8 1.4-8.7 4.3-11.3 8" fill="none" stroke="url(#orbit)" stroke-width="3" stroke-linecap="round"/>
+  <path d="m14.9 22.5-1.2-6.1m1.2 6.1 6-1.7M49 41.5l1.3 6.1M49 41.5l-6 1.7" fill="none" stroke="#5bd3c7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M31.8 21.5 42 27.4v11.8l-10.2 5.9-10.2-5.9V27.4l10.2-5.9Z" fill="#102a33" stroke="#9aeee6" stroke-width="2"/>
+  <path d="m31.8 22.3.1 11.1m-9.7-5.6 9.7 5.6 9.6-5.6M31.9 33.4v11" fill="none" stroke="#5bd3c7" stroke-width="2" stroke-linejoin="round"/>
+  <circle cx="31.9" cy="33.4" r="3.3" fill="#dffcf9"/>
+  <circle cx="21.6" cy="27.4" r="2.2" fill="#5bd3c7"/>
+  <circle cx="42" cy="27.4" r="2.2" fill="#efc16e"/>
+  <circle cx="31.8" cy="45.1" r="2.2" fill="#5bd3c7"/>
+</svg>

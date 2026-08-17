@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 import yaml
 
 
@@ -28,6 +29,7 @@ from clusterx_monitor.collector import (
     _query_workload_history,
     _running_air_lifecycle,
     _running_training_lifecycle,
+    _workload_console_url,
     resource_number,
 )
 from clusterx_monitor.auth import AdminAuth, initialize_auth_config
@@ -746,6 +748,53 @@ class PlannerTests(unittest.TestCase):
         self.assertNotEqual(result["no_plan_reason"], "no-candidates-after-filters")
 
 
+class ConsoleLinkTests(unittest.TestCase):
+    def setUp(self):
+        self.cluster = mock.Mock(cfg={
+            "subscription": "subscription-id",
+            "resource_group": "default",
+            "region": "cn-pj-03",
+            "workspace": "workspace-name",
+        })
+
+    def test_console_routes_cover_all_supported_workload_types(self):
+        cases = {
+            "trainingJob": ("training/detail/", "trainingJobs"),
+            "aid": ("development/detail", "aids"),
+            "air": ("air/detail/", "airs"),
+        }
+        for kind, (route, collection) in cases.items():
+            rid = (
+                "/subscriptions/subscription-id/resourceGroups/default/regions/cn-pj-03/"
+                f"workspaces/workspace-name/{collection}/resource-name"
+            )
+            url = _workload_console_url(self.cluster, kind, resource_id=rid)
+            self.assertIsNotNone(url)
+            parsed = urlsplit(str(url))
+            self.assertEqual(parsed.netloc, "console.d.pjlab.org.cn")
+            self.assertEqual(parsed.path, f"/cn-pj-03/ssp/model/{route}")
+            self.assertEqual(parse_qs(parsed.query)["rid"], [rid])
+
+    def test_console_url_builds_resource_id_from_cluster_scope(self):
+        url = _workload_console_url(
+            self.cluster, "air", resource_name="infer-qwen38-0",
+        )
+        parsed = urlsplit(str(url))
+        self.assertEqual(
+            parse_qs(parsed.query)["rid"],
+            [
+                "/subscriptions/subscription-id/resourceGroups/default/regions/cn-pj-03/"
+                "workspaces/workspace-name/airs/infer-qwen38-0"
+            ],
+        )
+
+    def test_console_url_rejects_unknown_types_and_incomplete_scope(self):
+        self.assertIsNone(_workload_console_url(self.cluster, "unknown", resource_name="name"))
+        self.assertIsNone(_workload_console_url(
+            mock.Mock(cfg={}), "aid", resource_name="name",
+        ))
+
+
 class LifecycleTests(unittest.TestCase):
     def test_training_lifecycle_uses_status_start_time_and_uid(self):
         cluster = mock.Mock()
@@ -1048,7 +1097,10 @@ class StoreAndTelemetryTests(unittest.TestCase):
             ClusterCollector(cluster, "queue", "cluster").collect()
 
     def test_pending_inventory_tracks_completeness_and_zero_gpu_jobs(self):
-        cluster = mock.Mock()
+        cluster = mock.Mock(cfg={
+            "subscription": "subscription-id", "resource_group": "default",
+            "region": "cn-pj-03", "workspace": "workspace-name",
+        })
         cluster._get_queue_id.return_value = "queue-id"
         created = datetime.now(timezone.utc) - timedelta(minutes=15)
         cluster.client.list_training_jobs.return_value = {
@@ -1071,6 +1123,13 @@ class StoreAndTelemetryTests(unittest.TestCase):
         self.assertEqual(jobs[0]["total_cpu"], 14)
         self.assertEqual(jobs[0]["total_memory_gib"], 240)
         self.assertEqual(jobs[0]["resource_basis"], "requested")
+        self.assertEqual(
+            parse_qs(urlsplit(jobs[0]["console_url"]).query)["rid"],
+            [
+                "/subscriptions/subscription-id/resourceGroups/default/regions/cn-pj-03/"
+                "workspaces/workspace-name/trainingJobs/cpu-only"
+            ],
+        )
 
     def test_pending_inventory_sums_heterogeneous_tasks_without_fake_per_node_shape(self):
         cluster = mock.Mock()

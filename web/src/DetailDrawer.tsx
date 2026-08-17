@@ -111,7 +111,7 @@ function NodeDetail({ node, snapshot, open }: { node: NodeSummary; snapshot: Sna
 
 function WorkloadDetail({ workload, open }: { workload: Workload; open: (ref: DetailRef) => void }) {
   return <>
-    <span className="eyebrow">{workload.type}</span><h2>{workload.workload_name}</h2><p><button className="inline-link" type="button" onClick={() => open({ kind: "user", id: workload.user, label: workload.user })}>{workload.user}</button> · <button className="inline-link" type="button" onClick={() => open({ kind: "group", id: workload.group, label: workload.group })}>{workload.group}</button></p><span className={statusClass(workload.policy_status)}>{workload.policy_status}</span>
+    <span className="eyebrow">{workload.type}</span><h2>{workload.workload_name}</h2>{workload.console_url && <a className="console-link" href={workload.console_url} target="_blank" rel="noopener noreferrer">在官方控制台查看 <span aria-hidden="true">↗</span></a>}<p><button className="inline-link" type="button" onClick={() => open({ kind: "user", id: workload.user, label: workload.user })}>{workload.user}</button> · <button className="inline-link" type="button" onClick={() => open({ kind: "group", id: workload.group, label: workload.group })}>{workload.group}</button></p><span className={statusClass(workload.policy_status)}>{workload.policy_status}</span>
     {workload.planning_eligible === false && <p className="banner">该 Workload 接触归属异常节点，不作为调度释放候选。</p>}
     {(workload.policy_reasons ?? []).map((reason) => <p className="error" key={reason}>{reason}</p>)}
     <Metrics>

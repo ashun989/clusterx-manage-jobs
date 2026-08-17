@@ -503,6 +503,13 @@ def create_app(
         async def index() -> FileResponse:
             return FileResponse(index_file)
 
+        @app.get("/clusterx-icon.svg", include_in_schema=False)
+        async def clusterx_icon():
+            icon_file = root / "clusterx-icon.svg"
+            if not icon_file.is_file() or icon_file.is_symlink():
+                return JSONResponse({"detail": "not found"}, status_code=404)
+            return FileResponse(icon_file, media_type="image/svg+xml")
+
         @app.get("/{path:path}", include_in_schema=False)
         async def spa(path: str):
             parts = Path(path.replace("\\", "/")).parts

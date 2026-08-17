@@ -42,6 +42,7 @@ def raw_snapshot():
         "workloads": [{
             "workload_id": "w", "workload_name": "w", "user": "alice",
             "type": "trainingJob", "total_gpu": 1, "total_cpu": 4,
+            "console_url": "https://console.d.pjlab.org.cn/cn-pj-03/ssp/model/training/detail/?rid=job",
             "total_memory_gib": 10, "resource_basis": "attributed", "task_resources": [],
             "placements": [{"node": "n1", "pod": "p", "gpu": 1, "cpu": 4, "memory_gib": 10}],
             "gpus": [{"node": "n1", "pod": "p", "device_index": "0", "gpu_uuid": "u",
@@ -100,6 +101,10 @@ class MonitorApiTests(unittest.TestCase):
         self.assertEqual(snapshot["workloads"][0]["total_cpu"], 4)
         self.assertEqual(snapshot["workloads"][0]["total_memory_gib"], 10)
         self.assertEqual(snapshot["workloads"][0]["resource_basis"], "attributed")
+        self.assertEqual(
+            snapshot["workloads"][0]["console_url"],
+            "https://console.d.pjlab.org.cn/cn-pj-03/ssp/model/training/detail/?rid=job",
+        )
         self.assertTrue(client.get("/api/v1/policy").json()["valid"])
         policy_response = client.get("/api/v1/policy")
         public_policy = policy_response.json()["policy"]
@@ -198,10 +203,15 @@ class MonitorApiTests(unittest.TestCase):
         static = Path(self.temp.name) / "static"
         static.mkdir()
         (static / "index.html").write_text("<html>monitor</html>", encoding="utf-8")
+        (static / "clusterx-icon.svg").write_text("<svg>monitor icon</svg>", encoding="utf-8")
         app = create_app(self.runtime, static_dir=static)
         client = TestClient(app)
         self.assertIn("monitor", client.get("/").text)
         self.assertIn("monitor", client.get("/dashboard").text)
+        icon = client.get("/clusterx-icon.svg")
+        self.assertEqual(icon.status_code, 200)
+        self.assertEqual(icon.headers["content-type"], "image/svg+xml")
+        self.assertEqual(icon.text, "<svg>monitor icon</svg>")
         self.assertEqual(client.get("/api/v1/missing").status_code, 404)
 
     def test_spa_and_assets_cannot_escape_the_static_root(self):
@@ -214,6 +224,7 @@ class MonitorApiTests(unittest.TestCase):
         secret = root / "private-secret.txt"
         secret.write_text("DO-NOT-EXPOSE", encoding="utf-8")
         (assets / "escape.txt").symlink_to(secret)
+        (static / "clusterx-icon.svg").symlink_to(secret)
         app = create_app(self.runtime, static_dir=static)
         client = TestClient(app)
         self.assertEqual(client.get("/assets/app.js").text, "safe asset")
@@ -231,6 +242,9 @@ class MonitorApiTests(unittest.TestCase):
         self.assertEqual(fallback.status_code, 200)
         self.assertIn("monitor-shell", fallback.text)
         self.assertNotIn("DO-NOT-EXPOSE", fallback.text)
+        icon = client.get("/clusterx-icon.svg")
+        self.assertEqual(icon.status_code, 404)
+        self.assertNotIn("DO-NOT-EXPOSE", icon.text)
 
         symlink_static = root / "symlink-static"
         symlink_static.mkdir()

@@ -215,6 +215,35 @@ describe("Clusterx monitor dashboard", () => {
     expect(drawer).toHaveTextContent("资源创建时间");
   });
 
+  it("links every supported workload type to its official console detail", async () => {
+    const urls = {
+      trainingJob: "https://console.d.pjlab.org.cn/cn-pj-03/ssp/model/training/detail/?rid=%2Fsubscriptions%2Fs%2FresourceGroups%2Fdefault%2Fregions%2Fcn-pj-03%2Fworkspaces%2Fw%2FtrainingJobs%2Ftrain-a",
+      aid: "https://console.d.pjlab.org.cn/cn-pj-03/ssp/model/development/detail?rid=%2Fsubscriptions%2Fs%2FresourceGroups%2Fdefault%2Fregions%2Fcn-pj-03%2Fworkspaces%2Fw%2Faids%2Fdev-a",
+      air: "https://console.d.pjlab.org.cn/cn-pj-03/ssp/model/air/detail/?rid=%2Fsubscriptions%2Fs%2FresourceGroups%2Fdefault%2Fregions%2Fcn-pj-03%2Fworkspaces%2Fw%2Fairs%2Finfer-a",
+    };
+    latestSnapshot.workloads = [
+      { ...trainA, console_url: urls.trainingJob },
+      { ...trainB, workload_id: "aid-a", workload_name: "dev-a", type: "aid", console_url: urls.aid },
+      { ...trainB, workload_id: "air-a", workload_name: "infer-a", type: "air", console_url: urls.air },
+      { ...trainB, workload_id: "unknown-a", workload_name: "unknown-a", type: "unknown", console_url: undefined },
+    ];
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "workloads" }));
+
+    for (const [name, url] of [["train-a", urls.trainingJob], ["dev-a", urls.aid], ["infer-a", urls.air]]) {
+      fireEvent.click(screen.getByRole("row", { name: `查看 ${name} 详情` }));
+      const link = within(screen.getByRole("complementary", { name: `${name} 详情` })).getByRole("link", { name: "在官方控制台查看" });
+      expect(link).toHaveAttribute("href", url);
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link).toHaveAttribute("rel", "noopener noreferrer");
+      fireEvent.click(screen.getByRole("button", { name: "关闭详情" }));
+    }
+
+    fireEvent.click(screen.getByRole("row", { name: "查看 unknown-a 详情" }));
+    expect(within(screen.getByRole("complementary", { name: "unknown-a 详情" })).queryByRole("link", { name: "在官方控制台查看" })).not.toBeInTheDocument();
+  });
+
   it("opens all entity details, follows related objects, supports back and reports removed entities", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");

@@ -71,6 +71,7 @@ export type Workload = FindingFacets & {
   group: string;
   type: string;
   workspace?: string;
+  console_url?: string;
   create_time?: string | null;
   resource_create_time?: string | null;
   queue_age_seconds?: number | null;
