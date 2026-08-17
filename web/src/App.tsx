@@ -15,6 +15,13 @@ const number = (value: unknown, suffix = "") => value == null ? "—" : `${Numbe
 const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
 const runtimeMark = (row: Workload) => row.runtime_quality === "observed" ? "（观测）" : row.runtime_quality === "estimated" || row.runtime_estimated ? "（估算）" : "";
 
+function Brand({ compact = false }: { compact?: boolean }) {
+  return <div className={compact ? "brand brand-compact" : "brand"}>
+    <img className="brand-icon" src="/clusterx-icon.svg" alt="" />
+    <div>{!compact && <span className="eyebrow">Clusterx</span>}<h1>{compact ? "Clusterx Monitor" : "Queue Observatory"}</h1></div>
+  </div>;
+}
+
 export function FreshnessBadge({ snapshotId, freshness }: { snapshotId: string; freshness: Snapshot["freshness"] }) {
   const [anchor, setAnchor] = useState(() => ({ ageSeconds: freshness.age_seconds, receivedAt: Date.now() }));
   const [now, setNow] = useState(Date.now);
@@ -292,14 +299,14 @@ export default function App() {
   const updateTable = (name: TableTab, state: TableState) => setTableStates((current) => ({ ...current, [name]: state }));
   if (!snapshot) {
     const loadingMessages = [error, statusError, policyError, serviceStatus?.setup_required ? "服务处于 setup-required，请由管理员补全本地配置。" : "", serviceStatus?.snapshot.last_error, serviceStatus?.policy.error, serviceStatus?.policy.audit_error].filter(Boolean);
-    return <main className="loading"><div className="pulse" /><h1>Clusterx Monitor</h1><p>{loadingMessages.join(" · ") || "正在等待第一份完整快照…"}</p><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button>{adminOpen && <AdminPanel close={() => setAdminOpen(false)} onConfigured={refresh} />}</main>;
+    return <main className="loading"><Brand compact /><div className="pulse" /><p>{loadingMessages.join(" · ") || "正在等待第一份完整快照…"}</p><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button>{adminOpen && <AdminPanel close={() => setAdminOpen(false)} onConfigured={refresh} />}</main>;
   }
   const telemetryCoverage = snapshot.telemetry;
   const coverageMessages = [["compute", telemetryCoverage.compute_reported_gpu_count], ["memory", telemetryCoverage.memory_reported_gpu_count], ["power", telemetryCoverage.power_reported_gpu_count]].filter(([, count]) => Number(count) < telemetryCoverage.allocated_gpu_count).map(([metric, count]) => `${metric} 遥测覆盖 ${count}/${telemetryCoverage.allocated_gpu_count}`);
   const bannerMessages = [error, policyError, statusError, policy?.error, policy?.audit_error, serviceStatus?.policy.audit_error, serviceStatus?.snapshot.last_error, serviceStatus?.setup_required ? "服务处于 setup-required" : "", serviceStatus?.skipped_refreshes ? `已跳过 ${serviceStatus.skipped_refreshes} 次刷新` : "", snapshot.policy_config?.error, ...snapshot.warnings, ...coverageMessages, snapshot.historical_telemetry_status === "unavailable" ? "历史 GPU 遥测不可用，低利用率规则本轮未评估" : ""].filter(Boolean);
   const workloadRef = (workload: Workload): DetailRef => ({ kind: "workload", id: workload.workload_id, label: workload.workload_name });
   return <div className="app">
-    <header className="app-header"><div><span className="eyebrow">{snapshot.cluster} / {snapshot.queue}</span><h1>Queue Observatory</h1></div><div className="header-actions"><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
+    <header className="app-header"><div className="brand-block"><Brand /><span className="cluster-context">{snapshot.cluster} / {snapshot.queue}</span></div><div className="header-actions"><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
     <section className="cards"><article><label>绑定容量</label><strong>{number(snapshot.capacity.bound_gpu)}</strong><small>{number(snapshot.capacity.planning_eligible_gpu)} planning eligible</small></article><article><label>已分配</label><strong>{number(snapshot.capacity.allocated_gpu)}</strong><small>{number(snapshot.capacity.free_gpu)} free</small></article><article><label>Pending pressure</label><strong className={statusClass(snapshot.pending_pressure.state)}>{String(snapshot.pending_pressure.state)}</strong><small>{number(snapshot.pending_pressure.eligible_jobs)} eligible jobs</small></article><article><label>GPU Power</label><strong>{power(snapshot.telemetry.gpu_power_total_w)}</strong><small>{snapshot.telemetry.power_reported_gpu_count}/{snapshot.telemetry.allocated_gpu_count} power covered · {snapshot.telemetry_status ?? "unknown"}</small></article></section>
     {bannerMessages.length > 0 && <div className="banner">{bannerMessages.join(" · ")}</div>}
     <section className="workspace"><div className="main-panel"><nav>{(["groups", "users", "nodes", "workloads", "alerts", "rules"] as Tab[]).map((name) => <button className={tab === name ? "active" : ""} key={name} onClick={() => setTab(name)}>{name === "rules" ? "规则说明" : name}</button>)}</nav>

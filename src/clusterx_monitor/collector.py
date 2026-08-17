@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import math
 import re
 from typing import Any, Iterable
+from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 from .models import SCHEMA_VERSION
@@ -17,6 +18,56 @@ HISTORY_COMPUTE_UTIL = "history-gpu-compute-util"
 HISTORY_MEMORY_UTIL = "history-gpu-memory-util"
 HISTORY_COMPUTE_SAMPLES = "history-gpu-compute-samples"
 HISTORY_MEMORY_SAMPLES = "history-gpu-memory-samples"
+CONSOLE_ORIGIN = "https://console.d.pjlab.org.cn"
+CONSOLE_ROUTES = {
+    "trainingJob": ("training/detail/", "trainingJobs"),
+    "aid": ("development/detail", "aids"),
+    "air": ("air/detail/", "airs"),
+}
+RESOURCE_ID_PATTERN = re.compile(
+    r"^/subscriptions/([^/]+)/resourceGroups/([^/]+)/regions/([^/]+)/"
+    r"workspaces/([^/]+)/(trainingJobs|aids|airs)/([^/]+)$"
+)
+
+
+def _config_segment(cluster: Any, key: str) -> str | None:
+    cfg = getattr(cluster, "cfg", None)
+    value = cfg.get(key) if isinstance(cfg, dict) else None
+    if not isinstance(value, str) or not value or any(char in value for char in "/?#"):
+        return None
+    return value
+
+
+def _workload_console_url(
+    cluster: Any, kind: str, *, resource_id: Any = None,
+    resource_name: Any = None, workspace: Any = None,
+) -> str | None:
+    route = CONSOLE_ROUTES.get(kind)
+    if route is None:
+        return None
+    detail_path, collection = route
+    rid = str(resource_id or "")
+    match = RESOURCE_ID_PATTERN.fullmatch(rid)
+    if match and match.group(5) == collection:
+        region = match.group(3)
+    else:
+        name = str(resource_name or "")
+        workspace_name = str(workspace or "") or (_config_segment(cluster, "workspace") or "")
+        scope = {
+            "subscription": _config_segment(cluster, "subscription"),
+            "resource_group": _config_segment(cluster, "resource_group"),
+            "region": _config_segment(cluster, "region"),
+            "workspace": workspace_name if workspace_name and not any(char in workspace_name for char in "/?#") else None,
+            "name": name if name and not any(char in name for char in "/?#") else None,
+        }
+        if any(value is None for value in scope.values()):
+            return None
+        region = str(scope["region"])
+        rid = (
+            f"/subscriptions/{scope['subscription']}/resourceGroups/{scope['resource_group']}/"
+            f"regions/{region}/workspaces/{scope['workspace']}/{collection}/{scope['name']}"
+        )
+    return f"{CONSOLE_ORIGIN}/{quote(region, safe='')}/ssp/model/{detail_path}?{urlencode({'rid': rid})}"
 
 
 def resource_number(value: Any, *, memory: bool = False) -> float:
@@ -355,6 +406,8 @@ def _running_training_lifecycle(
             continue
         status = row.get("status") or {}
         result[uid] = {
+            "_resource_id": str(row.get("id") or "") or None,
+            "_resource_name": str(row.get("name") or "") or None,
             "resource_create_time": _iso_time(status.get("create_time")),
             "start_time": _iso_time(status.get("start_time")),
             "runtime_source": "training_status_start",
@@ -387,7 +440,11 @@ def _running_aid_lifecycle(cluster: Any) -> tuple[dict[str, dict[str, Any]], boo
     for row in rows:
         uid = str(row.get("uid") or "")
         if uid:
-            result[uid] = {"resource_create_time": _iso_time(row.get("create_time"))}
+            result[uid] = {
+                "_resource_id": str(row.get("id") or "") or None,
+                "_resource_name": str(row.get("name") or "") or None,
+                "resource_create_time": _iso_time(row.get("create_time")),
+            }
     return result, complete
 
 
@@ -413,6 +470,8 @@ def _running_air_lifecycle(cluster: Any) -> tuple[dict[str, dict[str, Any]], boo
             continue
         status = row.get("status") or {}
         result[uid] = {
+            "_resource_id": str(row.get("id") or "") or None,
+            "_resource_name": str(row.get("name") or "") or None,
             "resource_create_time": _iso_time(status.get("create_time")),
             "start_time": _available_transition(status),
             "runtime_source": "air_available_condition",
@@ -510,7 +569,7 @@ def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], 
 
         status = job.get("status") or {}
         created = _parse_time(status.get("create_time"))
-        result.append({
+        item = {
             "workload_id": str(job.get("name") or ""),
             "workload_name": str(job.get("display_name") or job.get("name") or ""),
             "user": str((job.get("ownership") or {}).get("creator_name") or "unknown").lower(),
@@ -526,7 +585,16 @@ def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], 
             "total_memory_gib": requested_total("memory_gib_per_replica"),
             "resource_basis": "requested",
             "task_resources": task_resources,
-        })
+        }
+        console_url = _workload_console_url(
+            cluster, "trainingJob", resource_id=job.get("id"),
+            resource_name=job.get("name"),
+            workspace=(job.get("workspace") or {}).get("name")
+            if isinstance(job.get("workspace"), dict) else None,
+        )
+        if console_url:
+            item["console_url"] = console_url
+        result.append(item)
     return result, complete
 
 
@@ -611,6 +679,12 @@ class ClusterCollector:
 
         for workload_id, workload in workloads.items():
             cached = self._lifecycle_cache.get(workload_id) or {}
+            workload["console_url"] = _workload_console_url(
+                self.cluster, str(workload.get("type") or ""),
+                resource_id=workload.get("_resource_id") or cached.get("_resource_id"),
+                resource_name=workload.get("_resource_name") or cached.get("_resource_name"),
+                workspace=workload.get("workspace"),
+            )
             workload["resource_create_time"] = cached.get("resource_create_time")
             start_time = cached.get("start_time")
             source = cached.get("runtime_source")
@@ -645,6 +719,9 @@ class ClusterCollector:
             workload["runtime_quality"] = quality
             workload["runtime_estimated"] = quality == "estimated"
             workload.pop("_resource_id", None)
+            workload.pop("_resource_name", None)
+            if workload.get("console_url") is None:
+                workload.pop("console_url", None)
             for placement in workload.get("placements") or []:
                 placement.pop("_pod_uid", None)
 
@@ -719,10 +796,15 @@ class ClusterCollector:
                     "workspace": str(workspace.get("name") or ""),
                     "create_time": None, "start_time": None,
                     "_resource_id": str(raw_workload.get("id") or ""),
+                    "_resource_name": str(raw_workload.get("name") or ""),
                     "placements": [], "gpus": [], "total_gpu": 0,
                     "total_cpu": None, "total_memory_gib": None,
                     "resource_basis": "attributed", "task_resources": [],
                 })
+                if raw_workload.get("id"):
+                    workload["_resource_id"] = str(raw_workload["id"])
+                if raw_workload.get("name"):
+                    workload["_resource_name"] = str(raw_workload["name"])
                 timestamp = _parse_time(pod.get("create_time"))
                 current = _parse_time(workload.get("create_time"))
                 if timestamp and (current is None or timestamp < current):

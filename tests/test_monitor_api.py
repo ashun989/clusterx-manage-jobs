@@ -42,6 +42,7 @@ def raw_snapshot():
         "workloads": [{
             "workload_id": "w", "workload_name": "w", "user": "alice",
             "type": "trainingJob", "total_gpu": 1, "total_cpu": 4,
+            "console_url": "https://console.d.pjlab.org.cn/cn-pj-03/ssp/model/training/detail/?rid=job",
             "total_memory_gib": 10, "resource_basis": "attributed", "task_resources": [],
             "placements": [{"node": "n1", "pod": "p", "gpu": 1, "cpu": 4, "memory_gib": 10}],
             "gpus": [{"node": "n1", "pod": "p", "device_index": "0", "gpu_uuid": "u",
@@ -100,6 +101,10 @@ class MonitorApiTests(unittest.TestCase):
         self.assertEqual(snapshot["workloads"][0]["total_cpu"], 4)
         self.assertEqual(snapshot["workloads"][0]["total_memory_gib"], 10)
         self.assertEqual(snapshot["workloads"][0]["resource_basis"], "attributed")
+        self.assertEqual(
+            snapshot["workloads"][0]["console_url"],
+            "https://console.d.pjlab.org.cn/cn-pj-03/ssp/model/training/detail/?rid=job",
+        )
         self.assertTrue(client.get("/api/v1/policy").json()["valid"])
         policy_response = client.get("/api/v1/policy")
         public_policy = policy_response.json()["policy"]
