@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ClusterX 开发机配置填充</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">CLUSTERX</p>
+        <h1>开发机配置填充</h1>
+        <p class="intro">选择本地 YAML，在当前创建页填入队列、网络和挂载；镜像由你手动选择。扩展不会保存配置或提交表单。</p>
+      </header>
+      <div class="file-picker">
+        <span>ClusterX YAML</span>
+        <button id="choose-file" class="secondary" type="button">选择配置文件</button>
+        <input id="config-file" type="file" accept=".yaml,.yml,application/yaml,text/yaml" hidden />
+      </div>
+      <button id="fill" type="button">选择配置后填充</button>
+      <p id="state" class="state" aria-live="polite">尚未选择配置文件</p>
+      <ul id="results" class="results" aria-label="填充结果"></ul>
+      <p class="footnote">提交前请手动选择镜像、调整实例规格，并确认共享内存、WebIDE、SSH 访问和优先级。</p>
+      <p class="version">扩展版本 <span id="extension-version">--</span></p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

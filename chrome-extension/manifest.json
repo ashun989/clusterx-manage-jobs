@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "ClusterX Development Autofill",
+  "description": "Fill the ClusterX development-machine form from a local ClusterX YAML file without submitting it.",
+  "version": "0.1.2",
+  "permissions": ["activeTab"],
+  "host_permissions": ["https://console.d.pjlab.org.cn/*"],
+  "action": {
+    "default_title": "ClusterX 开发机配置填充",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://console.d.pjlab.org.cn/*/ssp/model/development/create*",
+        "https://console.d.pjlab.org.cn/*/afs/list*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

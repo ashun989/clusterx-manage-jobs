@@ -17,6 +17,7 @@ Clusterx SDK → clusterx-monitor → immutable snapshots → Web / Skill CLI
 
 - `src/clusterx_monitor`：集中采集、策略、缓存、API 和求解器。
 - `web`：React/TypeScript 监控面板。
+- `chrome-extension`：从本地 Clusterx YAML 向网页开发机创建表单安全填充配置。
 - `skill/clusterx-manage-jobs/assets/resource-policy.json`：只读的公共资源规则模板。
 - `config/resource-policy.local.json`：权限为 `600`、被 Git 忽略的可写生效规则。
 - `config/groups.local.yaml`：权限为 `600`、被 Git 忽略的本地私有分组配置。
@@ -203,11 +204,61 @@ Pod 汇总超过节点 allocated 的归属异常节点仍出现在监控中，�
 GPU 计算、持续日志或组合存储 smoke test；任务清单描述资源需求，Skill 根据
 动态帮助构造实际 Clusterx 命令。Monitor 不参与这些任务的创建、查询或停止。
 
+## Chrome 开发机配置填充扩展
+
+`chrome-extension` 是独立的 Manifest V3 子项目，用于目标控制台的开发机创建页。
+它只在用户点击扩展并选择本地 Clusterx YAML 后运行，不会保存配置、后台读取
+文件或点击网页的“确认”按钮。
+
+构建并通过 Chrome 的开发者模式安装：
+
+```bash
+cd chrome-extension
+npm install
+npm test
+npm run build
+```
+
+打开 `chrome://extensions`，启用“开发者模式”，选择“加载已解压的扩展程序”，
+并选取 `chrome-extension/dist`。扩展安装或重新加载后，刷新已经打开的开发机
+创建页；点击扩展图标、选择 `.yaml`/`.yml` 配置，再点击“填充当前创建页”。
+Chrome 会为该配置选择器记住上次使用的目录，下一次选择时从该目录开始；扩展本身
+不保存绝对路径、文件句柄、YAML 内容或密钥，仍需由用户每次明确选择文件。
+
+扩展使用配置顶层 `default` 选择 profile，并在填充前精确校验页面 URL 中的
+subscription、resource group、region 和 workspace。它填充 `queue`、
+`rdma_name` 与 `mount`；镜像保持页面当前值，由用户手动选择。`PV_AFS` 默认使用
+读写访问模式；`PV_AOSS` 从
+`metadata.items` 读取 `access_key` 与 `secret_key`。名称、实例规格、共享内存、
+WebIDE、SSH、优先级继续使用页面当前值；填充结果会提醒用户手动调整实例规格，
+并确认共享内存、WebIDE、SSH 访问和优先级后再提交。
+
+开发机页面的文件存储下拉框目前只公开存储名称而不公开 Clusterx 配置中的 UUID。
+存在 `PV_AFS` 挂载时，扩展会短暂打开并自动关闭一个非活动的同地域文件存储列表
+标签页，只读取配置所需的“资源 UUID → 名称”映射，再在创建页按映射名称精确选择。
+映射只存在于本次填充内存中；列表读取失败时才以 `mount_path` 最后一段对存储名称做
+唯一后缀匹配并显示复核警告，找不到或匹配到多个候选时不会自行猜测。
+文件存储选项只在当前挂载行对应的下拉列表内匹配，避免页面保留旧下拉选项时产生
+歧义。对同一页面重复执行填充时，扩展以挂载路径识别已有挂载：字段一致则跳过，
+字段冲突则拒绝覆盖；上一次失败遗留的全空白挂载行会优先复用，不再重复新增。
+
+YAML 通过浏览器本地 `FileReader` 读取，扩展不声明 `storage` 权限。Clusterx
+profile 根级 AK/SK 不会进入页面消息；对象存储凭据只在本次填充期间进入内容脚本
+和目标页面，不写入日志或扩展存储。工作空间、队列或 RDMA 不匹配时会在镜像和
+对象存储凭据写入前停止。单个挂载失败不会回滚已成功项目，弹窗会逐项报告，
+用户应在提交前人工复核。
+
+若控制台升级后出现“页面结构与预期不一致”，先刷新页面并确认 URL 仍为
+`/<region>/ssp/model/development/create`。随后检查弹窗中的具体失败项；扩展通过
+可见文本、ARIA role、表头和 placeholder 定位控件，不依赖构建生成的 CSS 类名。
+扩展不进入 `scripts/package_skill.py` 生成的 Skill 发布包。
+
 ## 开发与验证
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
-cd web && npm test && npm run build
+(cd web && npm test && npm run build)
+(cd chrome-extension && npm test && npm run build)
 python3 scripts/package_skill.py --output-dir dist
 ```
 
