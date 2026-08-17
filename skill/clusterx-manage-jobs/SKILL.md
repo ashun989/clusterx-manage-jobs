@@ -15,14 +15,17 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 - For global/project configuration discovery and precedence, read
   [references/configuration.md](references/configuration.md).
 - For a preflight check, run `python3 scripts/preflight.py`.
-- For queue packing, per-user/per-workload node allocation, GPU fragmentation, or
-  full-node scheduling analysis, run `python3 scripts/queue_plan.py`. This is a
-  read-only report and must never stop jobs. Install `requirements.txt` for
-  HTTP connection reuse and colored Rich tables; retain the built-in plain-text
-  fallback when Rich is unavailable.
+- For queue capacity, per-user/group usage, policy alerts, node fragmentation,
+  cached monitoring, or full-node scheduling simulation, run
+  `python3 scripts/monitor_cli.py`. It is a thin read-only client for the local
+  `clusterx-monitor` service and never connects to Clusterx directly.
 - Run Clusterx through `python3 scripts/clusterx_exec.py --cwd <project> --`
   so project configuration overrides the persistent global configuration and
   Clusterx stdout/stderr are redacted before they are returned.
+- Clusterx Monitor is additive and read-only against Clusterx. Its authenticated
+  administrator may modify only local policy files. Never route job creation,
+  listing, details, logs, statistics, or stopping through the monitor, and do
+  not require the monitor service for those lifecycle operations.
 - For command or JSON redaction, pipe the content to
   `python3 scripts/redact.py`; never pass secrets as script arguments.
 
@@ -65,70 +68,87 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 2. For SSP, require a non-empty job name of at most 32 Unicode characters.
    Shorten it before previewing; the service rejects longer names before job
    creation.
-3. Validate mounts. Accept the simple `TYPE:ID:PATH[:SUBDIR]` form or a JSON
+3. Enforce the training CPU policy from `assets/resource-policy.json` before
+   preview and submission. `cpu_per_gpu` is the inclusive per-task/per-node
+   CPU limit for GPU jobs: CPUs must be no greater than GPUs multiplied by
+   `cpu_per_gpu`. A 0-GPU task instead uses the inclusive
+   `zero_gpu_max_cpu_per_node` limit. With the shipped policy this permits
+   0 GPU / 14 CPU, 1 GPU / 14 CPU, and 8 GPU / 112 CPU. Never multiply the
+   per-node limit by `--num-nodes`. The wrapper hard-blocks violations before
+   invoking Clusterx.
+   When `--resource-policy` or `CLUSTERX_RESOURCE_POLICY` points to the
+   monitor-managed local resource policy, use that file instead of the built-in
+   template. This keeps Web policy edits and submission validation aligned
+   without making submission depend on the monitor HTTP service.
+4. Validate mounts. Accept the simple `TYPE:ID:PATH[:SUBDIR]` form or a JSON
    object. Keep JSON quoted as one shell argument.
    When a smoke manifest declares `target_source: clusterx_config`, resolve
    the selected protected config, derive generic runtime targets from every
    `PV_AFS` and `PV_AOSS` `mount_path`, and never ask the user to supply those
    paths. Do not display the generated target arguments. Require at least one
    configured mount of each type requested by the manifest.
-4. Invoke a runner by absolute path, such as
+5. Invoke a runner by absolute path, such as
    `bash /absolute/path/to/runner.sh`, and pass runtime settings through
    repeated `-e KEY=VALUE` options. Never use `bash -c`, `bash -lc`, or the
    corresponding command-string mode of another shell: Clusterx 2026.8.11
    joins command arguments without preserving shell quoting, and the wrapper
    rejects these unsafe forms before submission.
-5. Build the `clusterx run` command without executing it.
-6. Pipe previews built outside the wrapper through `scripts/redact.py`.
-7. Show the redacted command plus a concise resource and risk summary.
-8. If the user explicitly requested submission and the command matches that
+6. Build the `clusterx run` command without executing it.
+7. Pipe previews built outside the wrapper through `scripts/redact.py`.
+8. Show the redacted command plus a concise resource and risk summary.
+9. If the user explicitly requested submission and the command matches that
    request, execute it without another confirmation. If the user requested
    only a preview, stop after the preview.
-9. Do not add `--enable-privileged` unless the user explicitly requested it.
+10. Do not add `--enable-privileged` unless the user explicitly requested it.
    Ask before adding it later because that expands the authorized risk.
-10. Capture the job ID and report the initial status without exposing
+11. Capture the job ID and report the initial status without exposing
    credentials.
-11. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
+12. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
 
 ## Query and stop jobs
 
 - Execute `list`, `get-job`, `get-node`, `log`, and `stats` as read-only
   operations without confirmation unless another action is implied.
-- For requests such as "why can 2 x 8 GPU not schedule" or "which jobs could
-  be coordinated to release full nodes", run `queue_plan.py --nodes M`;
-  `--gpus-per-node` defaults to 8. Add `--cpus-per-node` and
-  `--memory-per-node-gib` only when the target workload specifies them. Treat
-  every suggestion as a coordination candidate, not authorization to stop
-  anything. Use `--strategy all|min-gpu|min-workloads|min-users`; default to
-  `min-gpu`; `min-jobs` remains a deprecated compatibility alias for
-  `min-workloads`. Use `--candidate-scope fragmented|full|all`; default to `fragmented`
-  for backward-compatible fragment cleanup. A `full` node is any occupied node
-  whose allocated GPUs equal or exceed its GPU capacity, including nodes shared
-  by multiple workloads. Queue packing reads the same node Pod workload
-  inventory as the SSP console, so training jobs, development instances
-  (`aid`), inference workloads, and unknown workload types are attributed and
-  may be coordination candidates. Node allocation remains the capacity source
-  of truth; unattributed resources are displayed but never claimed as releasable.
-  Use `--alternatives N` (default `1`, range `1` to `10`) for ranked plans per
-  strategy. Use `--search-seconds S` (default `10`) to bound only local solving;
-  exact search calibrates itself from measured state throughput and reserves
-  time for a heuristic fallback.
-  The default workload summaries include the last `--minutes` window's per-GPU
-  compute and memory utilization average plus the per-card range. Add
-  `--show-gpu-details` to expand a deduplicated per-card terminal table; JSON
-  always includes per-card telemetry. The opening overview groups attributed
-  workload counts and allocated GPU, CPU, and memory by user; unattributed node
-  resources remain separate. Utilization is observational and must never affect
-  capacity attribution, candidate ranking, or stopping decisions.
-  Add `--refresh-seconds S` for a fixed-rate read-only monitor. Refreshes are
-  serialized; scheduled ticks that occur while a complete query is still
-  running are skipped rather than overlapped. Interactive Rich terminals use
-  an alternate-screen live dashboard. Arrow keys, Page Up/Down, Home/End, and
-  the mouse wheel scroll the report; `q` or Ctrl-C exits. Other terminal input
-  is consumed without echo and terminal modes are restored before printing only
-  the last complete report. Non-TTY stdin/stdout or no-Rich output appends
-  labeled plain-text snapshots. In refresh JSON mode, stdout is NDJSON and
-  `--out` keeps the latest complete pretty-printed snapshot.
+- Use `monitor_cli.py overview|users|groups|nodes|workloads|alerts` for cached
+  monitoring views and `monitor_cli.py watch --count N --format jsonl` for a
+  bounded stream of complete snapshots. The service must already be running;
+  never fall back to an ad-hoc live collection when it is unavailable.
+- Policy output uses structured findings. Filter list views with
+  `--finding-category`, `--finding-code`, and `--tag` (comma-separated within
+  each option), or use `--violations-only`. A finding has a stable code,
+  category, status, tags, observed values, limits, and optional history window.
+- Monitor resource/group editing is an administrator-only service capability,
+  not a Clusterx CRUD operation. Never request or transmit the administrator
+  password through the Skill. The operator initializes it interactively with
+  `clusterx-monitor admin init`; the Web UI writes only validated local policy
+  files and cannot submit, stop, or mutate Clusterx workloads.
+- For requests such as "why can 2 x 8 GPU not schedule", run
+  `monitor_cli.py plan --nodes 2 --gpus-per-node 8`. Add per-node CPU and memory
+  only when the requested workload specifies them. Use repeated `--strategy`
+  values from `min-gpu|min-workloads|min-users`, plus
+  `--candidate-scope fragmented|full|all`, `--alternatives 1..10`, and workload,
+  user, group, or over-quota filters as requested. To restrict coordination
+  candidates by active structured violations, add repeated
+  `--violation-category`, `--violation-code`, or `--violation-tag`. Every result is based on an
+  identified cached snapshot and is a coordination candidate, never permission
+  to stop anything. Exact and heuristic results must be labeled accurately.
+- When plan CPU or memory is omitted, report the resolved target derived from
+  the planning profile pinned in that snapshot. Explain that node effective,
+  stranded, and blocked values are relative to this standard profile and are
+  not universal scheduling impossibility claims. Report attribution-excluded
+  nodes/workloads and never use them or unknown-owner resources as release
+  candidates.
+- GPU compute, memory, and power telemetry are observational. They may be shown
+  with coverage counts but must never affect capacity attribution or default
+  candidate ranking. Unattributed node resources remain visible and are never
+  claimed as releasable.
+- The low-activity rule evaluates only currently running GPU `trainingJob` and
+  `aid` workloads. With the shipped policy, a workload running for at least 60
+  minutes is a violation when its Prometheus sample-weighted 24-hour average
+  GPU compute utilization and capacity/time-weighted memory utilization are
+  both at or below 20%. Zero-GPU workloads are not applicable; short-running
+  workloads are warming up; a missing metric is unavailable. Missing history
+  must not be treated as a violation and does not block other monitor data.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
   pagination, filter, and ordering options when the result set is large. Treat
   Worker fields as runtime observations and do not infer missing nodes.

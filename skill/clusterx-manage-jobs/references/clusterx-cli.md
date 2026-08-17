@@ -1,64 +1,32 @@
-# Clusterx CLI reference
+# Clusterx CLI Reference
 
-Source snapshot: Feishu document revision 53, Clusterx 2026.8.11. Options noted
-below were cross-checked against the installed CLI's dynamic help.
-
-This is a sanitized operational reference. Prefer the installed CLI's dynamic
-help when it differs from this snapshot.
-
-## Installation and configuration
-
-Clusterx currently runs from a cluster development machine. The source
-document distributes a wheel using a signed URL; do not reuse or persist that
-URL. Obtain a current wheel or internal package source, preferably install it
-in an isolated environment, and verify:
+Source snapshot: Feishu document revision 53, Clusterx `2026.8.11`. This is a
+sanitized operational reference cross-checked against installed dynamic help.
+Always prefer the installed CLI when it differs from this snapshot.
 
 ```bash
 clusterx --version
-clusterx --help
+clusterx <command> --help
 ```
 
-The first invocation starts configuration. Show configuration with:
+## Installation and configuration
 
-```bash
-clusterx config --show
-```
+Clusterx runs from a Linux cluster development machine. The authoritative
+Feishu document may contain a temporary signed wheel URL; never copy, persist,
+or publish that URL. Maintainers use the repository-only installation helper,
+while installed Skill users obtain Clusterx through the current internal
+distribution channel.
 
-The default configuration path is:
+The first invocation initializes configuration. Inspect it with
+`clusterx config --show`. The native configuration path is
+`~/.config/clusterx.yaml`; required SSP fields include subscription, resource
+group, region, workspace, cluster, access-key ID and secret. Queue, image,
+RDMA, storage credentials, `tmpdir`, and mounts are conditional or optional.
+The selected file and symlink target must have mode `600`.
 
-```text
-~/.config/clusterx.yaml
-```
-
-Required configuration fields in the snapshot:
-
-| Field | Purpose |
-| --- | --- |
-| `cluster_type` | Platform cluster type; the snapshot uses SSP |
-| `subscription` | Subscription ID |
-| `resource_group` | Resource group |
-| `region` | Region |
-| `workspace` | Workspace |
-| `cluster` | Cluster |
-| `ak_id` | Account access-key ID |
-| `ak_secret` | Account secret |
-
-Conditional or optional fields:
-
-| Field | Purpose |
-| --- | --- |
-| `rdma_name` | RDMA network; confirm against the selected cluster |
-| `queue` | Preferred default target queue |
-| `partition` | Deprecated compatibility alias for `queue` |
-| `storage_ak_id` | Separate storage account access-key ID |
-| `storage_ak_secret` | Separate storage account secret |
-| `image` | Default container image |
-| `tmpdir` | Shared directory used for generated job command scripts |
-| `mount` | Default volume mount |
-
-The `tmpdir` must be mounted at the same path in both the development machine
-and the submitted job. Clusterx writes a temporary launch script there and the
-job starts by reading that script.
+The `tmpdir` must be mounted at the same absolute path on the development
+machine and submitted task because Clusterx writes its generated launch script
+there.
 
 ## Command map
 
@@ -73,490 +41,277 @@ clusterx stats
 clusterx stop
 ```
 
-Always inspect live help before constructing a command:
-
-```bash
-clusterx <command> --help
-```
+Run Clusterx through `scripts/clusterx_exec.py` so configuration precedence is
+preserved and stdout/stderr are redacted.
 
 ## `clusterx run`
 
-The positional argument is the command to run. Snapshot options include:
+The positional argument is the command to run. The verified option surface is:
 
 | Option | Meaning | Snapshot default |
 | --- | --- | --- |
-| `--job-name`, `-J` | Job name | `clusterx-root` |
+| `--job-name`, `-J` | SSP job name | `clusterx-root` |
 | `--num-nodes`, `-N` | Node count | `1` |
-| `--gpus-per-task` | GPUs per task | `0` |
-| `--cpus-per-task` | CPUs per task | `4` |
-| `--memory-per-task` | Memory in GiB | `10` |
-| `--include` | Comma-separated hostnames to include | unset |
-| `--exclude` | Comma-separated hostnames to exclude | unset |
+| `--gpus-per-task` | GPUs per task/node | `0` |
+| `--cpus-per-task` | CPUs per task/node | `4` |
+| `--memory-per-task` | Memory per task in GB | `10` |
+| `--include`, `--exclude` | Hostname placement filters | unset |
 | `--priority` | `1=NORMAL`, `2=HIGH`, `3=HIGHEST` | `1` |
 | `--retry` | Maximum retries | no retry |
-| `--no-env` | Do not export the current shell environment | `False` |
-| `--environment`, `-e` | SSP job-spec `KEY=VALUE`; repeat for multiple values | unset |
+| `--no-env` | Do not inherit the current environment | `False` |
+| `--environment`, `-e` | Repeatable SSP `KEY=VALUE` setting | unset |
 | `--queue`, `--partition`, `-q`, `-p` | Queue | config/default |
-| `--cluster-name`, `-C` | Override configured cluster | config |
+| `--cluster-name`, `-C` | Cluster override | config |
 | `--machine-type` | Machine specification | unset |
 | `--enable-privileged` | Host-root privileged mode | `False` |
 | `--sp-block` | A3 logical supernode chip count | unset |
-| `--image` | Container image URL | config/default |
-| `--mount`, `--empty-mount` | Repeatable volume mount specification | config/default |
-| `--shm-size-gib` | Shared memory in GiB | `64` |
-| `--storage-ak-id` | Storage access-key ID | config/default |
-| `--storage-ak-secret` | Storage access-key secret | config/default |
+| `--image` | Container image | config/default |
+| `--mount`, `--empty-mount` | Repeatable volume mount | config/default |
+| `--shm-size-gib` | Shared memory | `64` |
+| `--storage-ak-id`, `--storage-ak-secret` | Storage credentials | config/default |
 
-Example shape:
+Clusterx `2026.8.11` joins positional command tokens without shell quoting.
+Never submit `bash -c`, `bash -lc`, `sh -c`, or equivalent command-string forms.
+Invoke an absolute runner script and pass settings through repeated
+`-e KEY=VALUE` arguments.
 
-```bash
-clusterx run \
-  -J <job-name> \
-  -q <queue> \
-  --image <registry/image:tag> \
-  --mount '<mount-spec>' \
-  -e MAX_STEPS=3 \
-  bash /absolute/path/to/runner.sh
+SSP job names must contain 1–32 Unicode characters. Do not add privileged mode
+unless the user explicitly requested it. Validate and redact mount JSON before
+showing a preview.
+
+When the user explicitly requested submission and the preview matches that
+request, execute it directly. Do not ask for a redundant confirmation.
+
+### Training CPU policy
+
+`scripts/clusterx_exec.py` hard-validates the public policy before invoking
+`clusterx run`. For a GPU task, the inclusive per-task limit is:
+
+```text
+cpus_per_task <= gpus_per_task * cpu_per_gpu
 ```
 
-Do not copy example credentials, signed URLs, queue names, images, resource IDs,
-or endpoints from documentation into a real job.
+For a 0-GPU task it is:
 
-Clusterx 2026.8.11 converts the positional command tokens to a string with
-`" ".join(cmd)` before writing its shared launch script. It does not shell-quote
-individual arguments, so command-string forms such as `bash -c`, `bash -lc`,
-`sh -c`, and their absolute-path equivalents lose the command boundary and can
-fail before the runner starts. The Skill wrapper rejects these forms. Put
-compound setup in a reviewable runner script, invoke that script by absolute
-path, and pass environment settings with repeated `-e KEY=VALUE` options.
+```text
+cpus_per_task <= zero_gpu_max_cpu_per_node
+```
+
+The shipped policy sets both factors to 14, so 0 GPU / 14 CPU, 1 GPU / 14 CPU,
+and 8 GPU / 112 CPU are allowed. Node count never multiplies the per-task
+limit. The wrapper option `--resource-policy` overrides
+`CLUSTERX_RESOURCE_POLICY`, which overrides `assets/resource-policy.json`.
 
 ### A3 logical supernodes
 
-`--sp-block S` requests an A3 Ascend logical supernode. Use it only when the
-selected cluster and queue provide A3 resources. Let `N` be chips per node and
-`M` be the node count:
-
-- `S`, `N`, and `M` must be positive integers.
-- For one node, `S` must equal `N`.
-- For multiple nodes, `S` must be a multiple of `N` and divide `N × M`.
-
-Do not add `--sp-block` to ordinary GPU jobs or infer A3 availability from the
-option merely appearing in dynamic help.
+Use `--sp-block S` only when the selected cluster and queue provide A3
+resources. Let `N` be chips per node and `M` be node count: all values must be
+positive; for one node `S=N`; for multiple nodes `N` divides `S` and `S`
+divides `N*M`.
 
 ## SSP Prometheus statistics
-
-Clusterx 2026.8.11 provides queue- and job-level SSP metrics:
 
 ```bash
 clusterx stats --scope queue --metric all
 clusterx stats --scope job --job <exact-job-name> --metric all
 ```
 
-The supported scopes are `workspace`, `cluster`, `queue`, and `job`.
-`--minutes` selects the positive lookback window and defaults to `5`;
-`--step` defaults to `30` seconds and is reserved for range queries. Job scope
-requires `--job`. The metric set depends on scope; inspect `stats --help`
-before querying. Current metrics include CPU and memory utilization, GPU count,
-utilization, memory utilization, total/per-device power, memory bandwidth
-utilization, temperature, and `all`.
+Supported scopes are workspace, cluster, queue, and job. `--minutes` selects a
+positive lookback and defaults to 5. Depending on scope, metrics include CPU,
+memory, GPU count/utilization/memory, total and per-device power, bandwidth,
+and temperature. Inspect live `stats --help` before constructing a query.
 
-## Queue packing analysis
+## Monitoring service client
 
-Use the Skill's read-only queue analyzer when aggregate free GPUs exist but a
-full-node job cannot schedule:
+Queue monitoring and scheduling simulation are additive capabilities that are
+read-only against Clusterx. Authenticated administration writes only local
+policy files. The client never replaces Clusterx job lifecycle commands:
 
 ```bash
-python3 scripts/queue_plan.py --cwd <project> --nodes 2
+python3 scripts/monitor_cli.py status --format json
+python3 scripts/monitor_cli.py overview --format json
+python3 scripts/monitor_cli.py users --violations-only --format json
+python3 scripts/monitor_cli.py groups --format json
+python3 scripts/monitor_cli.py nodes --classification fragmented --format json
+python3 scripts/monitor_cli.py workloads --status pending --format json
+python3 scripts/monitor_cli.py alerts \
+  --finding-category utilization \
+  --finding-code utilization.low_gpu_activity \
+  --tag low-utilization --format json
 ```
 
-The command joins the queue node inventory with the same per-node Pod workload
-API used by the SSP console. It attributes training jobs, development instances
-(`aid`), inference workloads, users, workspaces, and requested resources. It
-reports occupied nodes plus independently ranked candidates for minimum
-coordinated GPUs, workloads, and users. It never calls a stop API. Pass
-`--cpus-per-node` and `--memory-per-node-gib` to include those requested
-resources; otherwise the conclusion is GPU-only. Default output is a terminal
-report; use `--json` for JSON stdout or `--out <path>` to save schema version 2.
-The default terminal report uses Rich colored tables when `requirements.txt`
-is installed and falls back to plain text otherwise.
-The Rich report is grouped into queue overview, search diagnostics, fragmented
-node occupancy, and per-strategy plan cards. Each plan keeps separate workload
-and placement tables; node, workload, type, CPU, memory, and GPU details are folded to the
-terminal width rather than truncated. Plain-text fallback carries the same
-search, workload, freed-node, and placement information.
-The opening overview also groups Pod-attributed workloads and allocated GPU,
-CPU, and memory by user. Per-user GPU compute and memory utilization is averaged
-over the user's reported cards and includes the observed range and telemetry
-coverage. Unattributed node resources remain separate and are never assigned to
-a user.
-Complete options:
-
-| Option | Meaning | Default / validation |
-| --- | --- | --- |
-| `--nodes` | Required schedulable node count | Required, positive integer |
-| `--gpus-per-node` | GPU requirement per target node | `8`, positive integer |
-| `--cpus-per-node` | Optional CPU requirement per target node | Unset, positive integer when supplied |
-| `--memory-per-node-gib` | Optional memory requirement per target node | Unset, positive integer when supplied |
-| `--queue`, `-q` | Queue override | Selected Clusterx config |
-| `--cluster-name` | Cluster override | Selected Clusterx config |
-| `--config` | Explicit protected Clusterx YAML | Config discovery when omitted |
-| `--cwd` | Config discovery starting directory | Current directory |
-| `--minutes` | Prometheus lookback window only | `5`, positive integer |
-| `--strategy` | `all`, `min-gpu`, `min-workloads`, `min-users`; `min-jobs` is a compatibility alias | `min-gpu` |
-| `--candidate-scope` | `fragmented`, `full`, or `all` occupied nodes | `fragmented` |
-| `--alternatives` | Maximum ranked plans per strategy, including rank 1 | `1`, integer from `1` through `10` |
-| `--search-seconds` | Local solver time budget | `10`, positive number |
-| `--show-gpu-details` | Expand a deduplicated per-GPU terminal table | Disabled; JSON always includes per-GPU data |
-| `--refresh-seconds` | Fixed interval for serialized full-query refreshes | Unset; positive number when supplied |
-| `--json` | Write schema-versioned JSON to stdout instead of terminal UI | Disabled |
-| `--out` | Also save the complete JSON report | Unset |
-
-`--candidate-scope` controls which occupied nodes may contribute workloads to a
-plan. It defaults to `fragmented`, preserving fragment-only analysis. Use
-`full` for GPU-saturated nodes or `all` to compare both populations in one
-optimization. A full node may be occupied by one workload or shared by multiple
-workloads. Workloads remain indivisible: selecting any placement charges the
-workload's total GPU allocation and evaluates every node released by it.
-
-`--strategy` defaults to `min-gpu`, and `--alternatives` defaults to `1` while
-accepting `1` through `10`. It returns that many ranked, distinct workload sets
-per selected strategy. Explicit `--strategy all` groups results independently
-under `min-gpu`, `min-workloads`, and `min-users` without cross-strategy deduplication,
-so `--strategy all --alternatives 3` can display up to nine plan cards.
-The same workload set may appear in more than one strategy group with a separate
-rank. Exact ranks use `Minimum` / `Alternative`;
-heuristic ranks use `Lowest found` / `Alternative found`.
-
-`--search-seconds` defaults to `10` and bounds local solving only. Exact search
-measures the first 1,000 states, estimates whether enumeration fits within 80%
-of the budget, and reserves 20% for heuristic fallback. JSON analysis reports
-the budget, elapsed time, estimated and examined states, and switch reason.
-
-`--refresh-seconds` enables a fixed-rate monitor while preserving complete
-snapshot collection and consistency checks. Queries never overlap: if a full
-collection and render crosses one or more scheduled ticks, those ticks are
-skipped and the next future deadline is used. Interactive Rich terminals
-automatically use an alternate-screen live dashboard: the previous complete
-snapshot remains visible while the next query runs, new results replace it in
-place, and the absolute scroll position is preserved. Use Up/Down or the mouse
-wheel for line scrolling, Page Up/Down for page scrolling, Home/End for bounds,
-and `q` or Ctrl-C to exit. A fixed footer shows collection state and visible
-line range. Unsupported keys, controls, and pasted text are consumed without
-echo or shell input leakage. Mouse tracking may require Shift for terminal text
-selection. On exit, input and mouse modes are restored and only the last
-complete report is printed in full. Full-screen mode requires Rich plus TTY
-stdin and stdout; other output appends labeled plain-text snapshots. With
-`--json`, each refresh is one compact NDJSON record. `--out` is overwritten with
-the latest complete, pretty-printed report after every successful refresh.
-
-Only workloads placed on nodes selected by `--candidate-scope` are candidates.
-Exact search is controlled by the measured time budget rather than a fixed
-state threshold. Larger searches use deterministic, multi-start job/node
-heuristics followed by redundant-job pruning. Exact plans
-are labeled `Minimum`; heuristic plans are labeled `Lowest found` and do not
-claim global optimality. Suggestions expose `strategy`, `rank`, `primary_cost`,
-and `delta_from_best`.
-
-Workload rows show the `--minutes` window's per-GPU compute and memory
-utilization as the card average plus the minimum-to-maximum range. The
-fragmented-node table aggregates only the workload's cards on that node; plan
-tables aggregate the complete workload. `--show-gpu-details` adds one
-deduplicated terminal table for all currently attributed GPUs, ordered by
-workload, node, and device index. Utilization is observational only and never
-changes capacity attribution, candidate ranking, or stop authorization.
-
-Schema version 2 has this top-level shape (values abbreviated):
-
-```json
-{
-  "schema_version": 2,
-  "generated_at": "<UTC ISO-8601>",
-  "queue": "<queue>",
-  "cluster": "<cluster>",
-  "target": {
-    "nodes": 4,
-    "gpus_per_node": 8,
-    "cpus_per_node": null,
-    "memory_per_node_gib": null
-  },
-  "summary": {
-    "total_nodes": 56,
-    "total_gpu": 448,
-    "allocated_gpu": 420,
-    "free_gpu": 28,
-    "currently_schedulable_nodes": 0,
-    "fragmented_nodes": 5,
-    "full_nodes": 50,
-    "running_workloads": 48,
-    "workload_counts": {"trainingJob": 40, "aid": 8}
-  },
-  "user_summaries": [{
-    "user": "<user>",
-    "workload_count": 4,
-    "workload_counts": {"aid": 3, "trainingJob": 1},
-    "allocated_gpu": 5,
-    "allocated_cpu": 64,
-    "allocated_memory_gib": 256.0,
-    "gpu_utilization": {
-      "allocated_gpu_count": 5,
-      "reported_gpu_count": 4,
-      "gpu_compute_util_avg_pct": 53.4,
-      "gpu_compute_util_min_pct": 41.2,
-      "gpu_compute_util_max_pct": 65.6,
-      "gpu_memory_util_avg_pct": 72.3,
-      "gpu_memory_util_min_pct": 70.1,
-      "gpu_memory_util_max_pct": 74.5
-    }
-  }],
-  "analysis": {
-    "needs_repacking": true,
-    "resource_scope": "gpu",
-    "optimality": "heuristic",
-    "candidate_scope": "all",
-    "search_budget_seconds": 10.0,
-    "search_elapsed_seconds": 0.84,
-    "estimated_states": 368830,
-    "states_examined": 10270,
-    "switch_reason": "estimated-time",
-    "requested_strategy": "min-gpu"
-  },
-  "gpu_utilization": {
-    "window_minutes": 5,
-    "allocated_gpu_count": 420,
-    "reported_gpu_count": 420,
-    "workloads": [{
-      "workload_id": "<workload-id>",
-      "workload_name": "<workload-name>",
-      "type": "aid",
-      "user": "<user>",
-      "workspace": "<workspace>",
-      "create_time": "<UTC ISO-8601 or null>",
-      "runtime_seconds": 184020,
-      "total_gpu": 2,
-      "allocated_gpu_count": 2,
-      "reported_gpu_count": 2,
-      "gpu_compute_util_avg_pct": 53.4,
-      "gpu_compute_util_min_pct": 41.2,
-      "gpu_compute_util_max_pct": 65.6,
-      "gpu_memory_util_avg_pct": 72.3,
-      "gpu_memory_util_min_pct": 70.1,
-      "gpu_memory_util_max_pct": 74.5,
-      "gpus": [{
-        "node": "<node>",
-        "pod": "<pod>",
-        "device_index": "0",
-        "gpu_uuid": "<GPU UUID>",
-        "gpu_compute_util_pct": 41.2,
-        "gpu_memory_util_pct": 70.1
-      }]
-    }]
-  },
-  "fragmented_nodes": [{
-    "node": "<node>",
-    "allocated_gpu": 7,
-    "total_gpu": 8,
-    "free_gpu": 1,
-    "workloads": [{
-      "workload_id": "<workload-id>",
-      "workload_name": "<workload-name>",
-      "type": "aid",
-      "actionable": true,
-      "user": "<user>",
-      "workspace": "<workspace>",
-      "create_time": "<UTC ISO-8601 or null>",
-      "runtime_seconds": 184020,
-      "gpu_utilization": {
-        "allocated_gpu_count": 1,
-        "reported_gpu_count": 1,
-        "gpu_compute_util_avg_pct": 41.2,
-        "gpu_compute_util_min_pct": 41.2,
-        "gpu_compute_util_max_pct": 41.2,
-        "gpu_memory_util_avg_pct": 70.1,
-        "gpu_memory_util_min_pct": 70.1,
-        "gpu_memory_util_max_pct": 70.1
-      },
-      "gpu": 1,
-      "cpu": 8,
-      "memory_gib": 32.0
-    }],
-    "unattributed": {"gpu": 0, "cpu": 0, "memory_gib": 0},
-    "attribution_excess": {"gpu": 0, "cpu": 0, "memory_gib": 0},
-    "metrics": {"gpu-util": 53.4}
-  }],
-  "suggestions": [{
-    "strategy": "min-gpu",
-    "rank": 1,
-    "primary_cost": 32,
-    "delta_from_best": 0,
-    "optimality": "heuristic",
-    "target_nodes": ["<node>"],
-    "freed_nodes": ["<node>"],
-    "workloads": ["<workload-id>"],
-    "gpus": 32,
-    "workload_count": 1,
-    "users": 1,
-    "workload_details": [{
-      "workload_id": "<workload-id>",
-      "workload_name": "<workload-name>",
-      "type": "trainingJob",
-      "actionable": true,
-      "user": "<user>",
-      "workspace": "<workspace>",
-      "create_time": "<UTC ISO-8601 or null>",
-      "runtime_seconds": 184020,
-      "gpu_utilization": {
-        "allocated_gpu_count": 32,
-        "reported_gpu_count": 32,
-        "gpu_compute_util_avg_pct": 53.4,
-        "gpu_compute_util_min_pct": 41.2,
-        "gpu_compute_util_max_pct": 65.6,
-        "gpu_memory_util_avg_pct": 72.3,
-        "gpu_memory_util_min_pct": 70.1,
-        "gpu_memory_util_max_pct": 74.5
-      },
-      "total_gpu": 32,
-      "placements": [{
-        "node": "<node>",
-        "gpu": 8,
-        "cpu": 64,
-        "memory_gib": 800.0
-      }]
-    }]
-  }],
-  "warnings": []
-}
-```
-
-`switch_reason` is `completed` after full exact enumeration,
-`estimated-time` when measured throughput predicts that exact enumeration will
-exceed 80% of the budget, `exact-deadline` when exact enumeration reaches that
-deadline, `not-needed` when enough nodes are already schedulable, or
-`no-eligible-candidates` when the selected scope contains no candidate nodes.
-Missing Pod mappings, truncated node inventory, or a changing node-allocation
-snapshot cause a safe failure rather than a partial suggestion. Node allocation
-is the capacity source of truth. Positive allocation-to-Pod differences are
-reported as unattributed and never claimed as releasable. If Pod attribution
-exceeds node allocation, the affected node is excluded for that resource and a
-warning is emitted.
-
-The terminal workload summaries show `Running` as a compact reference duration
-(`25m`, `3h 07m`, or `4d 03h`). It is calculated once per report from the
-earliest valid Pod `create_time` for the workload to top-level `generated_at`;
-the JSON form exposes both `create_time` and integer `runtime_seconds`. Missing,
-invalid, or future timestamps produce JSON `null` values and `-` in terminal
-output. This is observational metadata only and does not affect packing results.
-
-Per-GPU utilization is fetched in one additional Prometheus request containing
-both compute and memory metrics. Series are accepted only when workload UID,
-Pod, and Hostname match the current allocation snapshot. Missing or non-finite
-values produce JSON `null` and terminal `-`; stale series are ignored, and an
-over-complete ambiguous Pod mapping is omitted with a warning. The top-level
-coverage counts refer to Pod-attributed GPUs, so they may be lower than node
-allocation when the report already identifies unattributed resources.
-
-Configuration discovery starts from the current directory when `--cwd` is
-omitted. Exit status `0` means the report completed (including "no suggestion"
-or "no pause needed"), `1` means live analysis failed or the snapshot was not
-trustworthy, and `2` means arguments or protected configuration are invalid.
-
-## Storage mounts
-
-Simple file-storage form:
-
-```text
-TYPE:ID:MOUNT_PATH[:SUBDIR]
-```
-
-Example shape:
-
-```text
-PV_AFS:<volume-id>:/data
-```
-
-Multiple mounts are comma-separated in one `--mount` value.
-
-Complex object-storage mounts can be passed as one-line JSON. Common fields:
-
-```json
-{
-  "type": "PV_AOSS",
-  "name": "<volume-name>",
-  "mount_path": "/oss/data",
-  "endpoint": "<internal-endpoint>",
-  "subdir": "/",
-  "metadata": {
-    "items": [
-      {"key": "access_key", "value": "<secret>"},
-      {"key": "secret_key", "value": "<secret>"}
-    ]
-  }
-}
-```
-
-Validate JSON before submitting. Keep the JSON inside single quotes so the
-shell passes it as one argument. Never print its secret values in a preview.
-When possible, prefer protected configuration fields over inline credentials.
-
-## Submission checks
-
-Before `run`, verify:
-
-- The job and development machine mount the same storage needed for code,
-  datasets, outputs, and `tmpdir`.
-- The target queue, cluster, machine type, RDMA name, and image are current.
-- CPU, memory, GPU, node count, retry, priority, and privileged mode match the
-  user's request.
-- The job invokes an absolute runner script and does not use a shell
-  command-string mode such as `bash -c` or `bash -lc`.
-- The preview is redacted and the user explicitly requested submission. Do not
-  ask for a redundant confirmation when the command matches that request.
-
-Expected result includes a job schema/status such as `Queuing`. Record the job
-ID for later `get-job`, `log`, `stats`, or `stop` operations.
-
-## Job details and Workers
-
-For SSP runtime Worker discovery:
+Scheduling simulation uses an identified cached snapshot:
 
 ```bash
-clusterx get-job <job-id> --workers
+python3 scripts/monitor_cli.py plan \
+  --nodes 2 --gpus-per-node 8 \
+  --strategy min-gpu --strategy min-workloads --strategy min-users \
+  --candidate-scope all --alternatives 3 --search-seconds 10 \
+  --violation-category utilization \
+  --violation-code utilization.low_gpu_activity \
+  --violation-tag low-utilization \
+  --format json
 ```
 
-Live help provides `--page-size` (1-100), `--page-token`, `--skip`,
-`--request-id`, `--filter`, and `--order-by`. Worker filters support `name`,
-`phase`, `pod_ip`, and `host_ip`; ordering supports `name` or `phase` with an
-optional `asc`/`desc`. Keep pagination tokens and infrastructure addresses out
-of reports unless the user needs them.
+Candidate filters include repeated `--type`, `--group`, `--user`, `--workload`,
+`--exclude-workload`, `--exclude-user`, `--violation-category`,
+`--violation-code`, `--violation-tag`, and `--over-quota-only`. List views use
+comma-separated `--finding-category`, `--finding-code`, and `--tag` values.
+`--violations-only` and `--fail-on violation` read structured findings rather
+than parsing display messages. Suggestions are
+coordination candidates only. The monitor and CLI contain no stop operation.
 
-## Stopping jobs
+When CPU or memory is omitted, the service resolves it from the planning
+profile stored in that exact snapshot (by default 14 CPU and 240 GiB per GPU).
+Explicit CPU/memory overrides the profile. The response exposes both requested
+and resolved targets plus the defaults applied. This planning profile is not a
+minimum submission rule: training CPU/memory ratios remain inclusive maxima.
+Node `effective_free_gpu`, `stranded_gpu`, and `cpu-memory-blocked` are likewise
+relative to the standard profile, so a smaller explicit request may still fit.
 
-Clusterx 2026.8.11 can stop one job by ID or select multiple jobs using regex,
-group, user, partition, and status filters. Batch stopping is destructive: use
-filters only when the user explicitly requests that exact batch scope, list and
-show the resolved matches first, and do not broaden an exact-job request into a
-filter. Use the CLI's confirmation option as required by live help.
+Nodes whose Pod-attributed resources exceed their reported allocation remain
+visible for monitoring but are excluded from planning, together with every
+workload placed on them. Plan results report exclusion counts and reasons.
+Unknown-owner/unattributed resources are never release candidates.
 
-## SSP log limitation
+For bounded monitoring use:
 
-With Clusterx 2026.8.11, `clusterx log <job-id>` fetches
-`trainingJobs/<job-id>/pods` before reading pod logs. This endpoint may return
-HTTP 404 both while an SSP job is `Running` and after `get-job` reports
-`Succeeded`, even when the workload flushes stdout. Keeping the task alive does
-not reliably avoid the failure.
+```bash
+python3 scripts/monitor_cli.py watch --view alerts --count 10 --format jsonl
+```
 
-Report job status and log retrieval as separate results. Empty `nodes` and
-`nodes_ip` fields and incomplete SSP support in `get-node` may prevent a
-node-based fallback. Never invent missing logs or node details. For workloads
-that require observable progress, write a sanitized status or result file to
-approved shared storage and clearly identify it as a fallback rather than
-stdout/stderr.
+The client defaults to `http://127.0.0.1:8765`. It never falls back to a live
+Clusterx query. Exit status `0` means success, `2` invalid input, `3` service unavailable,
+`4` a `--fail-on` condition, and `130` interruption.
+HTTP `422` plan validation failures map to exit `2`. `--fail-on stale` evaluates
+the original snapshot freshness even for filtered list views; `--fail-on` is
+only offered on commands where stale or violation has a defined meaning.
 
-## SSP job-name limit
+GPU compute, memory, and power telemetry are observational and include coverage
+counts. They never change capacity attribution or default plan ranking.
+Unattributed resources remain visible but are never claimed as releasable.
 
-SSP accepts job names from 1 through 32 Unicode characters. Validate this
-before showing the submission preview. A longer name is rejected before job
-creation with `invalid TrainingJob.Name`; shorten the name and rebuild the
-preview.
+The historical low-activity rule is independent of pending pressure. By
+default, Prometheus is queried every 5 minutes for the preceding 24 hours. A
+currently running GPU `trainingJob` or `aid` is a violation only after 60
+minutes when sample-weighted compute utilization and capacity/time-weighted
+memory utilization are both `<= 20%`. The workload UID joins samples across
+Pod restarts or node movement. Zero-GPU workloads are `not-applicable`, newer
+workloads are `warming-up`, and a missing compute or memory metric is
+`unavailable`. A historical query failure leaves the normal snapshot and
+5-minute telemetry available and emits a telemetry warning. Completed jobs are
+not retained or evaluated, and no history database is used.
+
+### Monitor administrator configuration
+
+Initialize the single administrator without placing a password in argv or a
+shell environment variable:
+
+```bash
+clusterx-monitor admin init \
+  --auth-config config/admin.local.yaml \
+  --username clusterx-admin
+```
+
+The command prompts twice with hidden input and stores only an Argon2id hash in
+a mode-`600`, Git-ignored file. `--force` explicitly rotates an existing
+credential and invalidates active sessions when the service observes the new
+hash. Serve with local writable policy paths and the protected auth file:
+
+```bash
+clusterx-monitor serve \
+  --clusterx-config <protected-clusterx-config> \
+  --policy-config config/resource-policy.local.json \
+  --group-config config/groups.local.yaml \
+  --auth-config config/admin.local.yaml \
+  --host 127.0.0.1 --port 8765
+```
+
+The administrator UI saves each resource/group file independently after schema
+validation and revision matching. Writes use a same-directory temporary file,
+`fsync`, atomic replacement, mode `600`, a protected `.bak`, and a redacted
+audit record. Missing policy files put the service in `setup-required`; saving
+both valid configurations starts collection without restarting.
+If a file is malformed, an authenticated administrator receives its raw text,
+parse error, and disk-byte revision so it can be repaired without restoring a
+backup. A hot-reload error keeps the complete last-known-good pair. Audit-log
+failure is reported as a persistent degradation after the config commit; it
+does not falsely report the already-committed configuration as unsaved.
+
+Authentication and authorization are enforced by the FastAPI service, never by
+React. Sessions are random, server-side, memory-only, and carried in an
+HttpOnly/SameSite=Strict cookie. Mutations additionally require exact-origin
+JSON requests and a per-session CSRF token. Public policy responses never expose
+group members. Loopback remains the default. A non-loopback bind is accepted
+only with one or more explicit `--allowed-host` values; wildcard hosts are
+rejected. This enables an existing controlled NAT, but the built-in server does
+not terminate TLS and emits a cleartext-credential warning. Prefer a reviewed
+HTTPS reverse proxy for persistent shared access.
+
+To share the Web-managed training CPU rules with job submission without making
+CRUD depend on monitor availability, set:
+
+```bash
+export CLUSTERX_RESOURCE_POLICY="$PWD/config/resource-policy.local.json"
+```
+
+## Query and stop
+
+Use `list`, `get-job`, `get-node`, `log`, and `stats` as read-only operations.
+For Worker discovery use `get-job <job-id> --workers` and inspect live `--page-size`
+and pagination help. Use `--scope queue` for queue metrics and
+`--scope job --job <exact-job-name>` for workload metrics. Queue and job stats
+include CPU, memory, GPU utilization, GPU memory,
+power, bandwidth, and temperature metrics depending on scope.
+
+Before `stop`, resolve and display the exact job ID/name. Batch filters are only
+allowed when the user explicitly requested that exact batch scope. A Pod log
+endpoint HTTP 404 is a log-discovery failure, not proof the task failed; check
+job status separately. It may occur while a task is `Running` or after it is
+`Succeeded`. SSP may return empty `nodes` and `nodes_ip`; do not invent
+placement or log information when these fields are absent.
+
+### Job details and Workers
+
+Use `clusterx get-job <job-id> --workers` for SSP Worker discovery. Live help
+provides page size/token, skip, request ID, filter, and ordering controls.
+Worker filters cover name, phase, Pod IP, and host IP; do not expose pagination
+tokens or infrastructure addresses unless required by the request.
+
+### Stopping jobs
+
+Clusterx can stop an exact job or select jobs with regex, group, user,
+partition, and status filters. Batch stopping is destructive: use filters only
+for the exact batch scope requested by the user and list resolved matches
+first. Never broaden an exact-job request into a filter.
+
+### SSP log limitation
+
+`clusterx log <job-id>` may receive HTTP 404 while discovering Pods when a job
+is Running or already Succeeded. Treat this as log retrieval failure, not proof
+that the job failed. Check `get-job` separately. Empty `nodes` and `nodes_ip`
+and incomplete `get-node` support are not evidence for invented placement.
+
+### SSP job-name limit
+
+SSP accepts 1–32 Unicode characters. Validate and shorten the name before
+preview; longer names fail before creation with `invalid TrainingJob.Name`.
+
+## Storage and safety
+
+Simple file storage uses `TYPE:ID:MOUNT_PATH[:SUBDIR]`; multiple mounts may be
+comma-separated. Complex PV_AOSS mounts use one quoted JSON object containing
+type, name, endpoint, mount path, subdirectory, and metadata items. Validate
+JSON before submission and keep it in one shell argument.
+
+Never display access keys, secret keys, signed URL credentials, tokens, private
+keys, or mount secrets. Prefer protected configuration over inline credentials.
+Do not infer real quota from `/oss` FUSE capacity.
+
+Before `run`, verify the queue, cluster, machine type, RDMA, image, node/GPU/CPU/
+memory resources, retry, priority, mounts, shared `tmpdir`, runner path, and
+privileged mode. Redact the preview and capture the returned job ID for later
+`get-job`, `log`, `stats`, or `stop` operations.
 
 ## Snapshot change history
 
@@ -566,6 +321,6 @@ preview.
 | 2026.6.9 | Improved cluster-ID configuration and arguments |
 | 2026.6.11 | Distinguished D/PT clusters and endpoints |
 | 2026.6.12 | Added SSP GPU utilization, memory, power, and temperature stats |
-| 2026.7.1 | Added JSON volume mounts for PV_AOSS and other complex volumes |
+| 2026.7.1 | Added JSON mounts for PV_AOSS and complex volumes |
 | 2026.7.28 | Added queue/job SSP metrics and A3 `--sp-block` scheduling |
-| 2026.8.11 | Added SSP Worker listing/filtering, repeatable mounts, explicit environment semantics, and batch stop filters |
+| 2026.8.11 | Added Worker filters, repeatable mounts, explicit environments, and batch stop filters |

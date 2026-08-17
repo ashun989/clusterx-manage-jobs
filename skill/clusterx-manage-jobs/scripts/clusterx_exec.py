@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal, InvalidOperation
+import json
 import os
 from pathlib import Path
 import shutil
@@ -15,6 +17,70 @@ from redact import redact
 
 
 SHELL_INTERPRETERS = {"bash", "dash", "ksh", "sh", "zsh"}
+DEFAULT_RESOURCE_POLICY = Path(__file__).resolve().parents[1] / "assets" / "resource-policy.json"
+
+
+def _resource_option(clusterx_args: list[str], name: str, default: str) -> str:
+    value = default
+    index = 1
+    while index < len(clusterx_args):
+        argument = clusterx_args[index]
+        if argument == "--":
+            break
+        if argument == name:
+            if index + 1 >= len(clusterx_args):
+                raise ValueError(f"{name} requires a value")
+            value = clusterx_args[index + 1]
+            index += 2
+            continue
+        prefix = name + "="
+        if argument.startswith(prefix):
+            value = argument[len(prefix):]
+        index += 1
+    return value
+
+
+def _load_training_policy(path: Path) -> tuple[Decimal, Decimal]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        training = payload["training"]
+        cpu_per_gpu = Decimal(str(training["cpu_per_gpu"]))
+        zero_gpu_max_cpu = Decimal(str(training["zero_gpu_max_cpu_per_node"]))
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, InvalidOperation) as error:
+        raise ValueError(f"cannot load resource policy: {error}") from error
+    if not cpu_per_gpu.is_finite() or cpu_per_gpu <= 0:
+        raise ValueError("resource policy cpu_per_gpu must be positive")
+    if not zero_gpu_max_cpu.is_finite() or zero_gpu_max_cpu <= 0:
+        raise ValueError("resource policy zero_gpu_max_cpu_per_node must be positive")
+    return cpu_per_gpu, zero_gpu_max_cpu
+
+
+def _validate_training_cpu(clusterx_args: list[str], policy_path: Path) -> str | None:
+    if not clusterx_args or clusterx_args[0] != "run":
+        return None
+    try:
+        gpu_text = _resource_option(clusterx_args, "--gpus-per-task", "0")
+        cpu_text = _resource_option(clusterx_args, "--cpus-per-task", "4")
+        gpus = Decimal(gpu_text)
+        cpus = Decimal(cpu_text)
+    except (ValueError, InvalidOperation) as error:
+        return f"invalid Clusterx training resources: {error}"
+    if not gpus.is_finite() or gpus < 0 or gpus != gpus.to_integral_value():
+        return "invalid Clusterx training resources: --gpus-per-task must be a non-negative integer"
+    if not cpus.is_finite() or cpus < 0:
+        return "invalid Clusterx training resources: --cpus-per-task must be non-negative"
+    try:
+        cpu_per_gpu, zero_gpu_max_cpu = _load_training_policy(policy_path)
+    except ValueError as error:
+        return str(error)
+    maximum = zero_gpu_max_cpu if gpus == 0 else gpus * cpu_per_gpu
+    if cpus > maximum:
+        rule = "zero_gpu_max_cpu_per_node" if gpus == 0 else "gpus_per_task × cpu_per_gpu"
+        return (
+            f"refusing Clusterx run: {cpus:g} CPU exceeds the per-task limit "
+            f"{maximum:g} for {gpus:g} GPU ({rule})"
+        )
+    return None
 
 
 def _unsafe_shell_command(clusterx_args: list[str]) -> tuple[str, str] | None:
@@ -39,6 +105,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", help="Explicit Clusterx YAML path")
     parser.add_argument("--cwd", help="Project directory used for local discovery")
+    parser.add_argument(
+        "--resource-policy",
+        default=os.environ.get("CLUSTERX_RESOURCE_POLICY", str(DEFAULT_RESOURCE_POLICY)),
+        help="Public resource policy used for Clusterx run validation",
+    )
     parser.add_argument("clusterx_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -60,6 +131,11 @@ def main() -> int:
             "with repeated '-e KEY=VALUE' options",
             file=sys.stderr,
         )
+        return 2
+
+    resource_error = _validate_training_cpu(clusterx_args, Path(args.resource_policy))
+    if resource_error is not None:
+        print(resource_error, file=sys.stderr)
         return 2
 
     binary = shutil.which("clusterx")

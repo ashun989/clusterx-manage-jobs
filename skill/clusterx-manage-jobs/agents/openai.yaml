@@ -1,4 +1,4 @@
 interface:
   display_name: "Clusterx 训练任务管理"
-  short_description: "安全管理 Clusterx 任务并诊断队列负载与 GPU 资源碎片"
-  default_prompt: "使用 $clusterx-manage-jobs 只读检查 Clusterx 队列负载和完整节点调度；按最少 GPU、最少作业、最少用户给出候选和备选，不要停止作业。"
+  short_description: "安全管理 Clusterx 任务，并提供缓存队列监控与调度模拟"
+  default_prompt: "使用 $clusterx-manage-jobs 完成 Clusterx 任务提交、查询、日志、统计或准确目标停止；队列负载、分组 quota、节点碎片和调度方案使用新增的本机只读监控服务。"

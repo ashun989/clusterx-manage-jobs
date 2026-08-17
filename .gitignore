@@ -27,3 +27,12 @@ diff.patch
 report.json
 smoke-results/
 .vscode
+web/node_modules/
+web/coverage/
+*.tsbuildinfo
+src/clusterx_monitor/static/
+config/groups.local.yaml
+config/resource-policy.local.json
+config/admin.local.yaml
+config/admin-audit.local.jsonl
+config/*.bak

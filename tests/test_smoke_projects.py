@@ -66,7 +66,6 @@ class SmokeProjectTests(unittest.TestCase):
 
     def test_smoke_projects_contain_no_private_storage_identifiers(self):
         private_markers = (
-            "zengquansheng",
             "omnilab",
             "xyz2",
             "/data/",
@@ -177,13 +176,10 @@ class SmokeProjectTests(unittest.TestCase):
         self.assertNotIn("Ask for explicit confirmation", skill_text)
         self.assertNotIn("user approval is required", skill_text)
 
-    def test_queue_plan_documentation_is_complete_and_version_matches(self):
+    def test_monitor_documentation_is_complete_and_version_matches(self):
         skill_root = ROOT / "skill" / "clusterx-manage-jobs"
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-        configuration = (
-            skill_root / "references" / "configuration.md"
-        ).read_text(encoding="utf-8")
         cli_reference = (
             skill_root / "references" / "clusterx-cli.md"
         ).read_text(encoding="utf-8")
@@ -191,38 +187,30 @@ class SmokeProjectTests(unittest.TestCase):
         for marker in (
             "requirements.txt",
             "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs",
-            "--strategy all",
             "--candidate-scope all",
             "--alternatives 3",
-            "--search-seconds 10",
-            "使用 $clusterx-manage-jobs",
+            "monitor_cli.py",
+            "clusterx-monitor serve",
+            "clusterx-monitor admin init",
+            "--auth-config config/admin.local.yaml",
+            "setup-required",
+            "Argon2id",
         ):
             self.assertIn(marker, readme)
-        self.assertIn("--cwd` 可省略", configuration)
         for marker in (
             "Exit status `0`",
-            "`1` means live analysis failed",
-            "`2` means arguments",
-            "capacity source of truth",
-            "never claimed as releasable",
-            "Complete options:",
-            "`--strategy` defaults to `min-gpu`",
-            "`--refresh-seconds` enables a fixed-rate monitor",
-            "NDJSON",
-            '"schema_version": 2',
-            "`estimated-time`",
-            "`exact-deadline`",
-            "cross-strategy deduplication",
+            "service unavailable",
+            "cached snapshot",
             "min-workloads",
-            "unattributed",
-            "--show-gpu-details",
-            '"gpu_utilization"',
-            "reported_gpu_count",
+            "power telemetry",
+            "never claimed as releasable",
+            "utilization.low_gpu_activity",
+            "--violation-category",
+            "warming-up",
         ):
             self.assertIn(marker, cli_reference)
-        self.assertNotIn("plus deduplicated candidates", cli_reference)
-        self.assertNotIn("the report deduplicates", cli_reference)
-        self.assertNotIn("最少任务", readme)
+        self.assertFalse((skill_root / "scripts" / "queue_plan.py").exists())
+        self.assertTrue((skill_root / "scripts" / "monitor_cli.py").exists())
 
 
 if __name__ == "__main__":

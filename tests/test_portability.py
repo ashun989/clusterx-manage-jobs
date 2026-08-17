@@ -4,10 +4,13 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tarfile
 import tempfile
 import unittest
 import zipfile
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +20,61 @@ INSTALLER = ROOT / "scripts/maintenance/install_clusterx.py"
 
 
 class PortabilityTests(unittest.TestCase):
+    def test_private_groups_are_ignored_and_absent_from_tracked_files(self):
+        private_groups = ROOT / "config/groups.local.yaml"
+        ignored = subprocess.run(
+            ["git", "check-ignore", "--quiet", str(private_groups)],
+            cwd=ROOT,
+        )
+        self.assertEqual(ignored.returncode, 0)
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True,
+        ).stdout.decode().split("\0")
+        self.assertNotIn("config/groups.local.yaml", tracked)
+        if private_groups.is_file():
+            self.assertEqual(stat.S_IMODE(private_groups.stat().st_mode), 0o600)
+            payload = yaml.safe_load(private_groups.read_text(encoding="utf-8"))
+            markers = {
+                name for name in payload["groups"] if name != "default"
+            } | {
+                member
+                for group in payload["groups"].values()
+                for member in group.get("members", [])
+            }
+            for relative in tracked:
+                if not relative:
+                    continue
+                path = ROOT / relative
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    continue
+                self.assertFalse(any(marker in text for marker in markers), relative)
+
+        resource_policy = json.loads(
+            (SKILL / "assets/resource-policy.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("groups", resource_policy)
+
+        for local_name in (
+            "config/resource-policy.local.json",
+            "config/admin.local.yaml",
+            "config/admin-audit.local.jsonl",
+        ):
+            ignored = subprocess.run(
+                ["git", "check-ignore", "--quiet", local_name], cwd=ROOT,
+            )
+            self.assertEqual(ignored.returncode, 0, local_name)
+            self.assertNotIn(local_name, tracked)
+        local_resource = ROOT / "config/resource-policy.local.json"
+        if local_resource.is_file():
+            self.assertEqual(stat.S_IMODE(local_resource.stat().st_mode), 0o600)
+        local_auth = ROOT / "config/admin.local.yaml"
+        if local_auth.is_file():
+            self.assertEqual(stat.S_IMODE(local_auth.stat().st_mode), 0o600)
+            auth_text = local_auth.read_text(encoding="utf-8")
+            self.assertIn("$argon2id$", auth_text)
+
     def test_runtime_skill_has_no_developer_only_files(self):
         relative_files = {
             path.relative_to(SKILL).as_posix()
@@ -26,6 +84,26 @@ class PortabilityTests(unittest.TestCase):
         self.assertNotIn("references/sources.json", relative_files)
         self.assertNotIn("scripts/check_updates.py", relative_files)
         self.assertNotIn("scripts/install_clusterx.py", relative_files)
+
+    def test_repository_retains_feishu_maintenance_outside_skill(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        reference = (SKILL / "references/clusterx-cli.md").read_text(encoding="utf-8")
+        for relative in (
+            "scripts/maintenance/check_updates.py",
+            "scripts/maintenance/install_clusterx.py",
+            "scripts/maintenance/sources.json",
+        ):
+            self.assertTrue((ROOT / relative).is_file(), relative)
+            self.assertIn(Path(relative).name, readme)
+        for marker in (
+            "Installation and configuration",
+            "Training CPU policy",
+            "Monitoring service client",
+            "Job details and Workers",
+            "Stopping jobs",
+            "Snapshot change history",
+        ):
+            self.assertIn(marker, reference)
 
     def test_config_template_is_secret_free_and_complete(self):
         template = (
@@ -52,7 +130,7 @@ class PortabilityTests(unittest.TestCase):
             self.assertIn(field, template)
         self.assertNotIn("/data/", template)
         self.assertNotIn("/oss/", template)
-        self.assertNotIn("zengquansheng", template)
+        self.assertNotIn("members:", template)
         self.assertEqual(template.count("type: PV_AFS"), 2)
         self.assertEqual(template.count("type: PV_AOSS"), 2)
         self.assertEqual(template.count("<"), template.count(">"))
@@ -89,6 +167,13 @@ class PortabilityTests(unittest.TestCase):
                 "clusterx-manage-jobs/assets/clusterx.example.yaml",
                 names,
             )
+            self.assertIn(
+                "clusterx-manage-jobs/assets/resource-policy.json",
+                names,
+            )
+            self.assertFalse(any(name.endswith("groups.local.yaml") for name in names))
+            self.assertFalse(any(name.endswith("admin.local.yaml") for name in names))
+            self.assertFalse(any(name.endswith("resource-policy.local.json") for name in names))
             self.assertFalse(
                 any(
                     name.startswith(("tests/", "smoke-projects/"))
