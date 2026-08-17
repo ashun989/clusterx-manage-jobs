@@ -1,0 +1,22 @@
+{
+  "name": "clusterx-development-autofill",
+  "private": true,
+  "version": "0.1.2",
+  "type": "module",
+  "scripts": {
+    "build": "npm run typecheck && node build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.1",
+    "@types/js-yaml": "^4.0.9",
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

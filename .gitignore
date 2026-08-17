@@ -29,6 +29,8 @@ smoke-results/
 .vscode
 web/node_modules/
 web/coverage/
+chrome-extension/node_modules/
+chrome-extension/coverage/
 *.tsbuildinfo
 src/clusterx_monitor/static/
 config/groups.local.yaml
