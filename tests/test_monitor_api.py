@@ -203,10 +203,15 @@ class MonitorApiTests(unittest.TestCase):
         static = Path(self.temp.name) / "static"
         static.mkdir()
         (static / "index.html").write_text("<html>monitor</html>", encoding="utf-8")
+        (static / "clusterx-icon.svg").write_text("<svg>monitor icon</svg>", encoding="utf-8")
         app = create_app(self.runtime, static_dir=static)
         client = TestClient(app)
         self.assertIn("monitor", client.get("/").text)
         self.assertIn("monitor", client.get("/dashboard").text)
+        icon = client.get("/clusterx-icon.svg")
+        self.assertEqual(icon.status_code, 200)
+        self.assertEqual(icon.headers["content-type"], "image/svg+xml")
+        self.assertEqual(icon.text, "<svg>monitor icon</svg>")
         self.assertEqual(client.get("/api/v1/missing").status_code, 404)
 
     def test_spa_and_assets_cannot_escape_the_static_root(self):
@@ -219,6 +224,7 @@ class MonitorApiTests(unittest.TestCase):
         secret = root / "private-secret.txt"
         secret.write_text("DO-NOT-EXPOSE", encoding="utf-8")
         (assets / "escape.txt").symlink_to(secret)
+        (static / "clusterx-icon.svg").symlink_to(secret)
         app = create_app(self.runtime, static_dir=static)
         client = TestClient(app)
         self.assertEqual(client.get("/assets/app.js").text, "safe asset")
@@ -236,6 +242,9 @@ class MonitorApiTests(unittest.TestCase):
         self.assertEqual(fallback.status_code, 200)
         self.assertIn("monitor-shell", fallback.text)
         self.assertNotIn("DO-NOT-EXPOSE", fallback.text)
+        icon = client.get("/clusterx-icon.svg")
+        self.assertEqual(icon.status_code, 404)
+        self.assertNotIn("DO-NOT-EXPOSE", icon.text)
 
         symlink_static = root / "symlink-static"
         symlink_static.mkdir()
