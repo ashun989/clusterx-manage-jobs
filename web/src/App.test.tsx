@@ -120,7 +120,8 @@ describe("Clusterx monitor dashboard", () => {
       if (path.endsWith("/admin/logout")) { adminAuthenticated = false; return { ok: true, status: 200, json: async () => ({ ok: true }) }; }
       if (path.endsWith("/admin/config") && !init?.method) return { ok: true, status: 200, json: async () => ({ configured: true, effective_config_valid: true, resource: { format: "json", text: adminResourceText, revision: adminResourceRevision, parse_error: null }, groups: { format: "yaml", text: adminGroupsText, revision: "group-r1", parse_error: null }, validation_error: null, audit_error: null }) };
       if (path.endsWith("/admin/config/resource") && init?.method === "PUT") { const body = JSON.parse(String(init.body)); adminResourceRevision = "resource-r2"; adminResourceText = body.text; return { ok: true, status: 200, json: async () => ({ configured: true, effective_config_valid: true, resource: { format: "json", text: adminResourceText, revision: adminResourceRevision, parse_error: null }, groups: { format: "yaml", text: adminGroupsText, revision: "group-r1", parse_error: null }, validation_error: null, audit_error: null }) }; }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "ok", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.includes("/workloads/") && path.includes("/logs?")) return { ok: true, status: 200, json: async () => ({ snapshot_id: "snapshot-1", workload_id: "workload-a", worker: "train-a-1", lines: 200, content: "first log line\nsecond log line" }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "0.3.1", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       const value = path.endsWith("/plans") && init?.method === "POST" ? planResult : path.endsWith("/policy") ? policyResponse : latestSnapshot;
       return { ok: true, status: 200, json: async () => structuredClone(value) };
     }));
@@ -189,6 +190,36 @@ describe("Clusterx monitor dashboard", () => {
     expect(within(drawer).getByRole("cell", { name: "master" })).toBeInTheDocument();
     expect(within(drawer).getByRole("cell", { name: "PYTORCH_WORKER" })).toBeInTheDocument();
     expect(drawer).not.toHaveTextContent("Placements（当前归属）");
+  });
+
+  it("loads logs only after an explicit Worker choice and keeps long details scrollable", async () => {
+    latestSnapshot.workloads[0].placements.push({
+      node: "node-b", pod: "train-a-1", gpu: 0, cpu: 1, memory_gib: 1,
+    });
+    latestSnapshot.workloads[0].gpus = [
+      { node: "node-a", pod: "train-a-0", device_index: "0", gpu_compute_util_pct: 50 },
+    ];
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "workloads" }));
+    fireEvent.click(screen.getByRole("row", { name: "查看 train-a 详情" }));
+    const drawer = screen.getByRole("complementary", { name: "train-a 详情" });
+    const logCalls = () => vi.mocked(fetch).mock.calls.filter(([input]) => String(input).includes("/logs?"));
+    expect(logCalls()).toHaveLength(0);
+    expect(within(drawer).getByText("打开详情不会抓取日志；选择 Worker 后手动加载最近 200 行。")).toBeInTheDocument();
+    const load = within(drawer).getByRole("button", { name: "加载日志" });
+    expect(load).toBeDisabled();
+
+    fireEvent.change(within(drawer).getByLabelText("日志 Worker"), { target: { value: "train-a-1" } });
+    expect(logCalls()).toHaveLength(0);
+    fireEvent.click(load);
+    await within(drawer).findByText(/first log line/);
+    expect(logCalls()).toHaveLength(1);
+    expect(String(logCalls()[0][0])).toContain("snapshot_id=snapshot-1");
+    expect(String(logCalls()[0][0])).toContain("worker=train-a-1");
+    const panels = drawer.querySelectorAll("pre.detail-scroll-panel");
+    expect(panels).toHaveLength(2);
+    expect(panels[0]).toHaveClass("workload-log");
   });
 
   it("shows the active development instance count in the user table", async () => {

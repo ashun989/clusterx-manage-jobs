@@ -67,6 +67,7 @@ export type HistoricalTelemetry = {
 export type Workload = FindingFacets & {
   workload_id: string;
   workload_name: string;
+  resource_name?: string;
   user: string;
   group: string;
   type: string;
@@ -99,6 +100,14 @@ export type Workload = FindingFacets & {
   planning_eligible?: boolean;
   planning_exclusion_reasons?: string[];
   planning_excluded_nodes?: string[];
+};
+
+export type WorkloadLogResponse = {
+  snapshot_id: string;
+  workload_id: string;
+  worker: string;
+  lines: number;
+  content: string;
 };
 
 export type GroupSummary = FindingFacets & {

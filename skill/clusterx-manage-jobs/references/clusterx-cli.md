@@ -177,6 +177,19 @@ comma-separated `--finding-category`, `--finding-code`, and `--tag` values.
 than parsing display messages. Suggestions are
 coordination candidates only. The monitor and CLI contain no stop operation.
 
+The Web workload drawer lets any Monitor viewer fetch a bounded realtime
+training log preview after explicitly selecting a Worker and clicking the load
+action. Merely loading the dashboard or opening workload details does not call
+Clusterx log APIs. Log content is returned with `Cache-Control: no-store`, is
+not added to snapshots or SSE, and remains separate from the full `clusterx
+log` workflow.
+
+The monitor consumes Clusterx 2026.8.19 node cursors until the complete bound
+inventory is present. It rejects cursor cycles, duplicate nodes, page-total
+drift, premature termination, and any allocation change between the complete
+before/after inventories, so a partial or mixed-time node list is never
+published as a snapshot.
+
 When CPU or memory is omitted, the service resolves it from the planning
 profile stored in that exact snapshot (by default 14 CPU and 240 GiB per GPU).
 Explicit CPU/memory overrides the profile. The response exposes both requested

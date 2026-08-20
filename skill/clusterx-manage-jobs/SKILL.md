@@ -24,8 +24,10 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   Clusterx stdout/stderr are redacted before they are returned.
 - Clusterx Monitor is additive and read-only against Clusterx. Its authenticated
   administrator may modify only local policy files. Never route job creation,
-  listing, details, logs, statistics, or stopping through the monitor, and do
-  not require the monitor service for those lifecycle operations.
+  listing, full details, statistics, or stopping through the monitor. The sole
+  lifecycle exception is its explicitly triggered realtime log preview for one
+  snapshot-validated training Worker; it is available to every Monitor viewer
+  but is never prefetched, cached, streamed, or a replacement for `clusterx log`.
 - For command or JSON redaction, pipe the content to
   `python3 scripts/redact.py`; never pass secrets as script arguments.
 
@@ -113,6 +115,14 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   monitoring views and `monitor_cli.py watch --count N --format jsonl` for a
   bounded stream of complete snapshots. The service must already be running;
   never fall back to an ad-hoc live collection when it is unavailable.
+- With Clusterx 2026.8.19, monitor collection follows `next_page_token` to read
+  the complete bound-node inventory. Repeated cursors, duplicate node identity,
+  changing totals, truncated pages, or a changed before/after node signature
+  invalidate the refresh instead of publishing a partial snapshot.
+- Workload detail logs in the Web UI are lazy: opening a workload performs no
+  log request. Any Monitor viewer clicking **Load logs** for an exact Worker
+  fetches a bounded realtime preview. The response is `no-store` and never
+  enters snapshots, SSE events, history, or reports.
 - Policy output uses structured findings. Filter list views with
   `--finding-category`, `--finding-code`, and `--tag` (comma-separated within
   each option), or use `--violations-only`. A finding has a stable code,

@@ -41,7 +41,7 @@ def raw_snapshot():
         }],
         "workloads": [{
             "workload_id": "w", "workload_name": "w", "user": "alice",
-            "type": "trainingJob", "total_gpu": 1, "total_cpu": 4,
+            "resource_name": "job-resource", "type": "trainingJob", "total_gpu": 1, "total_cpu": 4,
             "console_url": "https://console.d.pjlab.org.cn/cn-pj-03/ssp/model/training/detail/?rid=job",
             "total_memory_gib": 10, "resource_basis": "attributed", "task_resources": [],
             "placements": [{"node": "n1", "pod": "p", "gpu": 1, "cpu": 4, "memory_gib": 10}],
@@ -122,6 +122,35 @@ class MonitorApiTests(unittest.TestCase):
             {path for path, spec in paths.items() if "put" in spec},
             {"/api/v1/admin/config/resource", "/api/v1/admin/config/groups"},
         )
+
+    def test_workload_logs_are_public_validated_and_fetched_only_on_request(self):
+        fetch_log = mock.Mock(return_value="first line\nsecond line")
+        self.runtime.collector.get_realtime_log = fetch_log
+        client = TestClient(self.app)
+
+        self.assertEqual(client.get("/api/v1/snapshots/latest").status_code, 200)
+        fetch_log.assert_not_called()
+        invalid_worker = client.get(
+            "/api/v1/workloads/w/logs",
+            params={"snapshot_id": "api-snapshot", "worker": "other"},
+        )
+        self.assertEqual(invalid_worker.status_code, 422)
+        fetch_log.assert_not_called()
+
+        response = client.get(
+            "/api/v1/workloads/w/logs",
+            params={"snapshot_id": "api-snapshot", "worker": "p", "lines": 200},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.json()["content"], "first line\nsecond line")
+        fetch_log.assert_called_once_with("job-resource", "p", 200)
+
+        missing = client.get(
+            "/api/v1/workloads/w/logs",
+            params={"snapshot_id": "missing", "worker": "p"},
+        )
+        self.assertEqual(missing.status_code, 404)
 
     def test_explicit_nat_host_is_accepted_without_wildcarding_other_hosts(self):
         app = create_app(

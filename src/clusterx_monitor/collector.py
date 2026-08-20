@@ -24,6 +24,8 @@ CONSOLE_ROUTES = {
     "aid": ("development/detail", "aids"),
     "air": ("air/detail/", "airs"),
 }
+NODE_PAGE_SIZE = 100
+MAX_NODE_PAGES = 1000
 RESOURCE_ID_PATTERN = re.compile(
     r"^/subscriptions/([^/]+)/resourceGroups/([^/]+)/regions/([^/]+)/"
     r"workspaces/([^/]+)/(trainingJobs|aids|airs)/([^/]+)$"
@@ -163,6 +165,92 @@ def normalize_nodes(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             "planning_exclusion_reasons": [],
         })
     return sorted(nodes, key=lambda item: item["node"])
+
+
+def _list_queue_nodes(cluster: Any, cluster_name: str, queue: str) -> list[dict[str, Any]]:
+    """Return a complete, internally consistent bound-node inventory."""
+    nodes: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+    seen_tokens: set[str] = set()
+    page_token: str | None = None
+    expected_total: int | None = None
+
+    for _ in range(MAX_NODE_PAGES):
+        arguments: dict[str, Any] = {
+            "cluster": cluster_name,
+            "queue": queue,
+            "page_size": NODE_PAGE_SIZE,
+            "is_bound": True,
+        }
+        if page_token is not None:
+            arguments["page_token"] = page_token
+        response = cluster.client.list_queue_nodes(**arguments)
+        if not isinstance(response, dict):
+            raise RuntimeError("queue node response must be an object")
+
+        page = response.get("nodes")
+        if page is None:
+            page = []
+        if not isinstance(page, list):
+            raise RuntimeError("queue node response nodes must be a list")
+
+        raw_total = response.get("total_size")
+        if raw_total is None:
+            raw_total = response.get("total")
+        if raw_total is not None:
+            if isinstance(raw_total, bool):
+                raise RuntimeError("queue node total_size must be an integer")
+            try:
+                page_total = int(raw_total)
+            except (TypeError, ValueError) as error:
+                raise RuntimeError("queue node total_size must be an integer") from error
+            if isinstance(raw_total, float) and not raw_total.is_integer():
+                raise RuntimeError("queue node total_size must be an integer")
+            if page_total < 0:
+                raise RuntimeError("queue node total_size must be non-negative")
+            if expected_total is None:
+                expected_total = page_total
+            elif page_total != expected_total:
+                raise RuntimeError("queue node total_size changed during pagination")
+
+        for raw in page:
+            if not isinstance(raw, dict):
+                raise RuntimeError("queue node entry must be an object")
+            node_id = str(raw.get("id") or "")
+            node_name = str(raw.get("name") or "")
+            if not node_id and not node_name:
+                raise RuntimeError("queue node entry has no identity")
+            if node_id and node_id in seen_ids:
+                raise RuntimeError("queue node pagination returned a duplicate node id")
+            if node_name and node_name in seen_names:
+                raise RuntimeError("queue node pagination returned a duplicate node name")
+            if node_id:
+                seen_ids.add(node_id)
+            if node_name:
+                seen_names.add(node_name)
+            nodes.append(raw)
+
+        if expected_total is not None and len(nodes) > expected_total:
+            raise RuntimeError("queue node pagination exceeded total_size")
+
+        next_token = response.get("next_page_token")
+        if next_token is None or next_token == "":
+            if expected_total is not None and len(nodes) != expected_total:
+                raise RuntimeError("queue node response is truncated")
+            return nodes
+        if not isinstance(next_token, str) or not next_token.strip():
+            raise RuntimeError("queue node next_page_token must be a non-empty string")
+        if not page:
+            raise RuntimeError("queue node pagination returned an empty non-final page")
+        if expected_total is not None and len(nodes) >= expected_total:
+            raise RuntimeError("queue node pagination continued after total_size")
+        if next_token in seen_tokens:
+            raise RuntimeError("queue node pagination cursor repeated")
+        seen_tokens.add(next_token)
+        page_token = next_token
+
+    raise RuntimeError("queue node pagination exceeded the page limit")
 
 
 def _node_signature(rows: Iterable[dict[str, Any]]) -> tuple[Any, ...]:
@@ -572,6 +660,7 @@ def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], 
         item = {
             "workload_id": str(job.get("name") or ""),
             "workload_name": str(job.get("display_name") or job.get("name") or ""),
+            "resource_name": str(job.get("name") or ""),
             "user": str((job.get("ownership") or {}).get("creator_name") or "unknown").lower(),
             "status": "PENDING",
             "create_time": created.isoformat() if created else None,
@@ -610,6 +699,10 @@ class ClusterCollector:
         self._history_query_available = False
         self._lifecycle_cache: dict[str, dict[str, Any]] = {}
         self._aid_pod_start_cache: dict[str, str] = {}
+
+    def get_realtime_log(self, resource_name: str, worker: str, lines: int) -> str:
+        """Fetch one explicitly selected Worker log outside snapshot collection."""
+        return self.cluster.get_log(resource_name, worker=worker, lines=lines)
 
     def _enrich_lifecycle(
         self, workloads: dict[str, dict[str, Any]], warnings: list[str],
@@ -679,10 +772,12 @@ class ClusterCollector:
 
         for workload_id, workload in workloads.items():
             cached = self._lifecycle_cache.get(workload_id) or {}
+            resource_name = workload.get("resource_name") or cached.get("_resource_name")
+            workload["resource_name"] = str(resource_name or "")
             workload["console_url"] = _workload_console_url(
                 self.cluster, str(workload.get("type") or ""),
                 resource_id=workload.get("_resource_id") or cached.get("_resource_id"),
-                resource_name=workload.get("_resource_name") or cached.get("_resource_name"),
+                resource_name=resource_name,
                 workspace=workload.get("workspace"),
             )
             workload["resource_create_time"] = cached.get("resource_create_time")
@@ -719,7 +814,6 @@ class ClusterCollector:
             workload["runtime_quality"] = quality
             workload["runtime_estimated"] = quality == "estimated"
             workload.pop("_resource_id", None)
-            workload.pop("_resource_name", None)
             if workload.get("console_url") is None:
                 workload.pop("console_url", None)
             for placement in workload.get("placements") or []:
@@ -730,13 +824,7 @@ class ClusterCollector:
         historical_window_hours: int = 24,
         historical_refresh_minutes: int = 5,
     ) -> dict[str, Any]:
-        raw = self.cluster.client.list_queue_nodes(
-            cluster=self.cluster_name, queue=self.queue, page_size=100, is_bound=True
-        )
-        raw_nodes = raw.get("nodes") or []
-        total = raw.get("total_size") or raw.get("total")
-        if total is not None and int(total) > len(raw_nodes):
-            raise RuntimeError("queue node response is truncated")
+        raw_nodes = _list_queue_nodes(self.cluster, self.cluster_name, self.queue)
         nodes = normalize_nodes(raw_nodes)
         node_by_name = {item["node"]: item for item in nodes}
         occupied = [
@@ -794,9 +882,9 @@ class ClusterCollector:
                     "user": str(ownership.get("creator_name") or "unknown").lower(),
                     "type": str(raw_workload.get("type") or "unknown"),
                     "workspace": str(workspace.get("name") or ""),
+                    "resource_name": str(raw_workload.get("name") or ""),
                     "create_time": None, "start_time": None,
                     "_resource_id": str(raw_workload.get("id") or ""),
-                    "_resource_name": str(raw_workload.get("name") or ""),
                     "placements": [], "gpus": [], "total_gpu": 0,
                     "total_cpu": None, "total_memory_gib": None,
                     "resource_basis": "attributed", "task_resources": [],
@@ -804,7 +892,7 @@ class ClusterCollector:
                 if raw_workload.get("id"):
                     workload["_resource_id"] = str(raw_workload["id"])
                 if raw_workload.get("name"):
-                    workload["_resource_name"] = str(raw_workload["name"])
+                    workload["resource_name"] = str(raw_workload["name"])
                 timestamp = _parse_time(pod.get("create_time"))
                 current = _parse_time(workload.get("create_time"))
                 if timestamp and (current is None or timestamp < current):
@@ -881,13 +969,7 @@ class ClusterCollector:
             pending, pending_complete = [], False
             warnings.append("pending workload inventory is unavailable")
 
-        after_response = self.cluster.client.list_queue_nodes(
-            cluster=self.cluster_name, queue=self.queue, page_size=100, is_bound=True
-        )
-        after = after_response.get("nodes") or []
-        after_total = after_response.get("total_size") or after_response.get("total")
-        if after_total is not None and int(after_total) > len(after):
-            raise RuntimeError("queue node response is truncated")
+        after = _list_queue_nodes(self.cluster, self.cluster_name, self.queue)
         if _node_signature(raw_nodes) != _node_signature(after):
             raise RuntimeError("queue node allocation changed during collection")
         generated = datetime.now(timezone.utc)
