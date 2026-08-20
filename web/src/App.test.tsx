@@ -142,6 +142,7 @@ describe("Clusterx monitor dashboard", () => {
   it("filters enum columns, sorts numeric columns and resets missing filter values", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
+    expect(screen.getByText("v0.3.1")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);

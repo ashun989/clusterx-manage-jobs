@@ -184,6 +184,17 @@ class SmokeProjectTests(unittest.TestCase):
         skill_root = ROOT / "skill" / "clusterx-manage-jobs"
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(version, "0.3.1")
+        self.assertEqual(
+            version,
+            __import__("tomllib").loads(
+                (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+            )["project"]["version"],
+        )
+        self.assertEqual(
+            version,
+            json.loads((ROOT / "web" / "package.json").read_text(encoding="utf-8"))["version"],
+        )
         cli_reference = (
             skill_root / "references" / "clusterx-cli.md"
         ).read_text(encoding="utf-8")

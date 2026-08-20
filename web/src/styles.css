@@ -10,7 +10,9 @@ h2 { margin-top: 0; }
 .eyebrow { color: #5bd3c7; font: 700 11px/1.2 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .14em; }
 .brand { display: flex; gap: 13px; align-items: center; }
 .brand-icon { width: 49px; height: 49px; filter: drop-shadow(0 8px 18px #0007); }
+.brand-title { display: flex; gap: 9px; align-items: baseline; }
 .brand h1 { margin: 1px 0 0; }
+.app-version { color: #708994; font: 600 10px/1 ui-monospace, monospace; letter-spacing: .04em; white-space: nowrap; }
 .brand-block { display: grid; gap: 7px; }
 .cluster-context { margin-left: 62px; color: #78929d; font: 600 10px/1.2 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .12em; }
 .brand-compact { margin-bottom: 20px; }

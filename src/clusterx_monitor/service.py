@@ -20,6 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import Message, Receive, Scope, Send
 import yaml
 
+from . import __version__
 from .auth import AdminAuth, AdminSession, SESSION_COOKIE
 from .collector import ClusterCollector
 from .models import PlanRequest
@@ -267,7 +268,7 @@ def create_app(
             except asyncio.CancelledError:
                 pass
 
-    app = FastAPI(title="Clusterx Monitor", version="0.3.0", lifespan=lifespan)
+    app = FastAPI(title="Clusterx Monitor", version=__version__, lifespan=lifespan)
     app.add_middleware(RequestBodyLimitMiddleware)
     app.add_middleware(
         TrustedHostMiddleware,
@@ -307,7 +308,7 @@ def create_app(
         interval = runtime.policy.policy.refresh_seconds if runtime.policy.configured else 30
         return {
             "service": "clusterx-monitor",
-            "version": "0.3.0",
+            "version": __version__,
             "collecting": runtime.collecting,
             "skipped_refreshes": runtime.skipped_refreshes,
             "snapshot": runtime.snapshots.status(interval * 2),

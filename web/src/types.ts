@@ -260,6 +260,8 @@ export type PlanResult = {
 };
 
 export type ServiceStatus = {
+  service: string;
+  version: string;
   collecting: boolean;
   skipped_refreshes: number;
   setup_required: boolean;
