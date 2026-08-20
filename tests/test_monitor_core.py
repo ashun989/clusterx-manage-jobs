@@ -24,6 +24,7 @@ from clusterx_monitor.collector import (
     _aid_pod_start_times,
     _attach_telemetry,
     _available_transition,
+    _list_queue_nodes,
     _node_signature,
     _pending_workloads,
     _query_workload_history,
@@ -1089,9 +1090,114 @@ class StoreAndTelemetryTests(unittest.TestCase):
         ):
             self.assertNotEqual(baseline, _node_signature(changed))
 
+    def test_queue_node_inventory_paginates(self):
+        client = mock.Mock()
+
+        def list_queue_nodes(**arguments):
+            if "page_token" not in arguments:
+                return {
+                    "nodes": [{"id": "id-1", "name": "node-1"}],
+                    "total_size": 2,
+                    "next_page_token": "cursor-1",
+                }
+            self.assertEqual(arguments["page_token"], "cursor-1")
+            return {
+                "nodes": [{"id": "id-2", "name": "node-2"}],
+                "total_size": 2,
+            }
+
+        client.list_queue_nodes.side_effect = list_queue_nodes
+        nodes = _list_queue_nodes(mock.Mock(client=client), "cluster", "queue")
+        self.assertEqual([node["name"] for node in nodes], ["node-1", "node-2"])
+        self.assertEqual(client.list_queue_nodes.call_count, 2)
+        self.assertNotIn("page_token", client.list_queue_nodes.call_args_list[0].kwargs)
+        self.assertEqual(
+            client.list_queue_nodes.call_args_list[1].kwargs["page_token"], "cursor-1",
+        )
+
+    def test_queue_node_pagination_rejects_inconsistent_responses(self):
+        cases = {
+            "nodes must be a list": [{"nodes": "", "total_size": 0}],
+            "total_size must be an integer": [{"nodes": [], "total_size": True}],
+            "truncated": [{
+                "nodes": [{"id": "id-1", "name": "node-1"}], "total_size": 2,
+            }],
+            "duplicate node id": [
+                {
+                    "nodes": [{"id": "id-1", "name": "node-1"}],
+                    "total_size": 2,
+                    "next_page_token": "cursor-1",
+                },
+                {"nodes": [{"id": "id-1", "name": "node-2"}], "total_size": 2},
+            ],
+            "total_size changed": [
+                {
+                    "nodes": [{"id": "id-1", "name": "node-1"}],
+                    "total_size": 2,
+                    "next_page_token": "cursor-1",
+                },
+                {"nodes": [{"id": "id-2", "name": "node-2"}], "total_size": 3},
+            ],
+            "cursor repeated": [
+                {
+                    "nodes": [{"id": "id-1", "name": "node-1"}],
+                    "total_size": 3,
+                    "next_page_token": "cursor-1",
+                },
+                {
+                    "nodes": [{"id": "id-2", "name": "node-2"}],
+                    "total_size": 3,
+                    "next_page_token": "cursor-1",
+                },
+            ],
+        }
+        for message, responses in cases.items():
+            with self.subTest(message=message):
+                client = mock.Mock()
+                client.list_queue_nodes.side_effect = responses
+                with self.assertRaisesRegex(RuntimeError, message):
+                    _list_queue_nodes(mock.Mock(client=client), "cluster", "queue")
+
+    def test_collector_uses_complete_paginated_inventory_before_and_after(self):
+        client = mock.Mock()
+
+        def list_queue_nodes(**arguments):
+            if "page_token" not in arguments:
+                return {
+                    "nodes": [{
+                        "id": "id-1", "name": "node-1", "state": "RUNNING",
+                        "summary_data": [],
+                    }],
+                    "total_size": 2,
+                    "next_page_token": "cursor-1",
+                }
+            return {
+                "nodes": [{
+                    "id": "id-2", "name": "node-2", "state": "RUNNING",
+                    "summary_data": [],
+                }],
+                "total_size": 2,
+            }
+
+        client.list_queue_nodes.side_effect = list_queue_nodes
+        cluster = mock.Mock(client=client, cfg={"workspace": "workspace"})
+        collector = ClusterCollector(cluster, "queue", "cluster")
+        with mock.patch(
+            "clusterx_monitor.collector._query_gpu_telemetry", return_value=[],
+        ), mock.patch(
+            "clusterx_monitor.collector._pending_workloads", return_value=([], True),
+        ), mock.patch(
+            "clusterx_monitor.collector._query_workload_history", return_value={},
+        ):
+            result = collector.collect()
+        self.assertEqual([node["node"] for node in result["nodes"]], ["node-1", "node-2"])
+        self.assertEqual(client.list_queue_nodes.call_count, 4)
+
     def test_collector_rejects_a_truncated_bound_node_inventory(self):
         client = mock.Mock()
-        client.list_queue_nodes.return_value = {"nodes": [{}], "total_size": 2}
+        client.list_queue_nodes.return_value = {
+            "nodes": [{"id": "id-1", "name": "node-1"}], "total_size": 2,
+        }
         cluster = mock.Mock(client=client)
         with self.assertRaisesRegex(RuntimeError, "truncated"):
             ClusterCollector(cluster, "queue", "cluster").collect()

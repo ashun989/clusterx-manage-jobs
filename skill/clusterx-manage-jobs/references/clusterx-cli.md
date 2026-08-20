@@ -1,6 +1,6 @@
 # Clusterx CLI Reference
 
-Source snapshot: Feishu document revision 53, Clusterx `2026.8.11`. This is a
+Source snapshot: Feishu document revision 77, Clusterx `2026.8.19`. This is a
 sanitized operational reference cross-checked against installed dynamic help.
 Always prefer the installed CLI when it differs from this snapshot.
 
@@ -70,7 +70,7 @@ The positional argument is the command to run. The verified option surface is:
 | `--shm-size-gib` | Shared memory | `64` |
 | `--storage-ak-id`, `--storage-ak-secret` | Storage credentials | config/default |
 
-Clusterx `2026.8.11` joins positional command tokens without shell quoting.
+Clusterx `2026.8.19` joins positional command tokens without shell quoting.
 Never submit `bash -c`, `bash -lc`, `sh -c`, or equivalent command-string forms.
 Invoke an absolute runner script and pass settings through repeated
 `-e KEY=VALUE` arguments.
@@ -109,6 +109,21 @@ resources. Let `N` be chips per node and `M` be node count: all values must be
 positive; for one node `S=N`; for multiple nodes `N` divides `S` and `S`
 divides `N*M`.
 
+## SSP node statistics and pagination
+
+With no `--scope`, `--metric`, or `--job`, `stats` queries one page of nodes
+bound to the configured or explicitly selected queue:
+
+```bash
+clusterx stats --page-size 100
+clusterx stats --page-size 100 --page-token <next-page-token>
+```
+
+`--page-size` accepts 1–100 and defaults to 100. Pagination is manual: the
+first response prints `total_size` and, when another page exists, an opaque
+`next_page_token`. Pass that exact cursor through `--page-token`; do not expose
+it in reports. Clusterx does not automatically retrieve subsequent pages.
+
 ## SSP Prometheus statistics
 
 ```bash
@@ -120,6 +135,7 @@ Supported scopes are workspace, cluster, queue, and job. `--minutes` selects a
 positive lookback and defaults to 5. Depending on scope, metrics include CPU,
 memory, GPU count/utilization/memory, total and per-device power, bandwidth,
 and temperature. Inspect live `stats --help` before constructing a query.
+Node-list pagination options do not change Prometheus queries.
 
 ## Monitoring service client
 
@@ -160,6 +176,19 @@ comma-separated `--finding-category`, `--finding-code`, and `--tag` values.
 `--violations-only` and `--fail-on violation` read structured findings rather
 than parsing display messages. Suggestions are
 coordination candidates only. The monitor and CLI contain no stop operation.
+
+The Web workload drawer lets any Monitor viewer fetch a bounded realtime
+training log preview after explicitly selecting a Worker and clicking the load
+action. Merely loading the dashboard or opening workload details does not call
+Clusterx log APIs. Log content is returned with `Cache-Control: no-store`, is
+not added to snapshots or SSE, and remains separate from the full `clusterx
+log` workflow.
+
+The monitor consumes Clusterx 2026.8.19 node cursors until the complete bound
+inventory is present. It rejects cursor cycles, duplicate nodes, page-total
+drift, premature termination, and any allocation change between the complete
+before/after inventories, so a partial or mixed-time node list is never
+published as a snapshot.
 
 When CPU or memory is omitted, the service resolves it from the planning
 profile stored in that exact snapshot (by default 14 CPU and 240 GiB per GPU).
@@ -265,11 +294,9 @@ include CPU, memory, GPU utilization, GPU memory,
 power, bandwidth, and temperature metrics depending on scope.
 
 Before `stop`, resolve and display the exact job ID/name. Batch filters are only
-allowed when the user explicitly requested that exact batch scope. A Pod log
-endpoint HTTP 404 is a log-discovery failure, not proof the task failed; check
-job status separately. It may occur while a task is `Running` or after it is
-`Succeeded`. SSP may return empty `nodes` and `nodes_ip`; do not invent
-placement or log information when these fields are absent.
+allowed when the user explicitly requested that exact batch scope. SSP may
+return empty `nodes` and `nodes_ip`; do not invent placement information when
+these fields are absent.
 
 ### Job details and Workers
 
@@ -285,12 +312,36 @@ partition, and status filters. Batch stopping is destructive: use filters only
 for the exact batch scope requested by the user and list resolved matches
 first. Never broaden an exact-job request into a filter.
 
-### SSP log limitation
+### SSP realtime and historical logs
 
-`clusterx log <job-id>` may receive HTTP 404 while discovering Pods when a job
-is Running or already Succeeded. Treat this as log retrieval failure, not proof
-that the job failed. Check `get-job` separately. Empty `nodes` and `nodes_ip`
-and incomplete `get-node` support are not evidence for invented placement.
+Clusterx 2026.8.19 no longer discovers every Pod implicitly. Realtime logs
+require one exact Worker returned by `get-job --workers`:
+
+```bash
+clusterx get-job <job-id> --workers
+clusterx log <job-id> --worker <worker-name> --lines 200
+```
+
+If multiple Workers exist, select the one requested instead of guessing.
+`--streaming` remains unimplemented for SSP and falls back to the current
+realtime response.
+
+Passing any of `--msg`, `--start`, `--end`, or `--hours` selects historical
+log search. `--worker` is then an optional filter:
+
+```bash
+clusterx log <job-id> --hours 6
+clusterx log <job-id> \
+  --start 2026-08-18T00:00:00Z --end 2026-08-18T12:00:00Z
+clusterx log <job-id> --worker <worker-name> --msg error --hours 24
+```
+
+Use explicit ISO 8601 offsets or `Z` to avoid timezone ambiguity. Historical
+`--page-size` accepts 1–1000 and defaults to 1000; `--max-pages` defaults to 10
+and must be at least 1. The monitor data plane returns at most 10,000 rows for
+the same query, so narrow the time range or add Worker/message filters when a
+result is truncated. An empty historical result does not prove the task did not
+run; check `get-job` independently.
 
 ### SSP job-name limit
 
@@ -324,3 +375,4 @@ privileged mode. Redact the preview and capture the returned job ID for later
 | 2026.7.1 | Added JSON mounts for PV_AOSS and complex volumes |
 | 2026.7.28 | Added queue/job SSP metrics and A3 `--sp-block` scheduling |
 | 2026.8.11 | Added Worker filters, repeatable mounts, explicit environments, and batch stop filters |
+| 2026.8.19 | Fixed realtime logs, added historical log search, and added paginated node statistics |

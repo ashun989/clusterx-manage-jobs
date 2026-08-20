@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 from urllib.parse import unquote
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -20,6 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import Message, Receive, Scope, Send
 import yaml
 
+from . import __version__
 from .auth import AdminAuth, AdminSession, SESSION_COOKIE
 from .collector import ClusterCollector
 from .models import PlanRequest
@@ -267,7 +268,7 @@ def create_app(
             except asyncio.CancelledError:
                 pass
 
-    app = FastAPI(title="Clusterx Monitor", version="0.3.0", lifespan=lifespan)
+    app = FastAPI(title="Clusterx Monitor", version=__version__, lifespan=lifespan)
     app.add_middleware(RequestBodyLimitMiddleware)
     app.add_middleware(
         TrustedHostMiddleware,
@@ -293,7 +294,10 @@ def create_app(
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        if request.url.path.startswith("/api/v1/admin/"):
+        if (
+            request.url.path.startswith("/api/v1/admin/")
+            or request.url.path.startswith("/api/v1/workloads/")
+        ):
             response.headers["Cache-Control"] = "no-store"
         if request.url.scheme == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
@@ -304,7 +308,7 @@ def create_app(
         interval = runtime.policy.policy.refresh_seconds if runtime.policy.configured else 30
         return {
             "service": "clusterx-monitor",
-            "version": "0.3.0",
+            "version": __version__,
             "collecting": runtime.collecting,
             "skipped_refreshes": runtime.skipped_refreshes,
             "snapshot": runtime.snapshots.status(interval * 2),
@@ -352,6 +356,67 @@ def create_app(
         if session is None:
             raise HTTPException(status_code=401, detail="administrator authentication required")
         return session
+
+    log_fetch_slots = asyncio.Semaphore(4)
+
+    @app.get("/api/v1/workloads/{workload_id}/logs")
+    async def workload_logs(
+        workload_id: str,
+        snapshot_id: str,
+        worker: str,
+        lines: int = Query(default=200, ge=1, le=2000),
+    ) -> dict[str, Any]:
+        snapshot = runtime.snapshots.get(snapshot_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="snapshot is not retained")
+        workload = next(
+            (
+                item for item in [
+                    *(snapshot.get("workloads") or []),
+                    *(snapshot.get("pending_workloads") or []),
+                ]
+                if str(item.get("workload_id") or "") == workload_id
+            ),
+            None,
+        )
+        if workload is None:
+            raise HTTPException(status_code=404, detail="workload is not in the snapshot")
+        if workload.get("type") != "trainingJob" or workload.get("resource_basis") != "attributed":
+            raise HTTPException(status_code=422, detail="realtime logs require a running training workload")
+        resource_name = str(workload.get("resource_name") or "")
+        allowed_workers = {
+            str(item.get("pod") or "")
+            for item in workload.get("placements") or []
+            if item.get("pod")
+        }
+        if not resource_name:
+            raise HTTPException(status_code=422, detail="workload log target is unavailable")
+        if worker not in allowed_workers:
+            raise HTTPException(status_code=422, detail="worker is not part of this snapshot workload")
+        try:
+            async with log_fetch_slots:
+                content = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        runtime.collector.get_realtime_log,
+                        resource_name,
+                        worker,
+                        lines,
+                    ),
+                    timeout=30,
+                )
+        except TimeoutError as error:
+            raise HTTPException(status_code=504, detail="workload log request timed out") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="workload log request is invalid") from error
+        except Exception as error:
+            raise HTTPException(status_code=502, detail="workload log is unavailable") from error
+        return {
+            "snapshot_id": snapshot_id,
+            "workload_id": workload_id,
+            "worker": worker,
+            "lines": lines,
+            "content": str(content or ""),
+        }
 
     def require_same_origin_json(request: Request) -> None:
         origin = request.headers.get("origin")

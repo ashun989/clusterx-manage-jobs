@@ -1,4 +1,19 @@
-# Clusterx 在 SSP 上无法查询任务日志
+# Clusterx 在 SSP 上无法查询任务日志（已于 2026.8.19 解决）
+
+## 解决状态
+
+Clusterx `2026.8.19` 已修复实时日志查询，并新增历史日志搜索。新版不再通过
+`clusterx log <JOB_ID>` 隐式发现全部 Pod：先用 `get-job --workers` 获取 Worker，
+再指定一个 Worker 查询实时日志；历史日志则通过时间或内容条件触发。
+
+```bash
+clusterx get-job <JOB_ID> --workers
+clusterx log <JOB_ID> --worker <WORKER_NAME> --lines 200
+clusterx log <JOB_ID> --hours 6
+```
+
+历史日志还支持 `--start/--end`、`--msg`、可选 `--worker`、每页最多 1000 条和
+自动翻页上限；相同查询条件最多返回 10,000 条。以下内容保留为旧版本问题记录。
 
 ## 环境
 

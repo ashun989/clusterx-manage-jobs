@@ -10,7 +10,9 @@ h2 { margin-top: 0; }
 .eyebrow { color: #5bd3c7; font: 700 11px/1.2 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .14em; }
 .brand { display: flex; gap: 13px; align-items: center; }
 .brand-icon { width: 49px; height: 49px; filter: drop-shadow(0 8px 18px #0007); }
+.brand-title { display: flex; gap: 9px; align-items: baseline; }
 .brand h1 { margin: 1px 0 0; }
+.app-version { color: #708994; font: 600 10px/1 ui-monospace, monospace; letter-spacing: .04em; white-space: nowrap; }
 .brand-block { display: grid; gap: 7px; }
 .cluster-context { margin-left: 62px; color: #78929d; font: 600 10px/1.2 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .12em; }
 .brand-compact { margin-bottom: 20px; }
@@ -207,6 +209,13 @@ tr.clickable:hover, tr.clickable:focus { background: #10252e; }
 .detail-section { margin-top: 25px; }
 .detail-section h3 { margin-bottom: 10px; color: #88a0aa; font-size: 12px; text-transform: uppercase; letter-spacing: .07em; }
 .section-count { margin-left: 7px; padding: 2px 6px; border-radius: 8px; color: #5bd3c7; background: #123039; font-size: 10px; }
+.detail-scroll-panel { max-height: 280px; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.log-controls { display: flex; gap: 10px; align-items: end; justify-content: space-between; margin: 12px 0; }
+.log-controls label { display: grid; min-width: 0; gap: 5px; color: #78939d; font-size: 11px; }
+.log-controls select { max-width: 380px; padding: 8px; border: 1px solid #29414b; border-radius: 7px; color: #dce9ef; background: #09141a; }
+.log-controls button { flex: none; padding: 9px 12px; border: 0; border-radius: 7px; color: #06201d; background: #5bd3c7; font-weight: 800; cursor: pointer; }
+.log-controls button:disabled { opacity: .5; cursor: default; }
+.workload-log { min-height: 120px; max-height: 320px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .related-list, .placement-list { display: grid; gap: 6px; }
 .related-list button, .placement-list button { display: flex; justify-content: space-between; gap: 12px; align-items: center; width: 100%; padding: 10px 11px; border: 1px solid #1e3741; border-radius: 7px; color: #c2d5db; background: #0a161c; text-align: left; cursor: pointer; }
 .related-list button:hover, .placement-list button:hover { border-color: #3b6470; background: #10242c; }

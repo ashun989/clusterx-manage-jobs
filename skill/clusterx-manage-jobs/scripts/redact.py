@@ -45,6 +45,37 @@ NORMALIZED_SECRET_KEYS = {
 }
 
 
+def protect_pagination_cursors(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Protect non-credential Clusterx cursors from generic token redaction."""
+    protected: list[tuple[str, str]] = []
+
+    def save(value: str) -> str:
+        marker = f"__CLUSTERX_PAGE_CURSOR_{len(protected)}__"
+        protected.append((marker, value))
+        return marker
+
+    # Rich may wrap an opaque cursor across lines. Collapse only the value
+    # between Clusterx's exact label and its exact continuation hint.
+    human = re.compile(
+        r"(?is)([ \t]*next page token:)[ \t\r\n]*"
+        r"([A-Za-z0-9._~+/=\r\n-]+?)"
+        r"[ \t\r\n]+(\(pass via --page-token to fetch the next page\))"
+    )
+
+    def protect_human(match: re.Match[str]) -> str:
+        cursor = re.sub(r"\s+", "", match.group(2))
+        return save(f"{match.group(1)} {cursor} {match.group(3)}")
+
+    text = human.sub(protect_human, text)
+
+    structured = re.compile(
+        r"(?i)([\"']next_page_token[\"']\s*:\s*)"
+        r"([\"'])([A-Za-z0-9._~+/=%-]+)(\2)"
+    )
+    text = structured.sub(lambda match: save(match.group(0)), text)
+    return text, protected
+
+
 def is_secret_key(key: str) -> bool:
     return re.sub(r"[^a-z0-9]", "", key.lower()) in NORMALIZED_SECRET_KEYS
 
@@ -89,6 +120,7 @@ def redact_urls(text: str) -> str:
 
 
 def redact(text: str) -> str:
+    text, protected_cursors = protect_pagination_cursors(text)
     text = redact_urls(text)
     keys = "|".join(re.escape(key) for key in SECRET_KEYS)
 
@@ -145,6 +177,8 @@ def redact(text: str) -> str:
 
     for pattern in patterns:
         text = pattern.sub(value_repl, text)
+    for marker, value in protected_cursors:
+        text = text.replace(marker, value)
     return text
 
 

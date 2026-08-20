@@ -1,7 +1,7 @@
 # Clusterx Manage Jobs Skill with Monitor
 
 用于安全管理 PT/SSP 集群 Clusterx 训练任务，并提供新增的只读队列监控、
-资源策略检查和调度模拟。当前版本为 `0.3.0`，已验证 Clusterx `2026.8.11`；
+资源策略检查和调度模拟。当前版本为 `0.3.1`，已验证 Clusterx `2026.8.19`；
 其他版本以安装后的动态帮助为准。
 
 原有任务生命周期能力保持不变：配置检查、提交预览与创建、任务/节点查询、
@@ -49,7 +49,11 @@ python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
 python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
   --cwd <project> -- get-job <job-id> --workers
 python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
-  --cwd <project> -- log <job-id>
+  --cwd <project> -- log <job-id> --worker <worker-name> --lines 200
+python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
+  --cwd <project> -- log <job-id> --hours 6 --page-size 1000 --max-pages 10
+python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
+  --cwd <project> -- stats --page-size 100
 python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
   --cwd <project> -- stats --scope job --job <exact-job-name> --metric all
 ```
@@ -134,6 +138,11 @@ task 的副本申请汇总，并在 `task_resources` 中保留每个 task 的资
 Group 与 User 的已分配资源均汇总全部活跃 workload 类型（包括 `trainingJob`、
 `aid` 和 `air`）；Pending 仍只展示申请量，不计入当前已分配资源。
 
+Running `trainingJob` 的详情向所有 Monitor 访问者提供实时日志预览，但采用显式
+懒加载：打开详情不请求日志，只有选择快照中的 Worker 并点击“加载日志”后才抓取
+最近 200 行。日志响应为 `no-store`，不进入快照、SSE 或持久缓存。日志与逐卡遥测
+各自放在定高可滚动窗口中，避免过长内容拉伸整个详情抽屉。
+
 服务另按 workload UID 从 Prometheus 聚合过去 24 小时的历史 GPU 利用率，默认
 每 5 分钟刷新；该缓存只驻留内存，重启后立即重建，不使用数据库。历史查询失败
 不会阻止快照和 5 分钟遥测发布，但会产生结构化遥测告警。
@@ -202,7 +211,8 @@ Pod 汇总超过节点 allocated 的归属异常节点仍出现在监控中，�
 
 `smoke-projects` 用于验证安装后的 Skill，但不进入发布包。可请求 Skill 提交
 GPU 计算、持续日志或组合存储 smoke test；任务清单描述资源需求，Skill 根据
-动态帮助构造实际 Clusterx 命令。Monitor 不参与这些任务的创建、查询或停止。
+动态帮助构造实际 Clusterx 命令。除访问者显式触发的只读实时日志预览外，
+Monitor 不参与这些任务的创建、生命周期查询或停止。
 
 ## Chrome 开发机配置填充扩展
 

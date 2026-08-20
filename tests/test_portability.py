@@ -100,6 +100,7 @@ class PortabilityTests(unittest.TestCase):
             "Training CPU policy",
             "Monitoring service client",
             "Job details and Workers",
+            "SSP realtime and historical logs",
             "Stopping jobs",
             "Snapshot change history",
         ):
@@ -111,6 +112,7 @@ class PortabilityTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         required = (
             "default: ssp",
+            "cluster_type:",
             "subscription:",
             "resource_group:",
             "region:",

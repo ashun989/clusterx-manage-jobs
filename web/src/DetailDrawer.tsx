@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { statusClass } from "./Table";
-import type { Alert, DetailRef, GroupSummary, NodeSummary, PolicyFinding, Snapshot, Telemetry, UserSummary, Workload } from "./types";
+import type { Alert, DetailRef, GroupSummary, NodeSummary, PolicyFinding, Snapshot, Telemetry, UserSummary, Workload, WorkloadLogResponse } from "./types";
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
 const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
@@ -109,7 +109,50 @@ function NodeDetail({ node, snapshot, open }: { node: NodeSummary; snapshot: Sna
   </>;
 }
 
-function WorkloadDetail({ workload, open }: { workload: Workload; open: (ref: DetailRef) => void }) {
+function WorkloadLogPanel({ workload, snapshotId }: { workload: Workload; snapshotId: string }) {
+  const workers = [...new Set(
+    workload.placements.map((item) => item.pod).filter((item): item is string => Boolean(item)),
+  )];
+  const [worker, setWorker] = useState(workers.length === 1 ? workers[0] : "");
+  const [content, setContent] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    if (!worker || loading) return;
+    setLoading(true);
+    setError("");
+    try {
+      const query = new URLSearchParams({ snapshot_id: snapshotId, worker, lines: "200" });
+      const response = await fetch(
+        `/api/v1/workloads/${encodeURIComponent(workload.workload_id)}/logs?${query}`,
+        { cache: "no-store", headers: { Accept: "application/json" } },
+      );
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { detail?: string };
+        throw new Error(body.detail ?? response.statusText);
+      }
+      const body = await response.json() as WorkloadLogResponse;
+      setContent(body.content);
+    } catch (value) {
+      setError(value instanceof Error ? value.message : String(value));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return <section className="detail-section"><h3>实时日志<span className="section-count">按需</span></h3>
+    <p className="muted">打开详情不会抓取日志；选择 Worker 后手动加载最近 200 行。</p>
+    <div className="log-controls">
+      {workers.length > 1 ? <label>Worker<select aria-label="日志 Worker" value={worker} onChange={(event) => { setWorker(event.target.value); setContent(null); setError(""); }}><option value="">请选择</option>{workers.map((item) => <option value={item} key={item}>{item}</option>)}</select></label> : <span className="muted">Worker: {workers[0]}</span>}
+      <button type="button" onClick={load} disabled={!worker || loading}>{loading ? "加载中…" : content == null ? "加载日志" : "刷新日志"}</button>
+    </div>
+    {error && <p className="error">{error}</p>}
+    {content != null && <pre className="detail-scroll-panel workload-log" tabIndex={0}>{content || "日志为空"}</pre>}
+  </section>;
+}
+
+function WorkloadDetail({ workload, snapshotId, open }: { workload: Workload; snapshotId: string; open: (ref: DetailRef) => void }) {
   return <>
     <span className="eyebrow">{workload.type}</span><h2>{workload.workload_name}</h2>{workload.console_url && <a className="console-link" href={workload.console_url} target="_blank" rel="noopener noreferrer">在官方控制台查看 <span aria-hidden="true">↗</span></a>}<p><button className="inline-link" type="button" onClick={() => open({ kind: "user", id: workload.user, label: workload.user })}>{workload.user}</button> · <button className="inline-link" type="button" onClick={() => open({ kind: "group", id: workload.group, label: workload.group })}>{workload.group}</button></p><span className={statusClass(workload.policy_status)}>{workload.policy_status}</span>
     {workload.planning_eligible === false && <p className="banner">该 Workload 接触归属异常节点，不作为调度释放候选。</p>}
@@ -128,6 +171,7 @@ function WorkloadDetail({ workload, open }: { workload: Workload; open: (ref: De
     </Metrics>
     {workload.resource_basis === "requested" && <section className="detail-section"><h3>Task 请求<span className="section-count">{workload.task_resources?.length ?? 0}</span></h3>{workload.task_resources?.length ? <div className="plan-workloads"><table><thead><tr><th>Task</th><th>角色</th><th>副本数</th><th>每副本 GPU</th><th>每副本 CPU</th><th>每副本内存 GiB</th></tr></thead><tbody>{workload.task_resources.map((task, index) => <tr key={`${task.name}:${task.role}:${index}`}><td>{task.name}</td><td>{task.role || "—"}</td><td>{number(task.replicas)}</td><td>{number(task.gpu_per_replica)}</td><td>{number(task.cpu_per_replica)}</td><td>{number(task.memory_gib_per_replica)}</td></tr>)}</tbody></table></div> : <p className="muted">无 Task 资源明细</p>}</section>}
     {workload.resource_basis === "attributed" && <section className="detail-section"><h3>Placements（当前归属）<span className="section-count">{workload.placements.length}</span></h3><div className="placement-list">{workload.placements.map((placement, index) => <button type="button" key={`${placement.node}-${placement.pod ?? index}`} onClick={() => open({ kind: "node", id: placement.node, label: placement.node })}><span><b>{placement.node}</b><small>{placement.pod || "—"}</small></span><em>{number(placement.gpu)} GPU · {number(placement.cpu)} CPU · {number(placement.memory_gib)} GiB</em></button>)}</div></section>}
+    {workload.type === "trainingJob" && workload.resource_basis === "attributed" && workload.placements.some((item) => item.pod) && <WorkloadLogPanel key={`${snapshotId}:${workload.workload_id}`} workload={workload} snapshotId={snapshotId} />}
     <TelemetryPanel telemetry={workload.telemetry} />
     {workload.historical_telemetry && <section className="detail-section"><h3>历史 GPU 遥测</h3><Metrics>
       <Metric label="评估状态" value={<span className={statusClass(workload.historical_telemetry.evaluation_status)}>{workload.historical_telemetry.evaluation_status}</span>} />
@@ -139,7 +183,7 @@ function WorkloadDetail({ workload, open }: { workload: Workload; open: (ref: De
       <Metric label="抓取时间" value={workload.historical_telemetry.fetched_at ? new Date(workload.historical_telemetry.fetched_at).toLocaleString() : "—"} />
     </Metrics></section>}
     <FindingsPanel findings={workload.policy_findings} />
-    <section className="detail-section"><h3>逐卡遥测<span className="section-count">{workload.gpus.length}</span></h3>{workload.gpus.length ? <pre>{JSON.stringify(workload.gpus, null, 2)}</pre> : <p className="muted">无逐卡遥测</p>}</section>
+    <section className="detail-section"><h3>逐卡遥测<span className="section-count">{workload.gpus.length}</span></h3>{workload.gpus.length ? <pre className="detail-scroll-panel" tabIndex={0}>{JSON.stringify(workload.gpus, null, 2)}</pre> : <p className="muted">无逐卡遥测</p>}</section>
   </>;
 }
 
@@ -177,6 +221,6 @@ export function DetailDrawer({ stack, snapshot, open, back, close }: { stack: De
   const value = resolveDetail(ref, snapshot);
   return <div className="drawer-backdrop" onClick={close}><aside className="drawer" aria-label={`${ref.label} 详情`} onClick={(event) => event.stopPropagation()}>
     <div className="drawer-actions">{stack.length > 1 ? <button type="button" onClick={back} aria-label="返回上一详情">← 返回</button> : <span />}<button type="button" className="close" onClick={close} aria-label="关闭详情">×</button></div>
-    {!value ? <div className="missing-detail"><span className="eyebrow">{ref.kind}</span><h2>{ref.label}</h2><p>该对象已不在最新快照中。</p></div> : ref.kind === "group" ? <GroupDetail group={value as GroupSummary} snapshot={snapshot} open={open} /> : ref.kind === "user" ? <UserDetail user={value as UserSummary} snapshot={snapshot} open={open} /> : ref.kind === "node" ? <NodeDetail node={value as NodeSummary} snapshot={snapshot} open={open} /> : ref.kind === "workload" ? <WorkloadDetail workload={value as Workload} open={open} /> : <AlertDetail alert={value as Alert} snapshot={snapshot} open={open} />}
+    {!value ? <div className="missing-detail"><span className="eyebrow">{ref.kind}</span><h2>{ref.label}</h2><p>该对象已不在最新快照中。</p></div> : ref.kind === "group" ? <GroupDetail group={value as GroupSummary} snapshot={snapshot} open={open} /> : ref.kind === "user" ? <UserDetail user={value as UserSummary} snapshot={snapshot} open={open} /> : ref.kind === "node" ? <NodeDetail node={value as NodeSummary} snapshot={snapshot} open={open} /> : ref.kind === "workload" ? <WorkloadDetail workload={value as Workload} snapshotId={snapshot.snapshot_id} open={open} /> : <AlertDetail alert={value as Alert} snapshot={snapshot} open={open} />}
   </aside></div>;
 }

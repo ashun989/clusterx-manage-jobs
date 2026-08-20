@@ -24,8 +24,10 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   Clusterx stdout/stderr are redacted before they are returned.
 - Clusterx Monitor is additive and read-only against Clusterx. Its authenticated
   administrator may modify only local policy files. Never route job creation,
-  listing, details, logs, statistics, or stopping through the monitor, and do
-  not require the monitor service for those lifecycle operations.
+  listing, full details, statistics, or stopping through the monitor. The sole
+  lifecycle exception is its explicitly triggered realtime log preview for one
+  snapshot-validated training Worker; it is available to every Monitor viewer
+  but is never prefetched, cached, streamed, or a replacement for `clusterx log`.
 - For command or JSON redaction, pipe the content to
   `python3 scripts/redact.py`; never pass secrets as script arguments.
 
@@ -55,7 +57,7 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
    and fill it locally. Never ask the user to paste secrets into chat.
 4. Run `clusterx_exec.py` with `--version`, `--help`, and the requested
    subcommand's `--help`. Prefer the installed CLI over the reference snapshot
-   and report material differences. Version 2026.8.11 is tested; treat other
+   and report material differences. Version 2026.8.19 is tested; treat other
    versions as unverified rather than unsupported.
 5. Require a shared `tmpdir` mounted at the same path on the development
    machine and job.
@@ -90,7 +92,7 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 5. Invoke a runner by absolute path, such as
    `bash /absolute/path/to/runner.sh`, and pass runtime settings through
    repeated `-e KEY=VALUE` options. Never use `bash -c`, `bash -lc`, or the
-   corresponding command-string mode of another shell: Clusterx 2026.8.11
+   corresponding command-string mode of another shell: Clusterx 2026.8.19
    joins command arguments without preserving shell quoting, and the wrapper
    rejects these unsafe forms before submission.
 6. Build the `clusterx run` command without executing it.
@@ -113,6 +115,14 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   monitoring views and `monitor_cli.py watch --count N --format jsonl` for a
   bounded stream of complete snapshots. The service must already be running;
   never fall back to an ad-hoc live collection when it is unavailable.
+- With Clusterx 2026.8.19, monitor collection follows `next_page_token` to read
+  the complete bound-node inventory. Repeated cursors, duplicate node identity,
+  changing totals, truncated pages, or a changed before/after node signature
+  invalidate the refresh instead of publishing a partial snapshot.
+- Workload detail logs in the Web UI are lazy: opening a workload performs no
+  log request. Any Monitor viewer clicking **Load logs** for an exact Worker
+  fetches a bounded realtime preview. The response is `no-store` and never
+  enters snapshots, SSE events, history, or reports.
 - Policy output uses structured findings. Filter list views with
   `--finding-category`, `--finding-code`, and `--tag` (comma-separated within
   each option), or use `--violations-only`. A finding has a stable code,
@@ -152,13 +162,25 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
   pagination, filter, and ordering options when the result set is large. Treat
   Worker fields as runtime observations and do not infer missing nodes.
+- With Clusterx 2026.8.19, realtime SSP logs require an exact Worker. Discover
+  it first, then use `log <job-id> --worker <worker-name> [--lines N]`. If the
+  job has multiple Workers and the request does not identify one, show the
+  candidates and ask which log to read. `--streaming` is not implemented for
+  SSP and only falls back to the current realtime log response.
+- Trigger historical SSP logs with `--hours N` or an explicit ISO 8601
+  `--start/--end` interval. `--worker` and `--msg` narrow the query. Prefer an
+  explicit timezone, use `--page-size 1..1000` and `--max-pages >= 1`, and
+  narrow the time range or filters when the same query would exceed the
+  service limit of 10,000 rows. An empty result proves only that the selected
+  range and filters matched no retained log records.
+- With no `--scope`, `--metric`, or `--job`, `stats` returns one page of queue
+  nodes. Use `--page-size 1..100` and feed its opaque `next_page_token` into
+  `--page-token` to fetch the next page; pagination is manual. The wrapper
+  preserves this exact cursor for follow-up calls, but never include it in a
+  user-facing report.
 - For SSP Prometheus statistics, use `--scope queue` for configured queue
   summaries and `--scope job --job <exact-job-name>` for a workload. Read live
   help for the supported metrics and keep queue/job identifiers out of reports.
-- On SSP with Clusterx 2026.8.11, treat a pods-endpoint HTTP 404 from `log` as
-  a log-discovery failure, not proof that the job failed. Check `get-job`
-  separately. The same 404 can occur while a job is `Running` and after it is
-  `Succeeded`, even when the workload flushes output.
 - SSP job details may return empty `nodes` and `nodes_ip`, and `get-node` may
   not provide a fallback. Never invent node or log data. For jobs requiring
   observable progress, write sanitized status/results to approved shared
@@ -167,8 +189,8 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   when the user explicitly requested that exact target. If a partial name has
   no unique exact resolution, show the candidates and ask the user to choose;
   never infer a destructive target.
-- Clusterx 2026.8.11 supports batch `stop` filters. Use them only when the user
-  explicitly requests that exact batch scope. Preview the resolved matching
+- Clusterx 2026.8.11 and later support batch `stop` filters. Use them only when
+  the user explicitly requests that exact batch scope. Preview the matching
   jobs before executing; never broaden an exact-target request into a regex,
   group, user, partition, or status filter.
 - Use the wrapper's redacted output when presenting command results. Pass any
