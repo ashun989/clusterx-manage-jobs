@@ -59,7 +59,9 @@ python3 scripts/preflight.py --cwd <project-dir> --tmpdir <shared-tmpdir>
 ```bash
 python3 scripts/clusterx_exec.py --cwd <project-dir> -- list
 python3 scripts/clusterx_exec.py --cwd <project-dir> -- run <arguments>
-python3 scripts/clusterx_exec.py --cwd <project-dir> -- log <job-id>
+python3 scripts/clusterx_exec.py --cwd <project-dir> -- get-job <job-id> --workers
+python3 scripts/clusterx_exec.py --cwd <project-dir> -- log <job-id> --worker <worker-name>
+python3 scripts/clusterx_exec.py --cwd <project-dir> -- log <job-id> --hours 6
 ```
 
 包装器只报告配置来源和路径，不输出配置值。

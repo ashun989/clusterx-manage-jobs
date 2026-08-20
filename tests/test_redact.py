@@ -62,6 +62,25 @@ class RedactTests(unittest.TestCase):
         source = "queue=training image=registry.example/model:v1\n"
         self.assertEqual(redact_module.redact(source), source)
 
+    def test_clusterx_pagination_cursors_are_reusable(self):
+        source = (
+            "next page token: cursor-part-one\n"
+            "cursor-part-two (pass via --page-token to fetch the next page)\n"
+            "{'next_page_token': 'structured-cursor'}\n"
+            "token: generic-secret\n"
+            "access_token: access-secret\n"
+        )
+        result = redact_module.redact(source)
+        self.assertIn(
+            "next page token: cursor-part-onecursor-part-two "
+            "(pass via --page-token to fetch the next page)",
+            result,
+        )
+        self.assertIn("'next_page_token': 'structured-cursor'", result)
+        self.assertNotIn("generic-secret", result)
+        self.assertNotIn("access-secret", result)
+        self.assertEqual(result.count("<redacted>"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,12 +3,12 @@
   "sources": [
     {
       "id": "clusterx-main",
-      "title": "Clusterx CLI 工具提交训练任务至 PT 集群",
+      "title": "Clusterx CLI 工具提交训练任务至 PT/D 集群",
       "url": "https://aicarrier.feishu.cn/docx/BJyHdJuszoDBhoxhqfncrTDInjc",
       "reference_path": "../../skill/clusterx-manage-jobs/references/clusterx-cli.md",
-      "approved_revision_id": 53,
-      "approved_source_sha256": "f8dea6d4c05eb3f44ae10de7f5dff8cc3d157cea3cb0f5551a68ea05d5ca1d13",
-      "approved_at": "2026-08-12T03:17:39Z"
+      "approved_revision_id": 77,
+      "approved_source_sha256": "882dee7e887aeb048a197afec98514c72346dae2c5027e292467b1e84f368b1a",
+      "approved_at": "2026-08-20T09:04:17Z"
     }
   ]
 }

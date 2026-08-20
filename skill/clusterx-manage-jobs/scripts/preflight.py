@@ -17,11 +17,12 @@ from config_resolver import inspect_config, resolve_config
 from redact import redact
 
 
-TESTED_CLUSTERX_VERSION = "2026.8.11"
+TESTED_CLUSTERX_VERSION = "2026.8.19"
 MINIMUM_PYTHON = (3, 10)
 REQUIRED_KEYS = {
     "default",
     "ssp",
+    "cluster_type",
     "subscription",
     "resource_group",
     "region",

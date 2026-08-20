@@ -19,7 +19,7 @@ class PreflightTests(unittest.TestCase):
             binary = temp / "clusterx"
             binary.write_text(
                 "#!/bin/sh\n"
-                "printf '%s\\n' 'clusterx 2026.8.11 access_token=leaked'\n",
+                "printf '%s\\n' 'clusterx 2026.8.19 access_token=leaked'\n",
                 encoding="utf-8",
             )
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
@@ -30,7 +30,7 @@ class PreflightTests(unittest.TestCase):
                 + "\n".join(
                     f"  {key}: placeholder"
                     for key in (
-                        "subscription", "resource_group", "region",
+                        "cluster_type", "subscription", "resource_group", "region",
                         "workspace", "cluster", "ak_id", "ak_secret",
                     )
                 )
@@ -58,6 +58,30 @@ class PreflightTests(unittest.TestCase):
                 payload["checks"]["clusterx"]["compatibility"],
                 "tested",
             )
+
+    def test_cluster_type_is_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            binary = temp / "clusterx"
+            binary.write_text("#!/bin/sh\nprintf '2026.8.19\\n'\n", encoding="utf-8")
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            config = temp / "clusterx.yaml"
+            config.write_text(
+                "default: ssp\nssp:\n"
+                "  subscription: x\n  resource_group: x\n  region: x\n"
+                "  workspace: x\n  cluster: x\n  ak_id: x\n  ak_secret: x\n",
+                encoding="utf-8",
+            )
+            config.chmod(0o600)
+            env = os.environ.copy()
+            env["PATH"] = f"{temp}{os.pathsep}{env.get('PATH', '')}"
+            run = subprocess.run(
+                [sys.executable, str(SCRIPT), "--config", str(config), "--json"],
+                text=True, capture_output=True, env=env,
+            )
+            self.assertEqual(run.returncode, 1)
+            payload = json.loads(run.stdout)
+            self.assertEqual(payload["checks"]["config"]["missing_keys"], ["cluster_type"])
 
     def test_missing_binary_and_unsafe_config_fail(self):
         with tempfile.TemporaryDirectory() as directory:

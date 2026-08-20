@@ -49,7 +49,11 @@ python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
 python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
   --cwd <project> -- get-job <job-id> --workers
 python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
-  --cwd <project> -- log <job-id>
+  --cwd <project> -- log <job-id> --worker <worker-name> --lines 200
+python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
+  --cwd <project> -- log <job-id> --hours 6 --page-size 1000 --max-pages 10
+python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
+  --cwd <project> -- stats --page-size 100
 python3 skill/clusterx-manage-jobs/scripts/clusterx_exec.py \
   --cwd <project> -- stats --scope job --job <exact-job-name> --metric all
 ```

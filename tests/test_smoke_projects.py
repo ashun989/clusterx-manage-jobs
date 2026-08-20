@@ -117,7 +117,7 @@ class SmokeProjectTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["steps"], 2)
 
-    def test_skill_documents_ssp_runtime_limitations(self):
+    def test_skill_documents_ssp_runtime_behavior(self):
         skill_root = ROOT / "skill" / "clusterx-manage-jobs"
         skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
         reference_text = (
@@ -127,11 +127,13 @@ class SmokeProjectTests(unittest.TestCase):
         for text in (skill_text, reference_text):
             self.assertIn("32 Unicode characters", text)
             self.assertIn("nodes_ip", text)
-            self.assertIn("Running", text)
-            self.assertIn("Succeeded", text)
-            self.assertIn("HTTP 404", text)
+            self.assertIn("--worker", text)
+            self.assertIn("--hours", text)
+            self.assertIn("10,000", text)
+            self.assertIn("--page-token", text)
+            self.assertIn("--streaming", text)
 
-    def test_skill_documents_2026_8_11_features(self):
+    def test_skill_documents_2026_8_19_features(self):
         skill_root = ROOT / "skill" / "clusterx-manage-jobs"
         skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
         reference_text = (
@@ -139,10 +141,12 @@ class SmokeProjectTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         combined = f"{skill_text}\n{reference_text}"
 
-        self.assertIn("2026.8.11", combined)
+        self.assertIn("2026.8.19", combined)
         self.assertIn("--sp-block", reference_text)
         self.assertIn("--workers", reference_text)
         self.assertIn("--page-size", reference_text)
+        self.assertIn("next_page_token", combined)
+        self.assertIn("historical", combined.lower())
         self.assertIn("batch `stop`", skill_text)
         self.assertIn("--scope queue", combined)
         self.assertIn("--scope job", combined)
