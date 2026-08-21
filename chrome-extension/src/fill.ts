@@ -25,7 +25,12 @@ function isUsable(element: Element): boolean {
   ) return false;
   for (let current: HTMLElement | null = element; current; current = current.parentElement) {
     if (current.hidden || current.getAttribute("aria-hidden") === "true") return false;
-    if (current.style.display === "none" || current.style.visibility === "hidden") return false;
+    if (
+      current.style.display === "none"
+      || current.style.visibility === "hidden"
+      || current.style.pointerEvents === "none"
+      || current.classList.contains("sensed-select-dropdown-hidden")
+    ) return false;
   }
   return true;
 }
@@ -90,6 +95,7 @@ function optionCandidates(option: HTMLElement): string[] {
   const values = new Set<string>();
   for (const value of [
     option.textContent,
+    option.getAttribute("aria-label"),
     option.getAttribute("title"),
     option.getAttribute("name"),
     option.getAttribute("value"),
@@ -116,6 +122,16 @@ function activateCombobox(control: HTMLElement): void {
 }
 
 function optionRootsForControl(document: Document, control?: HTMLElement): HTMLElement[] {
+  if (control?.getAttribute("aria-expanded") === "true") {
+    const dropdowns = Array.from(
+      document.querySelectorAll<HTMLElement>(".sensed-select-dropdown"),
+    ).filter((element) =>
+      isUsable(element)
+      && !element.classList.contains("sensed-select-dropdown-hidden"),
+    );
+    if (dropdowns.length > 0) return dropdowns;
+  }
+
   const ids = [control?.getAttribute("aria-controls"), control?.getAttribute("aria-owns")]
     .flatMap((value) => (value ?? "").split(/\s+/))
     .filter(Boolean);
@@ -124,17 +140,51 @@ function optionRootsForControl(document: Document, control?: HTMLElement): HTMLE
     .filter((element): element is HTMLElement => element !== null);
 }
 
-function optionsForControl(document: Document, control?: HTMLElement): HTMLElement[] {
+interface OptionGroups {
+  visual: HTMLElement[];
+  accessible: HTMLElement[];
+}
+
+function optionGroupsForControl(document: Document, control?: HTMLElement): OptionGroups {
   const roots = optionRootsForControl(document, control);
-  const options = roots.length > 0
-    ? roots.flatMap((root) => Array.from(root.querySelectorAll<HTMLElement>('[role="option"]')))
-    : Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'));
-  return [...new Set(options)].filter(isUsable);
+  const queryRoots: ParentNode[] = roots.length > 0 ? roots : [document];
+  const visualOptions = queryRoots.flatMap((root) =>
+    Array.from(root.querySelectorAll<HTMLElement>(".sensed-select-item-option")),
+  ).filter(isUsable);
+  const accessibleOptions = queryRoots.flatMap((root) =>
+    Array.from(root.querySelectorAll<HTMLElement>('[role="option"]')),
+  ).filter(isUsable);
+  return {
+    visual: [...new Set(visualOptions)],
+    accessible: [...new Set(accessibleOptions)],
+  };
+}
+
+function optionsForControl(document: Document, control?: HTMLElement): HTMLElement[] {
+  const groups = optionGroupsForControl(document, control);
+  return groups.visual.length > 0 ? groups.visual : groups.accessible;
 }
 
 function matchingOptions(document: Document, value: string, control?: HTMLElement): HTMLElement[] {
-  return optionsForControl(document, control)
+  const groups = optionGroupsForControl(document, control);
+  const visualMatches = groups.visual.filter((option) => optionCandidates(option).includes(value));
+  if (visualMatches.length > 0 || groups.visual.length === 0) {
+    return visualMatches.length > 0
+      ? visualMatches
+      : groups.accessible.filter((option) => optionCandidates(option).includes(value));
+  }
+
+  const accessibleMatches = groups.accessible
     .filter((option) => optionCandidates(option).includes(value));
+  const visibleNames = new Set(accessibleMatches.flatMap((option) => [
+    option.getAttribute("aria-label"),
+    option.getAttribute("title"),
+    option.getAttribute("name"),
+  ].map(text).filter(Boolean)));
+  const mappedVisual = groups.visual.filter((option) =>
+    optionCandidates(option).some((candidate) => visibleNames.has(candidate)),
+  );
+  return mappedVisual.length > 0 ? mappedVisual : accessibleMatches;
 }
 
 async function chooseOption(
@@ -179,7 +229,7 @@ function scrollContainerFor(roots: HTMLElement[]): HTMLElement | undefined {
     .filter((element) => element.scrollHeight > element.clientHeight)
     .sort((left, right) => {
       const scrollPriority = (element: HTMLElement): number => {
-        const overflow = window.getComputedStyle(element).overflowY;
+        const overflow = element.style.overflowY;
         return /virtual-list-holder|select-list-holder/.test(element.className)
           || overflow === "auto"
           || overflow === "scroll"
@@ -285,7 +335,7 @@ async function chooseAfsOption(
     const visible = optionsForControl(document, control);
     return visible.length > 0 ? visible : undefined;
   });
-  const exact = options.filter((option) => optionCandidates(option).includes(mount.id));
+  const exact = matchingOptions(document, mount.id, control);
   if (exact.length === 1) {
     exact[0].click();
     return "id";
@@ -294,7 +344,7 @@ async function chooseAfsOption(
 
   const catalogName = afsCatalog[mount.id.toLowerCase()];
   if (catalogName) {
-    const catalogMatches = options.filter((option) => optionCandidates(option).includes(catalogName));
+    const catalogMatches = matchingOptions(document, catalogName, control);
     if (catalogMatches.length !== 1) {
       throw new PageControlError(
         catalogMatches.length > 1
@@ -647,6 +697,30 @@ async function configureAossAuth(
   return { mode: "manual", ambiguous: choice === "ambiguous" };
 }
 
+function populateAossCommonFields(fields: AossFields, mount: AossMount): void {
+  inputSetter(fields.bucket, mount.name);
+  inputSetter(fields.endpoint, mount.endpoint);
+  inputSetter(fields.subdir, mount.subdir ?? "");
+  inputSetter(fields.mountPath, mount.mountPath);
+}
+
+function aossAuthAnchor(fields: AossFields): HTMLElement {
+  return fields.auth.mode === "kms" ? fields.auth.control : fields.auth.accessKey;
+}
+
+async function stableAossFields(document: Document, mountPath: string): Promise<AossFields> {
+  let previousAnchor: HTMLElement | undefined;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await afterDropdownScroll();
+    const fields = aossFieldsByMountPath(document, mountPath);
+    if (!fields) continue;
+    const anchor = aossAuthAnchor(fields);
+    if (anchor.isConnected && anchor === previousAnchor) return fields;
+    previousAnchor = anchor;
+  }
+  throw new PageControlError("对象存储字段更新后凭据控件仍不稳定");
+}
+
 async function addAossMount(document: Document, mount: AossMount, index: number): Promise<FillItemResult> {
   const existing = existingAossMount(document, mount, index);
   if (existing) return existing;
@@ -669,11 +743,16 @@ async function addAossMount(document: Document, mount: AossMount, index: number)
     });
   }
   const fields = aossFields(mountInput);
-  inputSetter(fields.bucket, mount.name);
-  inputSetter(fields.endpoint, mount.endpoint);
-  if (mount.subdir) inputSetter(fields.subdir, mount.subdir);
-  inputSetter(fields.mountPath, mount.mountPath);
-  const authResult = await configureAossAuth(document, fields, mount);
+  populateAossCommonFields(fields, mount);
+  const populatedFields = await stableAossFields(document, mount.mountPath);
+  const authResult = await configureAossAuth(document, populatedFields, mount);
+  const currentFields = await waitFor(document, () => {
+    const current = aossFieldsByMountPath(document, mount.mountPath);
+    return current && aossAuthMatches(current.auth, mount) ? current : undefined;
+  }).catch(() => {
+    throw new PageControlError("对象存储凭据选择后未保持生效");
+  });
+  populateAossCommonFields(currentFields, mount);
   return {
     key: `mount.aoss.${index}`,
     label: `对象存储挂载 ${index + 1}`,

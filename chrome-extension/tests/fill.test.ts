@@ -59,8 +59,14 @@ interface FixtureOptions {
   customImage?: boolean;
   afsOption?: boolean;
   refreshRdma?: boolean;
+  duplicatedAfsAccessibilityOptions?: boolean;
+  liveAccessModeMarkup?: boolean;
   kmsCredentials?: string[][];
   kmsCredentialPages?: string[][][];
+  liveKmsMarkup?: boolean;
+  retainClosedKmsDropdown?: boolean;
+  refreshKmsControlAfterCommonFields?: boolean;
+  deferKmsControlRefresh?: boolean;
 }
 
 function installFixture(options: FixtureOptions = {}): HTMLButtonElement {
@@ -134,11 +140,38 @@ function installFixture(options: FixtureOptions = {}): HTMLButtonElement {
       if (options.afsOption === false || afsList.children.length > 0) return;
       transientOption("afs-team-models", () => { source.value = "afs-team-models"; }, afsList, false);
       transientOption("afs-team-archive", () => { source.value = "afs-team-archive"; }, afsList, false);
+      if (options.duplicatedAfsAccessibilityOptions) {
+        const visual = document.createElement("div");
+        visual.className = "sensed-select-item sensed-select-item-option";
+        visual.title = "afs-team-models";
+        visual.textContent = "afs-team-models";
+        visual.addEventListener("click", () => { source.value = "afs-team-models"; });
+        afsList.append(visual);
+      }
     });
     const access = row.querySelector<HTMLInputElement>(".access-mode")!;
     const accessList = row.querySelector<HTMLElement>(`#access_${index}_list`)!;
     row.querySelector<HTMLElement>(".access-selector")?.addEventListener("click", () => {
       if (accessList.children.length === 0) {
+        if (options.liveAccessModeMarkup) {
+          for (const [label, value] of [
+            ["只读", "VOLUME_ACCESS_MODE_READ_ONLY"],
+            ["读写", "VOLUME_ACCESS_MODE_READ_WRITE"],
+          ]) {
+            const accessible = document.createElement("div");
+            accessible.setAttribute("role", "option");
+            accessible.setAttribute("aria-label", label);
+            accessible.textContent = value;
+            accessList.append(accessible);
+            const visual = document.createElement("div");
+            visual.className = "sensed-select-item sensed-select-item-option";
+            visual.title = label;
+            visual.textContent = label;
+            visual.addEventListener("click", () => { access.value = value; });
+            accessList.append(visual);
+          }
+          return;
+        }
         transientOption(
           "VOLUME_ACCESS_MODE_READ_WRITE",
           () => { access.value = "VOLUME_ACCESS_MODE_READ_WRITE"; },
@@ -156,13 +189,15 @@ function installFixture(options: FixtureOptions = {}): HTMLButtonElement {
     const credentials = options.kmsCredentials?.[index] ?? ["bucket-example"];
     const credentialPages = options.kmsCredentialPages?.[index];
     const row = document.createElement("section");
+    const controlId = options.liveKmsMarkup ? "id" : `aksk_${index}`;
+    const listId = options.liveKmsMarkup ? "id_list" : `aksk_${index}_list`;
     row.innerHTML = `
       <div class="auth-fields">
-        <label for="aksk_${index}">Access Key ID（AK） / Secret Access Key（SK）</label>
+        <label for="${controlId}">Access Key ID（AK） / Secret Access Key（SK）</label>
         <div class="sensed-select">
           <div class="sensed-select-selector">
             <span class="selected-credential"></span>
-            <input id="aksk_${index}" role="combobox" aria-controls="aksk_${index}_list" placeholder="请选择密钥凭据">
+            <input id="${controlId}" role="combobox" aria-expanded="false" aria-controls="${listId}" placeholder="请选择密钥凭据">
           </div>
         </div>
         <a class="manual-switch">切换为手动填写AK/SK</a>
@@ -173,11 +208,27 @@ function installFixture(options: FixtureOptions = {}): HTMLButtonElement {
         <input placeholder="请输入存储目录，非必填">
         <input placeholder="请输入路径，如 /data">
       </div>
-      <div id="aksk_${index}_list"></div>
+      <div id="${listId}"></div>
     `;
     const authFields = row.querySelector<HTMLElement>(".auth-fields")!;
-    const kmsList = row.querySelector<HTMLElement>(`#aksk_${index}_list`)!;
+    let kmsControl = row.querySelector<HTMLInputElement>('[role="combobox"]')!;
+    const kmsList = row.querySelector<HTMLElement>(`#${listId}`)!;
     const selected = row.querySelector<HTMLElement>(".selected-credential")!;
+    if (options.refreshKmsControlAfterCommonFields) {
+      let refreshed = false;
+      row.querySelector<HTMLInputElement>('input[placeholder="请输入路径，如 /data"]')
+        ?.addEventListener("input", () => {
+          if (refreshed) return;
+          refreshed = true;
+          const replace = (): void => {
+            const replacement = kmsControl.cloneNode(true) as HTMLInputElement;
+            kmsControl.replaceWith(replacement);
+            kmsControl = replacement;
+          };
+          if (options.deferKmsControlRefresh) window.setTimeout(replace, 10);
+          else replace();
+        });
+    }
     const renderCredentials = (names: string[]): void => {
       kmsList.replaceChildren();
       for (const [optionIndex, credential] of names.entries()) {
@@ -205,6 +256,40 @@ function installFixture(options: FixtureOptions = {}): HTMLButtonElement {
     }
     row.querySelector<HTMLElement>(".sensed-select-selector")?.addEventListener("click", () => {
       if (kmsList.children.length > 0) return;
+      if (options.liveKmsMarkup) {
+        kmsControl.setAttribute("aria-expanded", "true");
+        kmsList.setAttribute("role", "listbox");
+        for (const [optionIndex, credential] of credentials.slice(0, 2).entries()) {
+          const option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.setAttribute("aria-label", credential);
+          option.id = `${listId}_${optionIndex}`;
+          option.textContent = `cred-${optionIndex}`;
+          kmsList.append(option);
+        }
+        const dropdown = document.createElement("div");
+        dropdown.className = "sensed-select-dropdown";
+        dropdown.append(kmsList);
+        const holder = document.createElement("div");
+        holder.className = "rc-virtual-list-holder";
+        dropdown.append(holder);
+        for (const credential of credentials) {
+          const option = document.createElement("div");
+          option.className = "sensed-select-item sensed-select-item-option";
+          option.title = credential;
+          option.innerHTML = `<div class="sensed-select-item-option-content">${credential}</div>`;
+          option.addEventListener("click", () => {
+            selected.innerHTML = `<span class="sensed-select-selection-item" title="${credential}">${credential}</span>`;
+            kmsControl.setAttribute("aria-expanded", "false");
+            kmsList.replaceChildren();
+            if (options.retainClosedKmsDropdown) dropdown.style.pointerEvents = "none";
+            else dropdown.remove();
+          });
+          holder.append(option);
+        }
+        document.body.append(dropdown);
+        return;
+      }
       if (credentialPages) {
         renderCredentials(credentialPages[0] ?? []);
         return;
@@ -292,6 +377,27 @@ describe("fillDevelopmentForm", () => {
     expect(report.items.find((item) => item.key === "mount.aoss.0")?.status).toBe("filled");
   });
 
+  it("matches the live KMS menu where names are aria labels and visual option titles", async () => {
+    installFixture({
+      liveKmsMarkup: true,
+      kmsCredentials: [["bucket-example", "bucket-second", "bucket-other"]],
+    });
+    const onlyAoss = structuredClone(profile);
+    onlyAoss.mounts = [onlyAoss.mounts[1]];
+
+    const report = await fillDevelopmentForm(onlyAoss, document, pageUrl);
+
+    expect(report.ok).toBe(true);
+    expect(document.querySelector('.sensed-select-selection-item')?.textContent).toBe("bucket-example");
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    expect(document.querySelector<HTMLInputElement>('input[placeholder="请输入"]')?.value)
+      .toBe("bucket-example");
+    expect(report.items.find((item) => item.key === "mount.aoss.0")).toMatchObject({
+      status: "filled",
+      message: "已填充对象存储字段，并选择同名 KMS 凭据",
+    });
+  });
+
   it("falls back to manual AK/SK with a warning for duplicate KMS names", async () => {
     installFixture({ kmsCredentials: [["bucket-example", "bucket-example"]] });
     const onlyAoss = structuredClone(profile);
@@ -306,6 +412,71 @@ describe("fillDevelopmentForm", () => {
       status: "warning",
       message: "存在多个同名 KMS 凭据，已拒绝猜测并手动填写 AK/SK；请复核",
     });
+  });
+
+  it("ignores a closing KMS menu while filling the next object mount", async () => {
+    installFixture({
+      liveKmsMarkup: true,
+      retainClosedKmsDropdown: true,
+      kmsCredentials: [
+        ["bucket-example", "bucket-second"],
+        ["bucket-example", "bucket-second"],
+      ],
+    });
+    const multiple = structuredClone(profile);
+    const objectMount = multiple.mounts.find((mount) => mount.type === "PV_AOSS")!;
+    multiple.mounts = [
+      objectMount,
+      { ...objectMount, name: "bucket-second", mountPath: "/data/objects-second" },
+    ];
+
+    const report = await fillDevelopmentForm(multiple, document, pageUrl);
+
+    expect(report.ok).toBe(true);
+    expect(report.items.filter((item) => item.key.startsWith("mount.aoss"))).toHaveLength(2);
+    expect(report.items.filter((item) => item.status === "warning")).toEqual([]);
+    expect(Array.from(document.querySelectorAll<HTMLElement>('.sensed-select-selection-item'))
+      .map((item) => item.textContent)).toEqual(["bucket-example", "bucket-second"]);
+  });
+
+  it("reacquires a KMS control replaced after common fields update", async () => {
+    installFixture({
+      liveKmsMarkup: true,
+      refreshKmsControlAfterCommonFields: true,
+      kmsCredentials: [["bucket-example"]],
+    });
+    const onlyAoss = structuredClone(profile);
+    onlyAoss.mounts = [onlyAoss.mounts[1]];
+
+    const report = await fillDevelopmentForm(onlyAoss, document, pageUrl);
+
+    expect(report.ok).toBe(true);
+    expect(report.items.find((item) => item.key === "mount.aoss.0")).toMatchObject({
+      status: "filled",
+      message: "已填充对象存储字段，并选择同名 KMS 凭据",
+    });
+    expect(document.querySelector('.sensed-select-selection-item')?.textContent).toBe("bucket-example");
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+  });
+
+  it("waits for a deferred KMS control replacement before opening the menu", async () => {
+    installFixture({
+      liveKmsMarkup: true,
+      refreshKmsControlAfterCommonFields: true,
+      deferKmsControlRefresh: true,
+      kmsCredentials: [["bucket-example"]],
+    });
+    const onlyAoss = structuredClone(profile);
+    onlyAoss.mounts = [onlyAoss.mounts[1]];
+
+    const report = await fillDevelopmentForm(onlyAoss, document, pageUrl);
+
+    expect(report.ok).toBe(true);
+    expect(report.items.find((item) => item.key === "mount.aoss.0")).toMatchObject({
+      status: "filled",
+      message: "已填充对象存储字段，并选择同名 KMS 凭据",
+    });
+    expect(document.querySelector('.sensed-select-selection-item')?.textContent).toBe("bucket-example");
   });
 
   it("leaves all image controls untouched for manual selection", async () => {
@@ -326,6 +497,19 @@ describe("fillDevelopmentForm", () => {
       status: "skipped",
       message: "请手动调整实例规格，并确认共享内存、WebIDE、SSH 访问和优先级",
     });
+  });
+
+  it("does not force page-wide CSS or font resolution while locating controls", async () => {
+    installFixture();
+    const withoutMounts = structuredClone(profile);
+    withoutMounts.mounts = [];
+    const styleSpy = vi.spyOn(window, "getComputedStyle");
+
+    const report = await fillDevelopmentForm(withoutMounts, document, pageUrl);
+
+    expect(report.ok).toBe(true);
+    expect(styleSpy).not.toHaveBeenCalled();
+    styleSpy.mockRestore();
   });
 
   it("fails closed before interacting when workspace differs", async () => {
@@ -398,6 +582,25 @@ describe("fillDevelopmentForm", () => {
 
   it("selects an AFS name obtained from the resource UUID catalog", async () => {
     installFixture();
+    const onlyAfs = structuredClone(profile);
+    onlyAfs.mounts = [onlyAfs.mounts[0]];
+
+    const report = await fillDevelopmentForm(onlyAfs, document, pageUrl, {
+      "afs-example": "afs-team-models",
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.items.find((item) => item.key === "mount.afs.0")).toMatchObject({
+      status: "filled",
+      message: "已通过资源 UUID 精确匹配并设为读写模式",
+    });
+  });
+
+  it("does not count duplicated AFS accessibility and visual options twice", async () => {
+    installFixture({
+      duplicatedAfsAccessibilityOptions: true,
+      liveAccessModeMarkup: true,
+    });
     const onlyAfs = structuredClone(profile);
     onlyAfs.mounts = [onlyAfs.mounts[0]];
 

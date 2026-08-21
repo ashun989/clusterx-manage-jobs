@@ -1,7 +1,7 @@
 {
   "name": "clusterx-development-autofill",
   "private": true,
-  "version": "0.1.3",
+  "version": "0.1.9",
   "type": "module",
   "scripts": {
     "build": "npm run typecheck && node build.mjs",
