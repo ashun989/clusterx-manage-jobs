@@ -5,6 +5,8 @@ groups:
     members: [alice]
   example-zero-quota:
     gpu_quota: 0
+    cpu_quota: 14
+    memory_quota_gib: 240
     members: [bob]
   default:
     gpu_quota: remainder

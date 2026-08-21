@@ -182,7 +182,9 @@ training log preview after explicitly selecting a Worker and clicking the load
 action. Merely loading the dashboard or opening workload details does not call
 Clusterx log APIs. Log content is returned with `Cache-Control: no-store`, is
 not added to snapshots or SSE, and remains separate from the full `clusterx
-log` workflow.
+log` workflow. Realtime Clusterx logs have no page cursor, so the Web UI fetches
+the latest 200 lines once and paginates them locally, defaulting to 20 lines on
+the last page while preserving the selected page across refreshes.
 
 The monitor consumes Clusterx 2026.8.19 node cursors until the complete bound
 inventory is present. It rejects cursor cycles, duplicate nodes, page-total

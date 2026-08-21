@@ -174,6 +174,10 @@ class PolicyTests(unittest.TestCase):
             8,
         )
         self.assertEqual(self.policy.groups["example-team"].members, ("alice",))
+        self.assertIsNone(self.policy.groups["example-team"].cpu_quota)
+        self.assertIsNone(self.policy.groups["example-team"].memory_quota_gib)
+        self.assertEqual(self.policy.groups["example-zero-quota"].cpu_quota, 14)
+        self.assertEqual(self.policy.groups["example-zero-quota"].memory_quota_gib, 240)
         payload = self.policy.model_dump(mode="json")
         payload["groups"]["default"]["members"] = ["alice"]
         with self.assertRaisesRegex(ValueError, "appears in both"):
@@ -207,6 +211,74 @@ class PolicyTests(unittest.TestCase):
             PolicyConfig.model_validate(payload).development.max_instances_per_user,
             1,
         )
+
+    def test_group_resource_quotas_are_optional_and_independent(self):
+        payload = self.policy.model_dump(mode="json")
+        payload["groups"] = {
+            "unlimited": {"members": ["alice"]},
+            "cpu-limited": {
+                "cpu_quota": 10, "memory_quota_gib": 100, "members": ["bob"],
+            },
+            "default": {},
+        }
+        policy = PolicyConfig.model_validate(payload)
+        items = [
+            workload("unlimited", "alice", "trainingJob", [placement("n1", 8, 1000, 5000)]),
+            workload("limited", "bob", "trainingJob", [placement("n2", 8, 11, 100)]),
+        ]
+        result = apply_policy(snapshot([node("n1", 8), node("n2", 8)], items), policy)
+        groups = {item["group"]: item for item in result["groups"]}
+        self.assertEqual(groups["unlimited"]["status"], "compliant")
+        self.assertIsNone(groups["unlimited"]["gpu_quota"])
+        self.assertIsNone(groups["unlimited"]["cpu_quota"])
+        self.assertIsNone(groups["unlimited"]["memory_quota_gib"])
+        self.assertEqual(groups["cpu-limited"]["status"], "burst")
+        self.assertEqual(groups["cpu-limited"]["over_resources"], ["cpu"])
+        self.assertEqual(groups["cpu-limited"]["policy_findings"][0]["code"], "quota.cpu")
+        self.assertEqual(groups["cpu-limited"]["policy_findings"][0]["limit"], {"cpu_quota": 10})
+
+        pressured = apply_policy(
+            snapshot([node("n1", 8), node("n2", 8)], items, [{"queue_age_seconds": 601}]),
+            policy,
+        )
+        pressured_group = next(
+            item for item in pressured["groups"] if item["group"] == "cpu-limited"
+        )
+        self.assertEqual(pressured_group["status"], "violation")
+
+    def test_default_gpu_quota_supports_remainder_numeric_and_unlimited(self):
+        payload = self.policy.model_dump(mode="json")
+        payload["groups"] = {
+            "explicit": {"gpu_quota": 3, "members": []},
+            "default": {"gpu_quota": "remainder", "members": []},
+        }
+        remainder = apply_policy(snapshot([node("n", 0)], []), PolicyConfig.model_validate(payload))
+        self.assertEqual(remainder["capacity"]["default_gpu_quota"], 5)
+
+        payload["groups"]["default"]["gpu_quota"] = 2
+        numeric = apply_policy(snapshot([node("n", 0)], []), PolicyConfig.model_validate(payload))
+        self.assertEqual(numeric["capacity"]["default_gpu_quota"], 2)
+        self.assertEqual(numeric["capacity"]["explicit_gpu_quota"], 5)
+
+        payload["groups"]["default"].pop("gpu_quota")
+        unlimited = apply_policy(snapshot([node("n", 0)], []), PolicyConfig.model_validate(payload))
+        self.assertIsNone(unlimited["capacity"]["default_gpu_quota"])
+
+    def test_group_quota_validation_rejects_invalid_values(self):
+        payload = self.policy.model_dump(mode="json")
+        payload["groups"]["example-team"]["gpu_quota"] = None
+        self.assertIsNone(PolicyConfig.model_validate(payload).groups["example-team"].gpu_quota)
+        payload["groups"]["example-team"]["gpu_quota"] = "remainder"
+        with self.assertRaisesRegex(ValueError, "only the default group"):
+            PolicyConfig.model_validate(payload)
+        payload = self.policy.model_dump(mode="json")
+        payload["groups"]["example-team"]["cpu_quota"] = -1
+        with self.assertRaisesRegex(ValueError, "greater than or equal to 0|non-negative"):
+            PolicyConfig.model_validate(payload)
+        payload = self.policy.model_dump(mode="json")
+        payload["groups"]["example-team"]["memory_quota_gib"] = float("inf")
+        with self.assertRaisesRegex(ValueError, "finite non-negative"):
+            PolicyConfig.model_validate(payload)
 
     def test_default_remainder_power_and_node_blocking(self):
         nodes = [node(f"n{i}", 0) for i in range(64)]
@@ -530,6 +602,36 @@ class PolicyTests(unittest.TestCase):
                 )
             self.assertEqual(groups.read_bytes(), before)
             self.assertFalse(manager.audit_path.exists())
+
+    def test_admin_group_update_omits_unlimited_quota_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            groups = Path(directory) / "groups.yaml"
+            path.write_text(RESOURCE_POLICY.read_text(), encoding="utf-8")
+            groups.write_text(GROUP_POLICY.read_text(), encoding="utf-8")
+            groups.chmod(0o600)
+            manager = PolicyManager(path, groups)
+            current = manager.admin_config()
+            payload = {
+                "schema_version": 1,
+                "groups": {
+                    "unlimited": {"members": ["alice"]},
+                    "default": {"gpu_quota": "remainder", "members": []},
+                },
+            }
+            manager.update_config(
+                "groups", yaml.safe_dump(payload), current["groups"]["revision"], actor="admin",
+            )
+            saved = yaml.safe_load(groups.read_text(encoding="utf-8"))
+            self.assertEqual(saved["groups"]["unlimited"], {"members": ["alice"]})
+            public = manager.public_status()["policy"]["groups"]["unlimited"]
+            self.assertEqual(
+                public,
+                {
+                    "gpu_quota": None, "cpu_quota": None,
+                    "memory_quota_gib": None, "member_count": 1,
+                },
+            )
 
     def test_admin_can_read_and_repair_malformed_raw_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1355,6 +1457,16 @@ class SkillCliTests(unittest.TestCase):
             "start_time", "runtime_hours", "runtime_quality", "runtime_source",
         ):
             self.assertIn(field, rendered)
+
+    def test_group_table_shows_independent_unlimited_quotas(self):
+        with mock.patch.dict("os.environ", {"COLUMNS": "240"}):
+            rendered = self.module._render_table([{
+                "group": "team", "status": "compliant", "gpu_quota": 8,
+                "cpu_quota": None, "memory_quota_gib": None, "allocated_gpu": 1,
+            }], no_color=True)
+        self.assertIn("cpu_quota", rendered)
+        self.assertIn("memory_quota_gib", rendered)
+        self.assertIn("不限", rendered)
 
     def test_api_validation_returns_two_and_filtered_stale_uses_snapshot(self):
         with mock.patch.object(

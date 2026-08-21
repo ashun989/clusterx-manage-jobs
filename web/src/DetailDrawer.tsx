@@ -1,8 +1,9 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { statusClass } from "./Table";
 import type { Alert, DetailRef, GroupSummary, NodeSummary, PolicyFinding, Snapshot, Telemetry, UserSummary, Workload, WorkloadLogResponse } from "./types";
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
+const quota = (value: unknown) => value == null ? "不限" : number(value);
 const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
 const allWorkloads = (snapshot: Snapshot) => [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])];
 const workloadResources = (workload: Workload) => `${number(workload.total_gpu)} GPU · ${number(workload.total_cpu)} CPU · ${number(workload.total_memory_gib)} GiB`;
@@ -58,9 +59,9 @@ function GroupDetail({ group, snapshot, open }: { group: GroupSummary; snapshot:
   return <>
     <span className="eyebrow">Group</span><h2>{group.group}</h2><span className={statusClass(group.status)}>{group.status}</span>
     <Metrics>
-      <Metric label="GPU" value={`${number(group.allocated_gpu)} / ${number(group.gpu_quota)}`} />
-      <Metric label="CPU" value={`${number(group.allocated_cpu)} / ${number(group.cpu_quota)}`} />
-      <Metric label="内存 GiB" value={`${number(group.allocated_memory_gib)} / ${number(group.memory_quota_gib)}`} />
+      <Metric label="GPU" value={`${number(group.allocated_gpu)} / ${quota(group.gpu_quota)}`} />
+      <Metric label="CPU" value={`${number(group.allocated_cpu)} / ${quota(group.cpu_quota)}`} />
+      <Metric label="内存 GiB" value={`${number(group.allocated_memory_gib)} / ${quota(group.memory_quota_gib)}`} />
       <Metric label="超限资源" value={group.over_resources.length ? group.over_resources.join(", ") : "无"} />
     </Metrics>
     <RelatedList title="当前活跃用户" kind="user" open={open} items={group.members.map((user) => ({ id: user, label: user, meta: snapshot.users.some((item) => item.user === user) ? undefined : "当前无资源" }))} />
@@ -109,21 +110,69 @@ function NodeDetail({ node, snapshot, open }: { node: NodeSummary; snapshot: Sna
   </>;
 }
 
+const LOG_FETCH_LINES = 200;
+const LOG_PAGE_SIZES = [20, 50, 100, 200] as const;
+
+function splitLogLines(content: string): string[] {
+  if (!content) return [];
+  const lines = content.replace(/\r\n?/g, "\n").split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
 function WorkloadLogPanel({ workload, snapshotId }: { workload: Workload; snapshotId: string }) {
   const workers = [...new Set(
     workload.placements.map((item) => item.pod).filter((item): item is string => Boolean(item)),
   )];
+  const workerSignature = workers.join("\u0000");
   const [worker, setWorker] = useState(workers.length === 1 ? workers[0] : "");
   const [content, setContent] = useState<string | null>(null);
+  const [pageSize, setPageSize] = useState<number>(20);
+  const [page, setPage] = useState(1);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const requestVersion = useRef(0);
+  const lines = useMemo(() => splitLogLines(content ?? ""), [content]);
+  const totalPages = Math.max(1, Math.ceil(lines.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const visibleLines = lines.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  useEffect(() => {
+    if (worker && !workers.includes(worker)) {
+      requestVersion.current += 1;
+      setWorker(workers.length === 1 ? workers[0] : "");
+      setContent(null);
+      setPage(1);
+      setError("");
+      setLoading(false);
+    } else if (!worker && workers.length === 1) {
+      setWorker(workers[0]);
+    }
+  }, [worker, workerSignature]);
+
+  const changeWorker = (value: string) => {
+    requestVersion.current += 1;
+    setWorker(value);
+    setContent(null);
+    setPage(1);
+    setError("");
+    setLoading(false);
+  };
+
+  const changePageSize = (value: number) => {
+    const nextTotalPages = Math.max(1, Math.ceil(lines.length / value));
+    setPageSize(value);
+    setPage((current) => Math.min(current, nextTotalPages));
+  };
 
   const load = async () => {
     if (!worker || loading) return;
+    const request = ++requestVersion.current;
+    const firstLoad = content == null;
     setLoading(true);
     setError("");
     try {
-      const query = new URLSearchParams({ snapshot_id: snapshotId, worker, lines: "200" });
+      const query = new URLSearchParams({ snapshot_id: snapshotId, worker, lines: String(LOG_FETCH_LINES) });
       const response = await fetch(
         `/api/v1/workloads/${encodeURIComponent(workload.workload_id)}/logs?${query}`,
         { cache: "no-store", headers: { Accept: "application/json" } },
@@ -133,22 +182,32 @@ function WorkloadLogPanel({ workload, snapshotId }: { workload: Workload; snapsh
         throw new Error(body.detail ?? response.statusText);
       }
       const body = await response.json() as WorkloadLogResponse;
-      setContent(body.content);
+      if (request !== requestVersion.current) return;
+      const nextContent = String(body.content ?? "");
+      const nextTotalPages = Math.max(1, Math.ceil(splitLogLines(nextContent).length / pageSize));
+      setContent(nextContent);
+      setPage((current) => firstLoad ? nextTotalPages : Math.min(current, nextTotalPages));
     } catch (value) {
+      if (request !== requestVersion.current) return;
       setError(value instanceof Error ? value.message : String(value));
     } finally {
-      setLoading(false);
+      if (request === requestVersion.current) setLoading(false);
     }
   };
 
   return <section className="detail-section"><h3>实时日志<span className="section-count">按需</span></h3>
-    <p className="muted">打开详情不会抓取日志；选择 Worker 后手动加载最近 200 行。</p>
+    <p className="muted">打开详情不会抓取日志；手动加载最近 200 行后在浏览器内分页。</p>
     <div className="log-controls">
-      {workers.length > 1 ? <label>Worker<select aria-label="日志 Worker" value={worker} onChange={(event) => { setWorker(event.target.value); setContent(null); setError(""); }}><option value="">请选择</option>{workers.map((item) => <option value={item} key={item}>{item}</option>)}</select></label> : <span className="muted">Worker: {workers[0]}</span>}
+      {workers.length > 1 ? <label>Worker<select aria-label="日志 Worker" value={worker} disabled={loading} onChange={(event) => changeWorker(event.target.value)}><option value="">请选择</option>{workers.map((item) => <option value={item} key={item}>{item}</option>)}</select></label> : <span className="muted">Worker: {workers[0]}</span>}
+      <label>每页行数<select aria-label="每页日志行数" value={pageSize} disabled={loading} onChange={(event) => changePageSize(Number(event.target.value))}>{LOG_PAGE_SIZES.map((size) => <option value={size} key={size}>{size}</option>)}</select></label>
       <button type="button" onClick={load} disabled={!worker || loading}>{loading ? "加载中…" : content == null ? "加载日志" : "刷新日志"}</button>
     </div>
     {error && <p className="error">{error}</p>}
-    {content != null && <pre className="detail-scroll-panel workload-log" tabIndex={0}>{content || "日志为空"}</pre>}
+    {content != null && <><div className="log-pagination"><span>{lines.length} 行 · 第 {currentPage}/{totalPages} 页</span><div>
+      <button type="button" aria-label="日志上一页" disabled={currentPage <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>上一页</button>
+      <label>页码<select aria-label="日志页码" value={currentPage} disabled={loading} onChange={(event) => setPage(Number(event.target.value))}>{Array.from({ length: totalPages }, (_, index) => index + 1).map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+      <button type="button" aria-label="日志下一页" disabled={currentPage >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>下一页</button>
+    </div></div><pre className="detail-scroll-panel workload-log" tabIndex={0}>{visibleLines.length ? visibleLines.join("\n") : "日志为空"}</pre></>}
   </section>;
 }
 
@@ -171,7 +230,7 @@ function WorkloadDetail({ workload, snapshotId, open }: { workload: Workload; sn
     </Metrics>
     {workload.resource_basis === "requested" && <section className="detail-section"><h3>Task 请求<span className="section-count">{workload.task_resources?.length ?? 0}</span></h3>{workload.task_resources?.length ? <div className="plan-workloads"><table><thead><tr><th>Task</th><th>角色</th><th>副本数</th><th>每副本 GPU</th><th>每副本 CPU</th><th>每副本内存 GiB</th></tr></thead><tbody>{workload.task_resources.map((task, index) => <tr key={`${task.name}:${task.role}:${index}`}><td>{task.name}</td><td>{task.role || "—"}</td><td>{number(task.replicas)}</td><td>{number(task.gpu_per_replica)}</td><td>{number(task.cpu_per_replica)}</td><td>{number(task.memory_gib_per_replica)}</td></tr>)}</tbody></table></div> : <p className="muted">无 Task 资源明细</p>}</section>}
     {workload.resource_basis === "attributed" && <section className="detail-section"><h3>Placements（当前归属）<span className="section-count">{workload.placements.length}</span></h3><div className="placement-list">{workload.placements.map((placement, index) => <button type="button" key={`${placement.node}-${placement.pod ?? index}`} onClick={() => open({ kind: "node", id: placement.node, label: placement.node })}><span><b>{placement.node}</b><small>{placement.pod || "—"}</small></span><em>{number(placement.gpu)} GPU · {number(placement.cpu)} CPU · {number(placement.memory_gib)} GiB</em></button>)}</div></section>}
-    {workload.type === "trainingJob" && workload.resource_basis === "attributed" && workload.placements.some((item) => item.pod) && <WorkloadLogPanel key={`${snapshotId}:${workload.workload_id}`} workload={workload} snapshotId={snapshotId} />}
+    {workload.type === "trainingJob" && workload.resource_basis === "attributed" && workload.placements.some((item) => item.pod) && <WorkloadLogPanel key={workload.workload_id} workload={workload} snapshotId={snapshotId} />}
     <TelemetryPanel telemetry={workload.telemetry} />
     {workload.historical_telemetry && <section className="detail-section"><h3>历史 GPU 遥测</h3><Metrics>
       <Metric label="评估状态" value={<span className={statusClass(workload.historical_telemetry.evaluation_status)}>{workload.historical_telemetry.evaluation_status}</span>} />

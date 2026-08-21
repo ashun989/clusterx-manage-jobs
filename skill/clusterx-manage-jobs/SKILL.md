@@ -121,8 +121,13 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   invalidate the refresh instead of publishing a partial snapshot.
 - Workload detail logs in the Web UI are lazy: opening a workload performs no
   log request. Any Monitor viewer clicking **Load logs** for an exact Worker
-  fetches a bounded realtime preview. The response is `no-store` and never
-  enters snapshots, SSE events, history, or reports.
+  fetches the latest 200 lines as a bounded realtime preview. The browser pages
+  that response locally, defaults to 20 lines on the last page, and preserves
+  the selected Worker, page size, and page across snapshot and manual log
+  refreshes. The response is `no-store` and never enters snapshots, SSE events,
+  history, or reports.
+- Group GPU, CPU, and memory quotas are independent. An omitted or null quota
+  is unlimited for that resource; only `default.gpu_quota` may use `remainder`.
 - Policy output uses structured findings. Filter list views with
   `--finding-category`, `--finding-code`, and `--tag` (comma-separated within
   each option), or use `--violations-only`. A finding has a stable code,

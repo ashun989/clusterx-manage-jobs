@@ -37,8 +37,8 @@ RULE_CATALOG = [
     {"code": "resource.training.cpu_ratio", "category": "resource-shape", "applies_to": "trainingJob", "title": "Training CPU-to-GPU ratio", "description": "Each task/node may request at most GPU count times cpu_per_gpu; zero-GPU tasks use a separate limit."},
     {"code": "resource.training.memory_ratio", "category": "resource-shape", "applies_to": "trainingJob", "title": "Training memory-to-GPU ratio", "description": "Each task/node may request at most GPU count times memory_gib_per_gpu; zero-GPU tasks use a separate limit."},
     {"code": "quota.gpu", "category": "quota", "applies_to": "group", "title": "Group GPU quota", "description": "Usage above quota is burst without pending pressure and violation with active pressure; equality is compliant."},
-    {"code": "quota.cpu", "category": "quota", "applies_to": "group", "title": "Derived group CPU quota", "description": "Group CPU quota is GPU quota times cpu_per_gpu."},
-    {"code": "quota.memory", "category": "quota", "applies_to": "group", "title": "Derived group memory quota", "description": "Group memory quota is GPU quota times memory_gib_per_gpu."},
+    {"code": "quota.cpu", "category": "quota", "applies_to": "group", "title": "Group CPU quota", "description": "CPU usage is checked only when the group explicitly configures cpu_quota."},
+    {"code": "quota.memory", "category": "quota", "applies_to": "group", "title": "Group memory quota", "description": "Memory usage is checked only when the group explicitly configures memory_quota_gib."},
     {"code": "utilization.low_gpu_activity", "category": "utilization", "applies_to": "GPU workload", "title": "Historical low GPU activity", "description": "Both historical compute and capacity/time-weighted memory utilization are at or below their inclusive thresholds."},
     {"code": "node.idle", "category": "node-classification", "applies_to": "node", "title": "Idle node", "description": "The schedulable node has no allocated GPU, CPU, or memory."},
     {"code": "node.gpu_full", "category": "node-classification", "applies_to": "node", "title": "GPU-full node", "description": "All GPUs are allocated."},
@@ -219,6 +219,8 @@ class PolicyManager:
                 policy["groups"] = {
                     name: {
                         "gpu_quota": group.gpu_quota,
+                        "cpu_quota": group.cpu_quota,
+                        "memory_quota_gib": group.memory_quota_gib,
                         "member_count": len(group.members),
                     }
                     for name, group in self._policy.groups.items()
@@ -237,7 +239,8 @@ class PolicyManager:
                     "historical_telemetry_unavailable": "The snapshot is still published, historical low-utilization evaluation is skipped, and a telemetry warning is emitted.",
                     "historical_scope": "Only currently running GPU trainingJob and aid workloads are evaluated; no completed-workload history is stored.",
                     "development_instance_limit": "Only active aid workloads with known owners count toward the per-user development instance limit; the finding remains user-scoped.",
-                    "default_group": "The default GPU quota is max(0, current bound GPU capacity minus all explicit group GPU quotas).",
+                    "group_quotas": "GPU, CPU, and memory quotas are independent; an omitted or null resource quota is unlimited.",
+                    "default_group": "When default.gpu_quota is remainder, its effective quota is max(0, current bound GPU capacity minus all other explicit group GPU quotas).",
                     "planning_profile": "Node effective/blocked capacity and omitted plan CPU/memory use the configurable standard planning profile; training ratios remain submission limits.",
                     "cluster_access": "Monitoring and planning are read-only against Clusterx; authenticated administrators may write only the configured local policy files.",
                 },
@@ -260,7 +263,7 @@ class PolicyManager:
         return {
             "schema_version": self._policy.schema_version,
             "groups": {
-                name: group.model_dump(mode="json")
+                name: group.model_dump(mode="json", exclude_none=True)
                 for name, group in self._policy.groups.items()
             },
         }
@@ -392,7 +395,7 @@ class PolicyManager:
                 normalized = {
                     "schema_version": validated.schema_version,
                     "groups": {
-                        name: group.model_dump(mode="json")
+                        name: group.model_dump(mode="json", exclude_none=True)
                         for name, group in validated.groups.items()
                     },
                 }
@@ -649,12 +652,24 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         if not bool(node.get("planning_eligible", True))
     }
     bound_gpu = int(_sum(node.get("total_gpu") for node in nodes))
-    explicit_quota = sum(
+    explicit_named_gpu_quota = sum(
         int(group.gpu_quota)
         for name, group in policy.groups.items()
         if name != "default" and isinstance(group.gpu_quota, int)
     )
-    default_quota = max(0, bound_gpu - explicit_quota)
+    explicit_gpu_quota = sum(
+        int(group.gpu_quota)
+        for group in policy.groups.values()
+        if isinstance(group.gpu_quota, int)
+    )
+    configured_default_gpu_quota = policy.groups["default"].gpu_quota
+    default_gpu_quota = (
+        max(0, bound_gpu - explicit_named_gpu_quota)
+        if configured_default_gpu_quota == "remainder"
+        else int(configured_default_gpu_quota)
+        if isinstance(configured_default_gpu_quota, int)
+        else None
+    )
     user_groups = {
         member: group_name
         for group_name, group in policy.groups.items()
@@ -744,20 +759,27 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         gpu = _sum(w.get("total_gpu") for w in group_workloads)
         cpu = _optional_sum(w.get("total_cpu") for w in group_workloads)
         memory = _optional_sum(w.get("total_memory_gib") for w in group_workloads)
-        if group_name == "default":
-            quota = default_quota
-        elif group_name in policy.groups and isinstance(policy.groups[group_name].gpu_quota, int):
-            quota = int(policy.groups[group_name].gpu_quota)
-        else:
-            quota = None
-        over = []
-        if quota is not None:
-            if gpu > quota:
-                over.append("gpu")
-            if cpu is not None and cpu > quota * policy.training.cpu_per_gpu:
-                over.append("cpu")
-            if memory is not None and memory > quota * policy.training.memory_gib_per_gpu:
-                over.append("memory")
+        group_config = policy.groups.get(group_name)
+        configured_gpu_quota = group_config.gpu_quota if group_config else None
+        gpu_quota = (
+            default_gpu_quota
+            if group_name == "default" and configured_gpu_quota == "remainder"
+            else int(configured_gpu_quota)
+            if isinstance(configured_gpu_quota, int)
+            else None
+        )
+        cpu_quota = group_config.cpu_quota if group_config else None
+        memory_quota = group_config.memory_quota_gib if group_config else None
+        resource_values = {
+            "gpu": (gpu, gpu_quota, "gpu_quota"),
+            "cpu": (cpu, cpu_quota, "cpu_quota"),
+            "memory": (memory, memory_quota, "memory_quota_gib"),
+        }
+        over = [
+            resource
+            for resource, (observed, limit, _) in resource_values.items()
+            if observed is not None and limit is not None and observed > limit
+        ]
         status = (
             "unknown" if group_name == "unattributed" else
             "unknown" if pressure_state == "unknown" and over else
@@ -766,25 +788,20 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             "compliant"
         )
         quota_findings = []
-        resource_values = {
-            "gpu": (gpu, quota),
-            "cpu": (cpu, quota * policy.training.cpu_per_gpu if quota is not None else None),
-            "memory": (memory, quota * policy.training.memory_gib_per_gpu if quota is not None else None),
-        }
         for resource in over:
-            observed, limit = resource_values[resource]
+            observed, limit, limit_key = resource_values[resource]
             quota_findings.append(_finding(
                 f"quota.{resource}", "quota", status,
                 f"group {resource} usage exceeds quota",
                 tags=("quota", resource, "pending-pressure" if pressure_state == "active" else "burst"),
                 observed={resource: _clean(observed)},
-                limit={f"{resource}_quota": _clean(limit)},
+                limit={limit_key: _clean(limit)},
             ))
         summary = {
             "group": group_name,
-            "gpu_quota": quota,
-            "cpu_quota": quota * policy.training.cpu_per_gpu if quota is not None else None,
-            "memory_quota_gib": quota * policy.training.memory_gib_per_gpu if quota is not None else None,
+            "gpu_quota": gpu_quota,
+            "cpu_quota": cpu_quota,
+            "memory_quota_gib": memory_quota,
             "allocated_gpu": _clean(gpu),
             "allocated_cpu": None if cpu is None else _clean(cpu),
             "allocated_memory_gib": None if memory is None else _clean(memory),
@@ -888,10 +905,10 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
                 category=finding["category"], subject_type="workload",
                 tags=finding.get("tags", []),
             ))
-    if bound_gpu < explicit_quota:
+    if bound_gpu < explicit_gpu_quota:
         alerts.append(_alert(
             "error", "pool-capacity", "queue",
-            f"bound GPU capacity {bound_gpu} is below explicit quota {explicit_quota}",
+            f"bound GPU capacity {bound_gpu} is below explicit quota {explicit_gpu_quota}",
             code="quota.pool_capacity", category="quota", subject_type="queue",
             tags=("quota", "capacity"),
         ))
@@ -985,8 +1002,8 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         )),
         "allocated_gpu": int(_sum(n.get("allocated_gpu") for n in nodes)),
         "free_gpu": int(_sum(float(n.get("total_gpu") or 0) - float(n.get("allocated_gpu") or 0) for n in nodes)),
-        "explicit_gpu_quota": explicit_quota,
-        "default_gpu_quota": default_quota,
+        "explicit_gpu_quota": explicit_gpu_quota,
+        "default_gpu_quota": default_gpu_quota,
         "planning_eligible_gpu": int(_sum(
             n.get("total_gpu") for n in nodes
             if n.get("state") in schedulable_states and bool(n.get("planning_eligible", True))

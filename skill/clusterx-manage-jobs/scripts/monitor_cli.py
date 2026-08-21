@@ -142,6 +142,12 @@ def _scalar(value: Any) -> str:
     return str(value)
 
 
+def _table_scalar(key: str, value: Any) -> str:
+    if key in {"gpu_quota", "cpu_quota", "memory_quota_gib"} and value is None:
+        return "不限"
+    return _scalar(value)
+
+
 def _render_table(payload: Any, *, no_color: bool = False) -> str:
     try:
         from rich.console import Console
@@ -161,8 +167,9 @@ def _render_table(payload: Any, *, no_color: bool = False) -> str:
             return "No matching rows.\n"
         preferred = [
             "user", "group", "node", "workload_name", "type", "classification",
-            "status", "policy_status", "gpu_quota", "allocated_gpu", "allocated_cpu",
-            "allocated_memory_gib", "total_gpu", "total_cpu", "total_memory_gib",
+            "status", "policy_status", "gpu_quota", "cpu_quota", "memory_quota_gib",
+            "allocated_gpu", "allocated_cpu", "allocated_memory_gib", "total_gpu",
+            "total_cpu", "total_memory_gib",
             "resource_basis", "start_time", "runtime_hours", "runtime_quality",
             "runtime_source", "effective_free_gpu", "stranded_gpu", "unattributed",
             "planning_eligible", "planning_exclusion_reasons", "attribution_excess",
@@ -174,7 +181,7 @@ def _render_table(payload: Any, *, no_color: bool = False) -> str:
         for key in keys:
             table.add_column(key, overflow="fold")
         for row in rows:
-            table.add_row(*[_scalar(row.get(key)) for key in keys])
+            table.add_row(*[_table_scalar(key, row.get(key)) for key in keys])
     console.print(table)
     return console.export_text(styles=not no_color)
 

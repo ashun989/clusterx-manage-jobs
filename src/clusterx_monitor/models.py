@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -48,7 +49,9 @@ class LowUtilizationConfig(FrozenModel):
 
 
 class GroupConfig(FrozenModel):
-    gpu_quota: int | Literal["remainder"]
+    gpu_quota: int | Literal["remainder"] | None = None
+    cpu_quota: float | None = None
+    memory_quota_gib: float | None = None
     members: tuple[str, ...] = ()
 
     @field_validator("members", mode="before")
@@ -58,9 +61,16 @@ class GroupConfig(FrozenModel):
 
     @field_validator("gpu_quota")
     @classmethod
-    def validate_quota(cls, value: int | str) -> int | str:
+    def validate_gpu_quota(cls, value: int | str | None) -> int | str | None:
         if isinstance(value, int) and not 0 <= value <= 100_000:
             raise ValueError("gpu_quota must be between 0 and 100000")
+        return value
+
+    @field_validator("cpu_quota", "memory_quota_gib")
+    @classmethod
+    def validate_scalar_quota(cls, value: float | None) -> float | None:
+        if value is not None and (not math.isfinite(value) or value < 0):
+            raise ValueError("resource quota must be a finite non-negative number")
         return value
 
 
@@ -81,8 +91,6 @@ class PolicyConfig(FrozenModel):
             raise ValueError("unsupported policy schema_version")
         if "default" not in self.groups:
             raise ValueError("groups.default is required")
-        if self.groups["default"].gpu_quota != "remainder":
-            raise ValueError("default group gpu_quota must be remainder")
         if self.planning.default_cpu_per_gpu > self.training.cpu_per_gpu:
             raise ValueError("planning.default_cpu_per_gpu must not exceed training.cpu_per_gpu")
         if self.planning.default_memory_gib_per_gpu > self.training.memory_gib_per_gpu:
@@ -93,7 +101,7 @@ class PolicyConfig(FrozenModel):
             name for name, group in self.groups.items()
             if group.gpu_quota == "remainder"
         ]
-        if remainder_groups != ["default"]:
+        if any(name != "default" for name in remainder_groups):
             raise ValueError("only the default group may use remainder quota")
         owners: dict[str, str] = {}
         for group_name, group in self.groups.items():

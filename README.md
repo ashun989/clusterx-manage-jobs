@@ -1,7 +1,7 @@
 # Clusterx Manage Jobs Skill with Monitor
 
 用于安全管理 PT/SSP 集群 Clusterx 训练任务，并提供新增的只读队列监控、
-资源策略检查和调度模拟。当前版本为 `0.3.1`，已验证 Clusterx `2026.8.19`；
+资源策略检查和调度模拟。当前版本为 `0.3.2`，已验证 Clusterx `2026.8.19`；
 其他版本以安装后的动态帮助为准。
 
 原有任务生命周期能力保持不变：配置检查、提交预览与创建、任务/节点查询、
@@ -125,7 +125,7 @@ clusterx-monitor admin init \
 
 若资源或分组文件不存在，服务进入 `setup-required`：不发布普通监控快照，但
 管理员仍可登录并从默认模板初始化两份配置；两者有效后自动开始采集，无需重启。
-公共 `/api/v1/policy` 继续只返回分组 ID、quota 和成员数量。
+公共 `/api/v1/policy` 只返回分组 ID、三类 quota 和成员数量，不返回成员名单。
 
 服务每 30 秒串行刷新一次，跳过重叠 tick；最近 5 份完整快照保存在内存中。
 采集失败时继续提供最后完整快照并标记 stale。GPU compute、显存和功率使用
@@ -140,8 +140,10 @@ Group 与 User 的已分配资源均汇总全部活跃 workload 类型（包括 
 
 Running `trainingJob` 的详情向所有 Monitor 访问者提供实时日志预览，但采用显式
 懒加载：打开详情不请求日志，只有选择快照中的 Worker 并点击“加载日志”后才抓取
-最近 200 行。日志响应为 `no-store`，不进入快照、SSE 或持久缓存。日志与逐卡遥测
-各自放在定高可滚动窗口中，避免过长内容拉伸整个详情抽屉。
+最近 200 行。浏览器默认每页显示 20 行并从最后一页开始，可选择 20、50、100 或
+200 行并翻页；快照自动刷新和手动刷新日志会保留当前 Worker、每页行数及页码，
+只有页数缩短时才收敛到新的最后一页。日志响应为 `no-store`，不进入快照、SSE 或
+持久缓存。日志与逐卡遥测各自放在定高可滚动窗口中。
 
 服务另按 workload UID 从 Prometheus 聚合过去 24 小时的历史 GPU 利用率，默认
 每 5 分钟刷新；该缓存只驻留内存，重启后立即重建，不使用数据库。历史查询失败
@@ -190,9 +192,11 @@ export CLUSTERX_RESOURCE_POLICY="$PWD/config/resource-policy.local.json"
   的方案查询以及节点 effective/blocked 展示，不是额外的提交下限。显式方案需求
   会覆盖画像，训练资源比例仍只表示提交和策略上限。
 - 至少 1 个训练任务排队满 10 分钟后激活 quota pressure。
-- 分组 CPU/内存 quota 从 GPU quota 按 14/240 派生。
+- 分组 GPU、CPU、内存 quota 独立配置；任一字段缺省或为 `null` 表示该资源不限，
+  不再从 GPU quota 派生 CPU/内存 quota。
 - 无 pressure 时超额为 burst，有 pressure 时为 violation。
-- 私有配置中的显式 quota 保持不缩放；默认组获得绑定 GPU 总容量的剩余部分。
+- 私有配置中的显式 quota 保持不缩放；`default.gpu_quota: remainder` 时获得绑定 GPU
+  总容量扣除其他显式 GPU quota 后的剩余部分。
 - 当前仍在运行、使用 GPU 且已运行至少 60 分钟的 `trainingJob`/`aid`，过去
   24 小时 GPU compute 样本加权平均与显存容量/时间加权平均同时 `<=20%` 时，
   产生 `utilization.low_gpu_activity` 违规；0-GPU、预热中或缺指标均不判违规。

@@ -12,6 +12,7 @@ const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
 };
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
+const quota = (value: unknown) => value == null ? "不限" : number(value);
 const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
 const runtimeMark = (row: Workload) => row.runtime_quality === "observed" ? "（观测）" : row.runtime_quality === "estimated" || row.runtime_estimated ? "（估算）" : "";
 
@@ -48,7 +49,9 @@ const telemetryColumns = <T extends { telemetry: Snapshot["telemetry"] }>(): Col
 const groupColumns: ColumnDef<GroupSummary>[] = [
   { key: "group", label: "分组", kind: "text", value: (row) => row.group },
   { key: "status", label: "状态", kind: "enum", value: (row) => row.status },
-  { key: "gpu_quota", label: "Quota", kind: "number", value: (row) => row.gpu_quota },
+  { key: "gpu_quota", label: "GPU quota", kind: "number", value: (row) => row.gpu_quota, format: quota },
+  { key: "cpu_quota", label: "CPU quota", kind: "number", value: (row) => row.cpu_quota, format: quota },
+  { key: "memory_quota_gib", label: "内存 quota GiB", kind: "number", value: (row) => row.memory_quota_gib, format: quota },
   { key: "allocated_gpu", label: "GPU", kind: "number", value: (row) => row.allocated_gpu },
   { key: "allocated_cpu", label: "CPU", kind: "number", value: (row) => row.allocated_cpu },
   { key: "allocated_memory_gib", label: "内存 GiB", kind: "number", value: (row) => row.allocated_memory_gib },
@@ -255,9 +258,9 @@ function RulesPage({ response, snapshot, error }: { response: PolicyResponse | n
       const detail = typeof definition === "string" ? { description: definition, propagation: "" } : definition;
       return <article key={status}><span className={statusClass(status)}>{status}</span><p>{detail.description}</p>{detail.propagation && <small>{detail.propagation}</small>}</article>;
     })}</div></section>
-    <section className="rules-section"><h3>当前配置</h3><p className="rule-note">采集间隔 {number(policy.refresh_seconds, "s")} · 逐卡遥测窗口 {number(policy.telemetry_lookback_minutes, "min")} · 当前 default quota {number(snapshot.capacity.default_gpu_quota)} GPU</p><p className="rule-note">Monitor 对 Clusterx 只读；认证管理员只能写入本机资源和分组配置。节点 effective/blocked 均相对于标准调度画像。</p><div className="config-grid">{sections.map(([title, values]) => <article key={title}><h4>{title}</h4><dl>{Object.entries(values).map(([key, value]) => <div key={key}><dt>{policyLabel(key)}</dt><dd>{number(value)}</dd></div>)}</dl></article>)}</div></section>
+    <section className="rules-section"><h3>当前配置</h3><p className="rule-note">采集间隔 {number(policy.refresh_seconds, "s")} · 逐卡遥测窗口 {number(policy.telemetry_lookback_minutes, "min")} · 当前 default quota {quota(snapshot.capacity.default_gpu_quota)} GPU</p><p className="rule-note">Monitor 对 Clusterx 只读；认证管理员只能写入本机资源和分组配置。节点 effective/blocked 均相对于标准调度画像。</p><div className="config-grid">{sections.map(([title, values]) => <article key={title}><h4>{title}</h4><dl>{Object.entries(values).map(([key, value]) => <div key={key}><dt>{policyLabel(key)}</dt><dd>{number(value)}</dd></div>)}</dl></article>)}</div></section>
     <section className="rules-section"><h3>规则目录</h3><div className="rule-catalog">{response.rule_catalog.map((rule) => <article key={rule.code}><div><code>{rule.code}</code><span>{rule.category}</span><span>{rule.applies_to}</span></div><h4>{rule.title}</h4>{rule.description && <p>{rule.description}</p>}</article>)}</div></section>
-    <section className="rules-section"><h3>分组 Quota</h3><div className="policy-groups"><table><thead><tr><th>Group ID</th><th>GPU quota</th><th>成员数</th></tr></thead><tbody>{Object.entries(policy.groups).map(([group, config]) => <tr key={group}><td>{group}</td><td>{config.gpu_quota === "remainder" ? `remainder（当前 ${number(snapshot.capacity.default_gpu_quota)}）` : number(config.gpu_quota)}</td><td>{number(config.member_count)}</td></tr>)}</tbody></table></div></section>
+    <section className="rules-section"><h3>分组 Quota</h3><div className="policy-groups"><table><thead><tr><th>Group ID</th><th>GPU quota</th><th>CPU quota</th><th>内存 quota GiB</th><th>成员数</th></tr></thead><tbody>{Object.entries(policy.groups).map(([group, config]) => <tr key={group}><td>{group}</td><td>{config.gpu_quota === "remainder" ? `remainder（当前 ${quota(snapshot.capacity.default_gpu_quota)}）` : quota(config.gpu_quota)}</td><td>{quota(config.cpu_quota)}</td><td>{quota(config.memory_quota_gib)}</td><td>{number(config.member_count)}</td></tr>)}</tbody></table></div></section>
     <section className="rules-section"><h3>失败与缺失数据</h3><div className="behavior-list">{Object.entries(response.evaluation_behavior).map(([key, description]) => <article key={key}><code>{policyLabel(key)}</code><p>{description}</p></article>)}</div></section>
   </div>;
 }

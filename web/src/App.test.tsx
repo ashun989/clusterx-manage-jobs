@@ -46,7 +46,7 @@ const baseSnapshot: Snapshot = {
     { severity: "warning", kind: "telemetry", subject: "node-a", message: "partial telemetry", code: "telemetry.partial", category: "telemetry", subject_type: "node", tags: ["partial"], finding_categories: ["telemetry"], finding_codes: ["telemetry.partial"], finding_tags: ["partial"] },
   ],
   groups: [
-    { group: "group-a", status: "compliant", gpu_quota: 16, cpu_quota: 224, memory_quota_gib: 3840, allocated_gpu: 4, allocated_cpu: 56, allocated_memory_gib: 960, members: ["alice"], over_resources: [], policy_findings: [], finding_categories: [], finding_codes: [], finding_tags: [], telemetry: telemetry(4, 50, 1000) },
+    { group: "group-a", status: "compliant", gpu_quota: 16, cpu_quota: null, memory_quota_gib: null, allocated_gpu: 4, allocated_cpu: 56, allocated_memory_gib: 960, members: ["alice"], over_resources: [], policy_findings: [], finding_categories: [], finding_codes: [], finding_tags: [], telemetry: telemetry(4, 50, 1000) },
     { group: "group-b", status: "violation", gpu_quota: 4, cpu_quota: 56, memory_quota_gib: 960, allocated_gpu: 8, allocated_cpu: 112, allocated_memory_gib: 1920, members: ["bob"], over_resources: ["gpu", "cpu", "memory"], policy_findings: [quotaFinding], finding_categories: ["quota"], finding_codes: ["quota.gpu"], finding_tags: ["quota", "gpu"], telemetry: telemetry(8, 80, 2600) },
   ],
   users: [
@@ -72,7 +72,10 @@ const policyResponse: PolicyResponse = {
     training: { cpu_per_gpu: 14, memory_gib_per_gpu: 240, zero_gpu_max_cpu_per_node: 14, zero_gpu_max_memory_gib_per_node: 240 },
     planning: { default_cpu_per_gpu: 14, default_memory_gib_per_gpu: 240 },
     low_utilization: { window_hours: 24, refresh_minutes: 5, min_observation_minutes: 60, gpu_compute_threshold_pct: 20, gpu_memory_threshold_pct: 20 },
-    groups: { "group-a": { gpu_quota: 16, member_count: 1 }, default: { gpu_quota: "remainder", member_count: 0 } },
+    groups: {
+      "group-a": { gpu_quota: 16, cpu_quota: null, memory_quota_gib: null, member_count: 1 },
+      default: { gpu_quota: "remainder", cpu_quota: null, memory_quota_gib: null, member_count: 0 },
+    },
   },
 };
 const adminResource = structuredClone(policyResponse.policy!) as Record<string, unknown>;
@@ -97,6 +100,8 @@ let emitSnapshot: (() => void) | undefined;
 let adminAuthenticated: boolean;
 let adminResourceRevision: string;
 let adminResourceText: string;
+let logContent: string;
+let logError: string;
 const adminGroupsText = "schema_version: 1\ngroups:\n  group-a:\n    gpu_quota: 16\n    members: [alice]\n  default:\n    gpu_quota: remainder\n    members: []\n";
 
 class FakeEventSource {
@@ -112,6 +117,8 @@ describe("Clusterx monitor dashboard", () => {
     adminAuthenticated = false;
     adminResourceRevision = "resource-r1";
     adminResourceText = JSON.stringify(adminResource, null, 2) + "\n";
+    logContent = "first log line\nsecond log line";
+    logError = "";
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -120,8 +127,12 @@ describe("Clusterx monitor dashboard", () => {
       if (path.endsWith("/admin/logout")) { adminAuthenticated = false; return { ok: true, status: 200, json: async () => ({ ok: true }) }; }
       if (path.endsWith("/admin/config") && !init?.method) return { ok: true, status: 200, json: async () => ({ configured: true, effective_config_valid: true, resource: { format: "json", text: adminResourceText, revision: adminResourceRevision, parse_error: null }, groups: { format: "yaml", text: adminGroupsText, revision: "group-r1", parse_error: null }, validation_error: null, audit_error: null }) };
       if (path.endsWith("/admin/config/resource") && init?.method === "PUT") { const body = JSON.parse(String(init.body)); adminResourceRevision = "resource-r2"; adminResourceText = body.text; return { ok: true, status: 200, json: async () => ({ configured: true, effective_config_valid: true, resource: { format: "json", text: adminResourceText, revision: adminResourceRevision, parse_error: null }, groups: { format: "yaml", text: adminGroupsText, revision: "group-r1", parse_error: null }, validation_error: null, audit_error: null }) }; }
-      if (path.includes("/workloads/") && path.includes("/logs?")) return { ok: true, status: 200, json: async () => ({ snapshot_id: "snapshot-1", workload_id: "workload-a", worker: "train-a-1", lines: 200, content: "first log line\nsecond log line" }) };
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "0.3.1", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.includes("/workloads/") && path.includes("/logs?")) {
+        if (logError) return { ok: false, status: 502, statusText: "Bad Gateway", json: async () => ({ detail: logError }) };
+        const url = new URL(path, "http://monitor.test");
+        return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
+      }
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "0.3.2", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       const value = path.endsWith("/plans") && init?.method === "POST" ? planResult : path.endsWith("/policy") ? policyResponse : latestSnapshot;
       return { ok: true, status: 200, json: async () => structuredClone(value) };
     }));
@@ -142,7 +153,7 @@ describe("Clusterx monitor dashboard", () => {
   it("filters enum columns, sorts numeric columns and resets missing filter values", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
-    expect(screen.getByText("v0.3.1")).toBeInTheDocument();
+    expect(screen.getByText("v0.3.2")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);
@@ -194,6 +205,7 @@ describe("Clusterx monitor dashboard", () => {
   });
 
   it("loads logs only after an explicit Worker choice and keeps long details scrollable", async () => {
+    logContent = Array.from({ length: 45 }, (_, index) => `log line ${index + 1}`).join("\n");
     latestSnapshot.workloads[0].placements.push({
       node: "node-b", pod: "train-a-1", gpu: 0, cpu: 1, memory_gib: 1,
     });
@@ -207,20 +219,92 @@ describe("Clusterx monitor dashboard", () => {
     const drawer = screen.getByRole("complementary", { name: "train-a 详情" });
     const logCalls = () => vi.mocked(fetch).mock.calls.filter(([input]) => String(input).includes("/logs?"));
     expect(logCalls()).toHaveLength(0);
-    expect(within(drawer).getByText("打开详情不会抓取日志；选择 Worker 后手动加载最近 200 行。")).toBeInTheDocument();
+    expect(within(drawer).getByText("打开详情不会抓取日志；手动加载最近 200 行后在浏览器内分页。")).toBeInTheDocument();
+    expect(within(drawer).getByLabelText("每页日志行数")).toHaveValue("20");
     const load = within(drawer).getByRole("button", { name: "加载日志" });
     expect(load).toBeDisabled();
 
     fireEvent.change(within(drawer).getByLabelText("日志 Worker"), { target: { value: "train-a-1" } });
     expect(logCalls()).toHaveLength(0);
     fireEvent.click(load);
-    await within(drawer).findByText(/first log line/);
+    await within(drawer).findByText("45 行 · 第 3/3 页");
     expect(logCalls()).toHaveLength(1);
     expect(String(logCalls()[0][0])).toContain("snapshot_id=snapshot-1");
     expect(String(logCalls()[0][0])).toContain("worker=train-a-1");
+    expect(String(logCalls()[0][0])).toContain("lines=200");
+    expect(within(drawer).getByText(/log line 41/)).toBeInTheDocument();
+    expect(within(drawer).queryByText(/log line 40/)).not.toBeInTheDocument();
+
+    fireEvent.click(within(drawer).getByRole("button", { name: "日志上一页" }));
+    expect(within(drawer).getByLabelText("日志页码")).toHaveValue("2");
+    expect(within(drawer).getByText(/log line 21/)).toBeInTheDocument();
+    expect(within(drawer).getByText(/log line 40/)).toBeInTheDocument();
+    expect(logCalls()).toHaveLength(1);
+
+    fireEvent.change(within(drawer).getByLabelText("每页日志行数"), { target: { value: "50" } });
+    expect(within(drawer).getByText("45 行 · 第 1/1 页")).toBeInTheDocument();
     const panels = drawer.querySelectorAll("pre.detail-scroll-panel");
     expect(panels).toHaveLength(2);
     expect(panels[0]).toHaveClass("workload-log");
+  });
+
+  it("keeps log controls and page across snapshot and manual refreshes", async () => {
+    logContent = Array.from({ length: 60 }, (_, index) => `initial ${index + 1}`).join("\n");
+    latestSnapshot.workloads[0].placements.push({
+      node: "node-b", pod: "train-a-1", gpu: 0, cpu: 1, memory_gib: 1,
+    });
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "workloads" }));
+    fireEvent.click(screen.getByRole("row", { name: "查看 train-a 详情" }));
+    const drawer = screen.getByRole("complementary", { name: "train-a 详情" });
+    const logCalls = () => vi.mocked(fetch).mock.calls.filter(([input]) => String(input).includes("/logs?"));
+    fireEvent.change(within(drawer).getByLabelText("日志 Worker"), { target: { value: "train-a-1" } });
+    fireEvent.click(within(drawer).getByRole("button", { name: "加载日志" }));
+    await within(drawer).findByText("60 行 · 第 3/3 页");
+    fireEvent.click(within(drawer).getByRole("button", { name: "日志上一页" }));
+    expect(within(drawer).getByLabelText("日志页码")).toHaveValue("2");
+    fireEvent.change(within(drawer).getByLabelText("每页日志行数"), { target: { value: "50" } });
+    expect(within(drawer).getByText("60 行 · 第 2/2 页")).toBeInTheDocument();
+
+    latestSnapshot = { ...latestSnapshot, snapshot_id: "snapshot-2" };
+    emitSnapshot?.();
+    await waitFor(() => expect(within(drawer).getByLabelText("日志页码")).toHaveValue("2"));
+    expect(within(drawer).getByLabelText("日志 Worker")).toHaveValue("train-a-1");
+    expect(within(drawer).getByLabelText("每页日志行数")).toHaveValue("50");
+    expect(logCalls()).toHaveLength(1);
+    fireEvent.change(within(drawer).getByLabelText("每页日志行数"), { target: { value: "20" } });
+    expect(within(drawer).getByText("60 行 · 第 2/3 页")).toBeInTheDocument();
+
+    logContent = Array.from({ length: 80 }, (_, index) => `refreshed ${index + 1}`).join("\n");
+    fireEvent.click(within(drawer).getByRole("button", { name: "刷新日志" }));
+    await within(drawer).findByText("80 行 · 第 2/4 页");
+    expect(String(logCalls()[1][0])).toContain("snapshot_id=snapshot-2");
+    expect(within(drawer).getByText(/refreshed 21/)).toBeInTheDocument();
+
+    fireEvent.change(within(drawer).getByLabelText("日志页码"), { target: { value: "4" } });
+    logContent = Array.from({ length: 25 }, (_, index) => `short ${index + 1}`).join("\n");
+    fireEvent.click(within(drawer).getByRole("button", { name: "刷新日志" }));
+    await within(drawer).findByText("25 行 · 第 2/2 页");
+
+    logError = "log refresh failed";
+    fireEvent.click(within(drawer).getByRole("button", { name: "刷新日志" }));
+    await within(drawer).findByText("log refresh failed");
+    expect(within(drawer).getByText("25 行 · 第 2/2 页")).toBeInTheDocument();
+    expect(within(drawer).getByText(/short 21/)).toBeInTheDocument();
+
+    logError = "";
+    latestSnapshot = {
+      ...latestSnapshot,
+      snapshot_id: "snapshot-3",
+      workloads: latestSnapshot.workloads.map((item) => item.workload_id === "workload-a" ? {
+        ...item, placements: item.placements.filter((placement) => placement.pod !== "train-a-1"),
+      } : item),
+    };
+    emitSnapshot?.();
+    await waitFor(() => expect(within(drawer).getByText("Worker: train-a-0")).toBeInTheDocument());
+    expect(drawer.querySelector("pre.workload-log")).not.toBeInTheDocument();
+    expect(logCalls()).toHaveLength(4);
   });
 
   it("shows the active development instance count in the user table", async () => {
@@ -280,7 +364,10 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("row", { name: "查看 group-a 详情" }));
-    expect(screen.getByRole("complementary", { name: "group-a 详情" })).toBeInTheDocument();
+    const groupDrawer = screen.getByRole("complementary", { name: "group-a 详情" });
+    expect(groupDrawer).toBeInTheDocument();
+    expect(groupDrawer).toHaveTextContent("56 / 不限");
+    expect(groupDrawer).toHaveTextContent("960 / 不限");
     fireEvent.click(screen.getByRole("button", { name: /train-a/ }));
     expect(screen.getByRole("heading", { name: "train-a" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "返回上一详情" }));
@@ -387,6 +474,8 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "规则说明" }));
     expect(screen.getByRole("heading", { name: "规则说明" })).toBeInTheDocument();
     expect(screen.getByText("utilization.low_gpu_activity")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "CPU quota" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "内存 quota GiB" })).toBeInTheDocument();
     expect(screen.getByText("workload to user")).toBeInTheDocument();
     expect(screen.getByText("window hours")).toBeInTheDocument();
     expect(screen.getByText(/remainder（当前 504）/)).toBeInTheDocument();

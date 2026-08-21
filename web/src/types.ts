@@ -195,7 +195,12 @@ export type PolicyResponse = {
       gpu_compute_threshold_pct: number;
       gpu_memory_threshold_pct: number;
     };
-    groups: Record<string, { gpu_quota: number | "remainder"; member_count: number }>;
+    groups: Record<string, {
+      gpu_quota: number | "remainder" | null;
+      cpu_quota: number | null;
+      memory_quota_gib: number | null;
+      member_count: number;
+    }>;
   } | null;
 };
 
@@ -204,7 +209,7 @@ export type Snapshot = {
   generated_at: string;
   cluster: string;
   queue: string;
-  capacity: Record<string, number>;
+  capacity: Record<string, number | null>;
   pending_pressure: Record<string, string | number>;
   telemetry: Telemetry;
   telemetry_status?: "available" | "partial" | "unavailable";

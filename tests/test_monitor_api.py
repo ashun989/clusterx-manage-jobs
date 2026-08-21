@@ -93,7 +93,7 @@ class MonitorApiTests(unittest.TestCase):
     def test_status_snapshot_policy_and_read_only_routes(self):
         client = TestClient(self.app)
         status_response = client.get("/api/v1/status")
-        self.assertEqual(status_response.json()["version"], "0.3.1")
+        self.assertEqual(status_response.json()["version"], "0.3.2")
         self.assertTrue(status_response.json()["snapshot"]["ready"])
         self.assertIn("default-src 'self'", status_response.headers["content-security-policy"])
         self.assertEqual(status_response.headers["x-content-type-options"], "nosniff")
@@ -110,6 +110,12 @@ class MonitorApiTests(unittest.TestCase):
         policy_response = client.get("/api/v1/policy")
         public_policy = policy_response.json()["policy"]
         self.assertEqual(public_policy["groups"]["example-team"]["member_count"], 1)
+        self.assertIsNone(public_policy["groups"]["example-team"]["cpu_quota"])
+        self.assertIsNone(public_policy["groups"]["example-team"]["memory_quota_gib"])
+        self.assertEqual(public_policy["groups"]["example-zero-quota"]["cpu_quota"], 14)
+        self.assertEqual(
+            public_policy["groups"]["example-zero-quota"]["memory_quota_gib"], 240,
+        )
         self.assertNotIn("members", public_policy["groups"]["example-team"])
         self.assertNotIn("alice", policy_response.text)
         self.assertEqual(public_policy["development"]["max_instances_per_user"], 1)

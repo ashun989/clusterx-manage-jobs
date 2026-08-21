@@ -94,6 +94,10 @@ python3 scripts/monitor_cli.py watch --view alerts --count 10 --format jsonl
 Monitor 服务端另外要求一份权限为 `600` 的本地私有分组文件。仓库开发时从
 `config/groups.example.yaml` 复制为被 Git 忽略的
 `config/groups.local.yaml`，只在本机填写真实组名、quota 和拼音用户名。
+每个 group 的 `gpu_quota`、`cpu_quota`、`memory_quota_gib` 相互独立且均可省略；
+省略或填写 `null` 表示对应资源不限。`remainder` 只允许用于
+`default.gpu_quota`，`groups.default` 本身仍然必需。现有仅填写 GPU quota 的配置
+无需迁移，CPU 和内存不会从 GPU quota 派生。
 服务通过 `--policy-config` 加载公共策略，通过 `--group-config` 加载私有分组；
 首次缺失或校验失败时服务进入受认证的 `setup-required`，管理员可在 Web 中查看
 损坏文件的原始 JSON/YAML 并修复；两份文件均有效后开始采集，无需重启。运行中
