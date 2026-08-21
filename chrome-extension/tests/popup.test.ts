@@ -52,7 +52,7 @@ describe("popup message lifecycle", () => {
       };
     });
     vi.stubGlobal("chrome", {
-      runtime: { getManifest: () => ({ version: "0.1.2" }) },
+      runtime: { getManifest: () => ({ version: "0.1.3" }) },
       tabs: {
         query: vi.fn(async () => [{ id: 7 }]),
         sendMessage,
@@ -78,7 +78,7 @@ describe("popup message lifecycle", () => {
     expect(JSON.stringify(transmittedCopy)).toContain("OBJECT_ACCESS_KEY");
     expect(document.querySelector("#results")?.textContent).toContain("队列：已填充");
     expect((globalThis as { chrome?: { storage?: unknown } }).chrome?.storage).toBeUndefined();
-    expect(document.querySelector("#extension-version")?.textContent).toBe("0.1.2");
+    expect(document.querySelector("#extension-version")?.textContent).toBe("0.1.3");
   });
 
   it("reads the requested AFS UUID mapping in a temporary inactive tab", async () => {
@@ -106,7 +106,7 @@ describe("popup message lifecycle", () => {
     const remove = vi.fn(async () => undefined);
     const create = vi.fn(async () => ({ id: 8 }));
     vi.stubGlobal("chrome", {
-      runtime: { getManifest: () => ({ version: "0.1.2" }) },
+      runtime: { getManifest: () => ({ version: "0.1.3" }) },
       tabs: {
         query: vi.fn(async () => [{ id: 7 }]),
         create,
@@ -140,7 +140,7 @@ describe("popup message lifecycle", () => {
     const showOpenFilePicker = vi.fn(async () => [{ getFile: async () => pickedFile }]);
     vi.stubGlobal("showOpenFilePicker", showOpenFilePicker);
     vi.stubGlobal("chrome", {
-      runtime: { getManifest: () => ({ version: "0.1.2" }) },
+      runtime: { getManifest: () => ({ version: "0.1.3" }) },
       tabs: {},
     });
 

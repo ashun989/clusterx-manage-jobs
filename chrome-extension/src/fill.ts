@@ -115,13 +115,17 @@ function activateCombobox(control: HTMLElement): void {
   target.click();
 }
 
-function optionsForControl(document: Document, control?: HTMLElement): HTMLElement[] {
+function optionRootsForControl(document: Document, control?: HTMLElement): HTMLElement[] {
   const ids = [control?.getAttribute("aria-controls"), control?.getAttribute("aria-owns")]
     .flatMap((value) => (value ?? "").split(/\s+/))
     .filter(Boolean);
-  const roots = [...new Set(ids)]
+  return [...new Set(ids)]
     .map((id) => document.getElementById(id))
     .filter((element): element is HTMLElement => element !== null);
+}
+
+function optionsForControl(document: Document, control?: HTMLElement): HTMLElement[] {
+  const roots = optionRootsForControl(document, control);
   const options = roots.length > 0
     ? roots.flatMap((root) => Array.from(root.querySelectorAll<HTMLElement>('[role="option"]')))
     : Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'));
@@ -150,6 +154,114 @@ async function chooseOption(
     throw new PageControlError(missingMessage);
   });
   option.click();
+}
+
+type CredentialChoice = "selected" | "missing" | "ambiguous";
+
+function dropdownIsReady(roots: HTMLElement[], options: HTMLElement[]): boolean {
+  if (options.length > 0) return true;
+  return roots.some((root) =>
+    !!root.querySelector('[class*="select-item-empty"]')
+    || text(root.textContent).includes("暂无可用的凭据"),
+  );
+}
+
+function scrollContainerFor(roots: HTMLElement[]): HTMLElement | undefined {
+  const candidates = new Set<HTMLElement>();
+  for (const root of roots) {
+    candidates.add(root);
+    root.querySelectorAll<HTMLElement>("*").forEach((element) => candidates.add(element));
+    for (let current = root.parentElement; current && current !== root.ownerDocument.body; current = current.parentElement) {
+      candidates.add(current);
+    }
+  }
+  return [...candidates]
+    .filter((element) => element.scrollHeight > element.clientHeight)
+    .sort((left, right) => {
+      const scrollPriority = (element: HTMLElement): number => {
+        const overflow = window.getComputedStyle(element).overflowY;
+        return /virtual-list-holder|select-list-holder/.test(element.className)
+          || overflow === "auto"
+          || overflow === "scroll"
+          ? 1
+          : 0;
+      };
+      return scrollPriority(right) - scrollPriority(left)
+        || (right.scrollHeight - right.clientHeight) - (left.scrollHeight - left.clientHeight);
+    })[0];
+}
+
+function afterDropdownScroll(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 20));
+}
+
+async function chooseCredentialOption(
+  document: Document,
+  control: HTMLElement,
+  credentialName: string,
+): Promise<CredentialChoice> {
+  activateCombobox(control);
+  let roots: HTMLElement[];
+  try {
+    roots = await waitFor(document, () => {
+      const currentRoots = optionRootsForControl(document, control);
+      if (currentRoots.length === 0) return undefined;
+      const options = optionsForControl(document, control);
+      return dropdownIsReady(currentRoots, options) ? currentRoots : undefined;
+    });
+  } catch {
+    return "missing";
+  }
+
+  const scrollContainer = scrollContainerFor(roots);
+  const matchedIdentities = new Set<string>();
+  const matchedElements = new Set<HTMLElement>();
+  let matchedScrollTop = scrollContainer?.scrollTop ?? 0;
+  const matchCount = (): number => matchedIdentities.size + matchedElements.size;
+  const collectMatches = (): CredentialChoice | undefined => {
+    const matches = matchingOptions(document, credentialName, control);
+    if (matches.length > 1) return "ambiguous";
+    if (matches.length === 1) {
+      if (matchCount() === 0) matchedScrollTop = scrollContainer?.scrollTop ?? 0;
+      const option = matches[0];
+      const identity = ["data-value", "value", "id", "aria-posinset"]
+        .map((attribute) => option.getAttribute(attribute))
+        .find((value) => !!value);
+      if (identity) matchedIdentities.add(identity);
+      else matchedElements.add(option);
+      if (matchCount() > 1) return "ambiguous";
+    }
+    return undefined;
+  };
+
+  if (collectMatches() === "ambiguous") return "ambiguous";
+  if (scrollContainer) {
+    const maxScrollTop = scrollContainer.scrollHeight - scrollContainer.clientHeight;
+    const step = Math.max(scrollContainer.clientHeight - 24, 1);
+    let attempts = 0;
+    while (scrollContainer.scrollTop < maxScrollTop && attempts < 100) {
+      const next = Math.min(maxScrollTop, scrollContainer.scrollTop + step);
+      if (next === scrollContainer.scrollTop) break;
+      scrollContainer.scrollTop = next;
+      scrollContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await afterDropdownScroll();
+      if (collectMatches() === "ambiguous") return "ambiguous";
+      attempts += 1;
+    }
+  }
+
+  if (matchCount() === 0) return "missing";
+  if (scrollContainer && scrollContainer.scrollTop !== matchedScrollTop) {
+    scrollContainer.scrollTop = matchedScrollTop;
+    scrollContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await afterDropdownScroll();
+  }
+  const visibleMatches = matchingOptions(document, credentialName, control);
+  if (visibleMatches.length !== 1) {
+    return visibleMatches.length > 1 ? "ambiguous" : "missing";
+  }
+  visibleMatches[0].click();
+  return "selected";
 }
 
 async function selectQueue(document: Document, queue: string): Promise<void> {
@@ -239,8 +351,8 @@ async function selectRdma(document: Document, rdmaName: string): Promise<void> {
   throw lastError ?? new PageControlError("配置中的 RDMA 网络不在当前页面");
 }
 
-function exactTextElement(document: Document, value: string): HTMLElement {
-  const matches = Array.from(document.querySelectorAll<HTMLElement>("a, article, button, span, div"))
+function exactTextElement(root: ParentNode, value: string): HTMLElement {
+  const matches = Array.from(root.querySelectorAll<HTMLElement>("a, article, button, span, div"))
     .filter((element) => isUsable(element) && text(element.textContent) === value)
     .filter((element) => !Array.from(element.children).some((child) => text(child.textContent) === value));
   return unique(matches, `页面缺少“${value}”入口`, `页面存在多个“${value}”入口`);
@@ -380,18 +492,32 @@ async function addAfsMount(
   };
 }
 
+const AOSS_KMS_LABEL = "Access Key ID（AK） / Secret Access Key（SK）";
+const AOSS_AK_LABEL = "Access Key ID（AK）";
+const AOSS_SK_LABEL = "Secret Access Key（SK）";
+const AOSS_BUCKET_LABEL = "Bucket名称";
+const AOSS_KMS_PLACEHOLDER = "请选择密钥凭据";
+const AOSS_MANUAL_SWITCH = "切换为手动填写AK/SK";
+
+type AossAuthFields =
+  | { mode: "kms"; control: HTMLInputElement }
+  | { mode: "manual"; accessKey: HTMLInputElement; secretKey: HTMLInputElement };
+
 function aossContainerFromMountInput(mountInput: HTMLInputElement): HTMLElement {
-  return closestContainer(mountInput, (element) =>
-    !!element.querySelector('input[placeholder="请输入http(s)://yourdomain.xxx"]')
-    && !!element.querySelector('input[placeholder="请输入存储目录，非必填"]')
-    && !!element.querySelector('input#ak')
-    && !!element.querySelector('input#sk'),
-  );
+  return closestContainer(mountInput, (element) => {
+    const hasCommonFields = !!labeledInput(element, AOSS_BUCKET_LABEL)
+      && !!element.querySelector('input[placeholder="请输入http(s)://yourdomain.xxx"]')
+      && !!element.querySelector('input[placeholder="请输入存储目录，非必填"]');
+    const hasAuthFields = !!labeledInput(element, AOSS_KMS_LABEL)
+      || !!element.querySelector(`input[role="combobox"][placeholder="${AOSS_KMS_PLACEHOLDER}"]`)
+      || (!!labeledInput(element, AOSS_AK_LABEL) && !!labeledInput(element, AOSS_SK_LABEL));
+    return hasCommonFields && hasAuthFields;
+  });
 }
 
 interface AossFields {
-  accessKey: HTMLInputElement;
-  secretKey: HTMLInputElement;
+  container: HTMLElement;
+  auth: AossAuthFields;
   bucket: HTMLInputElement;
   endpoint: HTMLInputElement;
   subdir: HTMLInputElement;
@@ -400,16 +526,70 @@ interface AossFields {
 
 function aossFields(mountInput: HTMLInputElement): AossFields {
   const container = aossContainerFromMountInput(mountInput);
-  const genericInputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[placeholder="请输入"]'));
-  const accessKey = labeledInput(container, "Access Key ID（AK）") ?? genericInputs[0];
-  const secretKey = labeledInput(container, "Secret Access Key（SK）") ?? genericInputs[1];
-  const bucket = labeledInput(container, "Bucket名称") ?? genericInputs[2];
+  const kmsControl = labeledInput(container, AOSS_KMS_LABEL)
+    ?? container.querySelector<HTMLInputElement>(
+      `input[role="combobox"][placeholder="${AOSS_KMS_PLACEHOLDER}"]`,
+    )
+    ?? undefined;
+  const accessKey = labeledInput(container, AOSS_AK_LABEL);
+  const secretKey = labeledInput(container, AOSS_SK_LABEL);
+  const bucket = labeledInput(container, AOSS_BUCKET_LABEL);
   const endpoint = exactPlaceholder(container, "请输入http(s)://yourdomain.xxx");
   const subdir = exactPlaceholder(container, "请输入存储目录，非必填");
-  if (!accessKey || !secretKey || !bucket) {
+  let auth: AossAuthFields;
+  if (kmsControl?.getAttribute("role") === "combobox") {
+    auth = { mode: "kms", control: kmsControl };
+  } else if (accessKey && secretKey) {
+    auth = { mode: "manual", accessKey, secretKey };
+  } else {
+    throw new PageControlError("对象存储凭据字段结构不完整");
+  }
+  if (!bucket) {
     throw new PageControlError("对象存储挂载字段结构不完整");
   }
-  return { accessKey, secretKey, bucket, endpoint, subdir, mountPath: mountInput };
+  return { container, auth, bucket, endpoint, subdir, mountPath: mountInput };
+}
+
+function selectedComboboxValues(control: HTMLInputElement): string[] {
+  const select = control.closest<HTMLElement>(".sensed-select") ?? control.parentElement;
+  const values = new Set<string>();
+  if (control.value) values.add(text(control.value));
+  select?.querySelectorAll<HTMLElement>(
+    '.sensed-select-selection-item, [class*="select-selection-item"]',
+  ).forEach((element) => {
+    for (const candidate of optionCandidates(element)) values.add(candidate);
+  });
+  values.delete("");
+  values.delete(AOSS_KMS_PLACEHOLDER);
+  return [...values];
+}
+
+function aossAuthMatches(auth: AossAuthFields, mount: AossMount): boolean {
+  if (auth.mode === "kms") {
+    return selectedComboboxValues(auth.control).includes(mount.name);
+  }
+  return auth.accessKey.value === mount.accessKey && auth.secretKey.value === mount.secretKey;
+}
+
+function aossFieldsAreEmpty(fields: AossFields): boolean {
+  const commonFieldsEmpty = fields.bucket.value === ""
+    && fields.endpoint.value === ""
+    && fields.subdir.value === ""
+    && fields.mountPath.value === "";
+  if (!commonFieldsEmpty) return false;
+  return fields.auth.mode === "kms"
+    ? selectedComboboxValues(fields.auth.control).length === 0
+    : fields.auth.accessKey.value === "" && fields.auth.secretKey.value === "";
+}
+
+function aossFieldsByMountPath(document: Document, mountPath: string): AossFields | undefined {
+  const pathInputs = Array.from(
+    document.querySelectorAll<HTMLInputElement>('input[placeholder="请输入路径，如 /data"]'),
+  ).filter((input) => input.value === mountPath);
+  if (pathInputs.length > 1) {
+    throw new PageControlError("页面已存在多个相同挂载路径的对象存储");
+  }
+  return pathInputs[0] ? aossFields(pathInputs[0]) : undefined;
 }
 
 function existingAossMount(
@@ -417,20 +597,12 @@ function existingAossMount(
   mount: AossMount,
   index: number,
 ): FillItemResult | undefined {
-  const pathInputs = Array.from(
-    document.querySelectorAll<HTMLInputElement>('input[placeholder="请输入路径，如 /data"]'),
-  ).filter((input) => input.value === mount.mountPath);
-  if (pathInputs.length > 1) {
-    throw new PageControlError("页面已存在多个相同挂载路径的对象存储");
-  }
-  const pathInput = pathInputs[0];
-  if (!pathInput) return undefined;
-  const fields = aossFields(pathInput);
+  const fields = aossFieldsByMountPath(document, mount.mountPath);
+  if (!fields) return undefined;
   const matches = fields.bucket.value === mount.name
     && fields.endpoint.value === mount.endpoint
     && fields.subdir.value === (mount.subdir ?? "")
-    && fields.accessKey.value === mount.accessKey
-    && fields.secretKey.value === mount.secretKey;
+    && aossAuthMatches(fields.auth, mount);
   if (!matches) {
     throw new PageControlError("挂载路径已存在，但对象存储字段与配置不一致，已拒绝覆盖");
   }
@@ -438,8 +610,41 @@ function existingAossMount(
     key: `mount.aoss.${index}`,
     label: `对象存储挂载 ${index + 1}`,
     status: "skipped",
-    message: "页面已存在相同挂载，未重复添加",
+    message: fields.auth.mode === "kms"
+      ? "页面已存在相同挂载，并已选择同名 KMS 凭据，未重复添加"
+      : "页面已存在相同挂载，并使用手动 AK/SK，未重复添加",
   };
+}
+
+async function manualAossFields(
+  document: Document,
+  mount: AossMount,
+): Promise<Extract<AossAuthFields, { mode: "manual" }>> {
+  return waitFor(document, () => {
+    const fields = aossFieldsByMountPath(document, mount.mountPath);
+    return fields?.auth.mode === "manual" ? fields.auth : undefined;
+  });
+}
+
+async function configureAossAuth(
+  document: Document,
+  fields: AossFields,
+  mount: AossMount,
+): Promise<{ mode: "kms" | "manual"; ambiguous: boolean }> {
+  if (fields.auth.mode === "manual") {
+    inputSetter(fields.auth.accessKey, mount.accessKey);
+    inputSetter(fields.auth.secretKey, mount.secretKey);
+    return { mode: "manual", ambiguous: false };
+  }
+
+  const choice = await chooseCredentialOption(document, fields.auth.control, mount.name);
+  if (choice === "selected") return { mode: "kms", ambiguous: false };
+
+  clickableFor(exactTextElement(fields.container, AOSS_MANUAL_SWITCH)).click();
+  const manual = await manualAossFields(document, mount);
+  inputSetter(manual.accessKey, mount.accessKey);
+  inputSetter(manual.secretKey, mount.secretKey);
+  return { mode: "manual", ambiguous: choice === "ambiguous" };
 }
 
 async function addAossMount(document: Document, mount: AossMount, index: number): Promise<FillItemResult> {
@@ -450,7 +655,7 @@ async function addAossMount(document: Document, mount: AossMount, index: number)
   let mountInput = Array.from(document.querySelectorAll<HTMLInputElement>(selector)).find((input) => {
     if (input.value !== "") return false;
     try {
-      return Object.values(aossFields(input)).every((field) => field.value === "");
+      return aossFieldsAreEmpty(aossFields(input));
     } catch {
       return false;
     }
@@ -464,17 +669,20 @@ async function addAossMount(document: Document, mount: AossMount, index: number)
     });
   }
   const fields = aossFields(mountInput);
-  inputSetter(fields.accessKey, mount.accessKey);
-  inputSetter(fields.secretKey, mount.secretKey);
   inputSetter(fields.bucket, mount.name);
   inputSetter(fields.endpoint, mount.endpoint);
   if (mount.subdir) inputSetter(fields.subdir, mount.subdir);
   inputSetter(fields.mountPath, mount.mountPath);
+  const authResult = await configureAossAuth(document, fields, mount);
   return {
     key: `mount.aoss.${index}`,
     label: `对象存储挂载 ${index + 1}`,
-    status: "filled",
-    message: "已填充 Bucket、Endpoint、凭据和挂载路径",
+    status: authResult.ambiguous ? "warning" : "filled",
+    message: authResult.mode === "kms"
+      ? "已填充对象存储字段，并选择同名 KMS 凭据"
+      : authResult.ambiguous
+        ? "存在多个同名 KMS 凭据，已拒绝猜测并手动填写 AK/SK；请复核"
+        : "未找到同名 KMS 凭据，已切换并手动填写 AK/SK",
   };
 }
 

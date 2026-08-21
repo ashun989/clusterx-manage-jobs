@@ -55,7 +55,15 @@ function setSelectedTab(tab: HTMLElement): void {
   }
 }
 
-function installFixture(options: { customImage?: boolean; afsOption?: boolean; refreshRdma?: boolean } = {}): HTMLButtonElement {
+interface FixtureOptions {
+  customImage?: boolean;
+  afsOption?: boolean;
+  refreshRdma?: boolean;
+  kmsCredentials?: string[][];
+  kmsCredentialPages?: string[][][];
+}
+
+function installFixture(options: FixtureOptions = {}): HTMLButtonElement {
   document.body.innerHTML = `
     <table><tbody>
       <tr><td><input type="radio"></td><td><span>queue-other</span><span>-</span></td></tr>
@@ -142,18 +150,78 @@ function installFixture(options: { customImage?: boolean; afsOption?: boolean; r
     document.body.insertBefore(row, document.querySelector("#add-afs")?.closest("article") ?? null);
   });
 
+  let aossIndex = 0;
   document.querySelector("#add-aoss")?.addEventListener("click", () => {
+    const index = aossIndex++;
+    const credentials = options.kmsCredentials?.[index] ?? ["bucket-example"];
+    const credentialPages = options.kmsCredentialPages?.[index];
     const row = document.createElement("section");
     row.innerHTML = `
-      <label for="ak">Access Key ID（AK）</label><input id="ak" placeholder="请输入">
-      <label for="sk">Secret Access Key（SK）</label><input id="sk" type="password" placeholder="请输入">
-      <div class="object-fields">
-      <label for="dataSource_0_aoss">Bucket名称</label><input id="dataSource_0_aoss" placeholder="请输入">
-      <input placeholder="请输入http(s)://yourdomain.xxx">
-      <input placeholder="请输入存储目录，非必填">
-      <input placeholder="请输入路径，如 /data">
+      <div class="auth-fields">
+        <label for="aksk_${index}">Access Key ID（AK） / Secret Access Key（SK）</label>
+        <div class="sensed-select">
+          <div class="sensed-select-selector">
+            <span class="selected-credential"></span>
+            <input id="aksk_${index}" role="combobox" aria-controls="aksk_${index}_list" placeholder="请选择密钥凭据">
+          </div>
+        </div>
+        <a class="manual-switch">切换为手动填写AK/SK</a>
       </div>
+      <div class="object-fields">
+        <label for="dataSource_${index}_aoss">Bucket名称</label><input id="dataSource_${index}_aoss" placeholder="请输入">
+        <input placeholder="请输入http(s)://yourdomain.xxx">
+        <input placeholder="请输入存储目录，非必填">
+        <input placeholder="请输入路径，如 /data">
+      </div>
+      <div id="aksk_${index}_list"></div>
     `;
+    const authFields = row.querySelector<HTMLElement>(".auth-fields")!;
+    const kmsList = row.querySelector<HTMLElement>(`#aksk_${index}_list`)!;
+    const selected = row.querySelector<HTMLElement>(".selected-credential")!;
+    const renderCredentials = (names: string[]): void => {
+      kmsList.replaceChildren();
+      for (const [optionIndex, credential] of names.entries()) {
+        const option = transientOption(credential, () => {
+          selected.innerHTML = `<span class="sensed-select-selection-item" title="${credential}">${credential}</span>`;
+          kmsList.replaceChildren();
+        }, kmsList, false);
+        option.id = `aksk_${index}_option_${optionIndex}`;
+      }
+    };
+    if (credentialPages) {
+      let scrollTop = 0;
+      Object.defineProperties(kmsList, {
+        clientHeight: { configurable: true, value: 100 },
+        scrollHeight: { configurable: true, value: 200 },
+        scrollTop: {
+          configurable: true,
+          get: () => scrollTop,
+          set: (value: number) => { scrollTop = value; },
+        },
+      });
+      kmsList.addEventListener("scroll", () => {
+        renderCredentials(credentialPages[scrollTop > 0 ? credentialPages.length - 1 : 0] ?? []);
+      });
+    }
+    row.querySelector<HTMLElement>(".sensed-select-selector")?.addEventListener("click", () => {
+      if (kmsList.children.length > 0) return;
+      if (credentialPages) {
+        renderCredentials(credentialPages[0] ?? []);
+        return;
+      }
+      if (credentials.length === 0) {
+        kmsList.innerHTML = '<div class="sensed-select-item-empty">暂无可用的凭据</div>';
+        return;
+      }
+      renderCredentials(credentials);
+    });
+    row.querySelector<HTMLElement>(".manual-switch")?.addEventListener("click", () => {
+      authFields.innerHTML = `
+        <label for="ak_${index}">Access Key ID（AK）</label><input id="ak_${index}" placeholder="请输入 Access Key ID">
+        <label for="sk_${index}">Secret Access Key（SK）</label><input id="sk_${index}" type="password" placeholder="请输入 Secret Access Key">
+        <a>切换为从密钥管理KMS获取AK/SK</a>
+      `;
+    });
     document.body.insertBefore(row, document.querySelector("#add-aoss")?.closest("article") ?? null);
   });
 
@@ -165,7 +233,7 @@ describe("fillDevelopmentForm", () => {
     document.body.replaceChildren();
   });
 
-  it("fills exact queue, RDMA, custom image, AFS, and AOSS without submitting", async () => {
+  it("fills queue, RDMA, AFS, and AOSS with an exact KMS credential without submitting", async () => {
     const confirm = installFixture();
     const submit = vi.fn();
     confirm.addEventListener("click", submit);
@@ -179,8 +247,65 @@ describe("fillDevelopmentForm", () => {
     expect(document.querySelector<HTMLInputElement>('input[placeholder="请输入如 /data 或 /data/data.txt"]')?.value).toBe("/data/models");
     expect(document.querySelector<HTMLInputElement>('input[placeholder="请输入http(s)://yourdomain.xxx"]')?.value).toBe("https://objects.example");
     expect(document.querySelector<HTMLInputElement>('input[placeholder="请输入路径，如 /data"]')?.value).toBe("/data/objects");
+    expect(document.querySelector('.sensed-select-selection-item')?.textContent).toBe("bucket-example");
+    expect(document.querySelector('input[type="password"]')).toBeNull();
     expect(submit).not.toHaveBeenCalled();
     expect(report.items.find((item) => item.key === "mount.afs.0")?.status).toBe("warning");
+    expect(report.items.find((item) => item.key === "mount.aoss.0")).toMatchObject({
+      status: "filled",
+      message: "已填充对象存储字段，并选择同名 KMS 凭据",
+    });
+  });
+
+  it("switches to manual AK/SK when no exact KMS credential exists", async () => {
+    installFixture({ kmsCredentials: [["bucket-other"]] });
+    const onlyAoss = structuredClone(profile);
+    onlyAoss.mounts = [onlyAoss.mounts[1]];
+
+    const report = await fillDevelopmentForm(onlyAoss, document, pageUrl);
+
+    expect(report.ok).toBe(true);
+    expect(document.querySelector<HTMLInputElement>('input[placeholder="请输入 Access Key ID"]')?.value)
+      .toBe("OBJECT_ACCESS_KEY");
+    expect(document.querySelector<HTMLInputElement>('input[placeholder="请输入 Secret Access Key"]')?.value)
+      .toBe("OBJECT_SECRET_VALUE");
+    expect(report.items.find((item) => item.key === "mount.aoss.0")).toMatchObject({
+      status: "filled",
+      message: "未找到同名 KMS 凭据，已切换并手动填写 AK/SK",
+    });
+    expect(JSON.stringify(report)).not.toContain("OBJECT_SECRET_VALUE");
+  });
+
+  it("finds an exact KMS credential after scrolling a virtualized dropdown", async () => {
+    installFixture({ kmsCredentialPages: [[
+      ["bucket-first-page"],
+      ["bucket-example"],
+    ]] });
+    const onlyAoss = structuredClone(profile);
+    onlyAoss.mounts = [onlyAoss.mounts[1]];
+
+    const report = await fillDevelopmentForm(onlyAoss, document, pageUrl);
+
+    expect(report.ok).toBe(true);
+    expect(document.querySelector('.sensed-select-selection-item')?.textContent).toBe("bucket-example");
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    expect(report.items.find((item) => item.key === "mount.aoss.0")?.status).toBe("filled");
+  });
+
+  it("falls back to manual AK/SK with a warning for duplicate KMS names", async () => {
+    installFixture({ kmsCredentials: [["bucket-example", "bucket-example"]] });
+    const onlyAoss = structuredClone(profile);
+    onlyAoss.mounts = [onlyAoss.mounts[1]];
+
+    const report = await fillDevelopmentForm(onlyAoss, document, pageUrl);
+
+    expect(report.ok).toBe(true);
+    expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value)
+      .toBe("OBJECT_SECRET_VALUE");
+    expect(report.items.find((item) => item.key === "mount.aoss.0")).toMatchObject({
+      status: "warning",
+      message: "存在多个同名 KMS 凭据，已拒绝猜测并手动填写 AK/SK；请复核",
+    });
   });
 
   it("leaves all image controls untouched for manual selection", async () => {
@@ -227,7 +352,7 @@ describe("fillDevelopmentForm", () => {
   }, 5_000);
 
   it("fills multiple object mounts even though the page repeats field ids", async () => {
-    installFixture();
+    installFixture({ kmsCredentials: [["bucket-example"], []] });
     const multiple = structuredClone(profile);
     const objectMount = multiple.mounts.find((mount) => mount.type === "PV_AOSS")!;
     multiple.mounts = [
@@ -248,8 +373,10 @@ describe("fillDevelopmentForm", () => {
     expect(report.items.filter((item) => item.key.startsWith("mount.aoss"))).toHaveLength(2);
     expect(Array.from(document.querySelectorAll<HTMLInputElement>('input[placeholder="请输入路径，如 /data"]')).map((input) => input.value))
       .toEqual(["/data/objects", "/data/objects-second"]);
+    expect(Array.from(document.querySelectorAll<HTMLElement>('.sensed-select-selection-item')).map((item) => item.textContent))
+      .toEqual(["bucket-example"]);
     expect(Array.from(document.querySelectorAll<HTMLInputElement>('input[type="password"]')).map((input) => input.value))
-      .toEqual(["OBJECT_SECRET_VALUE", "SECOND_SECRET_VALUE"]);
+      .toEqual(["SECOND_SECRET_VALUE"]);
   });
 
   it("scopes retained AFS options to the current mount row", async () => {
@@ -303,7 +430,44 @@ describe("fillDevelopmentForm", () => {
     });
     expect(second.items.find((item) => item.key === "mount.aoss.0")).toMatchObject({
       status: "skipped",
-      message: "页面已存在相同挂载，未重复添加",
+      message: "页面已存在相同挂载，并已选择同名 KMS 凭据，未重复添加",
+    });
+  });
+
+  it("does not duplicate an existing manual object mount", async () => {
+    installFixture({ kmsCredentials: [[]] });
+    const onlyAoss = structuredClone(profile);
+    onlyAoss.mounts = [onlyAoss.mounts[1]];
+
+    const first = await fillDevelopmentForm(structuredClone(onlyAoss), document, pageUrl);
+    const aossCount = document.querySelectorAll('input[placeholder="请输入路径，如 /data"]').length;
+    const second = await fillDevelopmentForm(structuredClone(onlyAoss), document, pageUrl);
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(document.querySelectorAll('input[placeholder="请输入路径，如 /data"]')).toHaveLength(aossCount);
+    expect(second.items.find((item) => item.key === "mount.aoss.0")).toMatchObject({
+      status: "skipped",
+      message: "页面已存在相同挂载，并使用手动 AK/SK，未重复添加",
+    });
+  });
+
+  it("refuses to overwrite a conflicting object mount", async () => {
+    installFixture();
+    const onlyAoss = structuredClone(profile);
+    onlyAoss.mounts = [onlyAoss.mounts[1]];
+    const first = await fillDevelopmentForm(structuredClone(onlyAoss), document, pageUrl);
+    const endpoint = document.querySelector<HTMLInputElement>('input[placeholder="请输入http(s)://yourdomain.xxx"]')!;
+    endpoint.value = "https://conflicting.example";
+
+    const second = await fillDevelopmentForm(structuredClone(onlyAoss), document, pageUrl);
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(false);
+    expect(endpoint.value).toBe("https://conflicting.example");
+    expect(second.items.find((item) => item.key === "mount.aoss.0")).toMatchObject({
+      status: "error",
+      message: "挂载路径已存在，但对象存储字段与配置不一致，已拒绝覆盖",
     });
   });
 
@@ -315,7 +479,7 @@ describe("fillDevelopmentForm", () => {
     const report = await fillDevelopmentForm(missing, document, pageUrl);
 
     expect(report).toMatchObject({ ok: false, fatal: true });
-    expect(document.querySelector('input[placeholder="Access Key ID（AK）"]')).toBeNull();
+    expect(document.querySelector('input[placeholder="请选择密钥凭据"]')).toBeNull();
     expect(document.querySelector("#custom-image")).toBeNull();
   });
 
