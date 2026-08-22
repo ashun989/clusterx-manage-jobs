@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clusterx-monitor"
-version = "0.3.2"
+version = "0.4.0"
 description = "Read-only Clusterx queue monitor and scheduling simulator"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
   "requests>=2.31,<3",
   "rich>=13,<15",
   "argon2-cffi>=23.1,<26",
+  "ortools>=9.15,<10",
 ]
 
 [project.optional-dependencies]

@@ -147,6 +147,11 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   `--violation-category`, `--violation-code`, or `--violation-tag`. Every result is based on an
   identified cached snapshot and is a coordination candidate, never permission
   to stop anything. Exact and heuristic results must be labeled accurately.
+- Plan search uses CP-SAT. Treat `search_seconds` as the total budget shared by
+  requested strategies. Report each strategy status and termination reason;
+  `OPTIMAL` is proven, `FEASIBLE` is an independently verified incumbent, and
+  a greedy fallback remains heuristic. `candidate_scope` limits nodes that may
+  satisfy the target even when a selected workload spans other nodes.
 - When plan CPU or memory is omitted, report the resolved target derived from
   the planning profile pinned in that snapshot. Explain that node effective,
   stranded, and blocked values are relative to this standard profile and are

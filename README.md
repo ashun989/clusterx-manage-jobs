@@ -1,7 +1,7 @@
 # Clusterx Manage Jobs Skill with Monitor
 
 用于安全管理 PT/SSP 集群 Clusterx 训练任务，并提供新增的只读队列监控、
-资源策略检查和调度模拟。当前版本为 `0.3.2`，已验证 Clusterx `2026.8.19`；
+资源策略检查和调度模拟。当前版本为 `0.4.0`，已验证 Clusterx `2026.8.19`；
 其他版本以安装后的动态帮助为准。
 
 原有任务生命周期能力保持不变：配置检查、提交预览与创建、任务/节点查询、
@@ -12,7 +12,7 @@
 
 ```text
 Clusterx SDK → clusterx-monitor → immutable snapshots → Web / Skill CLI
-                                             └──────→ scheduling simulator
+                                             └──────→ CP-SAT scheduling simulator
 ```
 
 - `src/clusterx_monitor`：集中采集、策略、缓存、API 和求解器。
@@ -166,6 +166,19 @@ python3 skill/clusterx-manage-jobs/scripts/monitor_cli.py plan \
 python3 skill/clusterx-manage-jobs/scripts/monitor_cli.py watch \
   --view alerts --count 10 --format jsonl
 ```
+
+调度模拟器将缓存快照预处理为整数 GPU、mCPU 和 MiB 资源模型，再由 OR-Tools
+CP-SAT 直接选择需要协调的 Workload。`--search-seconds` 是整个请求的总求解预算，
+由所选策略公平共享；提前返回 `OPTIMAL` 表示已经证明最优，`FEASIBLE` 表示在预算
+内找到并独立校验了可行解。备选方案通过逐次排除相同 Workload 集合生成，不再枚举
+并保存所有可行子集。响应同时包含每种策略的状态、best bound、终止原因和 Top-K
+完整性。
+求解默认使用 1 个 worker 以保持资源占用和结果稳定；可设置
+`CLUSTERX_PLANNER_WORKERS=1..4` 调整，但不会突破 4 个 worker。
+
+`--candidate-scope` 严格限制可计入目标的新增节点。跨节点 Workload 在范围外产生的
+附带释放不会用于满足目标；归属异常节点、关联 Workload 和未知 owner 仍保持安全
+排除。求解结果会在返回前脱离求解器重新计算资源并验证。
 
 监控服务不可用时 CLI 明确失败，不直接查询集群。可用 `--endpoint` 或
 `CLUSTERX_MONITOR_URL` 修改地址。查询成功即退出 `0`；参数错误为 `2`，服务

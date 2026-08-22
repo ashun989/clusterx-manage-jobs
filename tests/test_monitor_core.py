@@ -836,6 +836,7 @@ class PlannerTests(unittest.TestCase):
         })
         self.assertEqual(result["plans"], [])
         self.assertEqual(result["no_plan_reason"], "attribution-excluded")
+        self.assertEqual(result["strategy_results"][0]["status"], "INFEASIBLE")
         self.assertEqual(result["planning_exclusions"]["node_count"], 1)
         self.assertEqual(result["planning_exclusions"]["workload_count"], 1)
 
@@ -849,6 +850,96 @@ class PlannerTests(unittest.TestCase):
         })
         self.assertEqual(result["plans"], [])
         self.assertNotEqual(result["no_plan_reason"], "no-candidates-after-filters")
+
+    def test_cp_sat_one_node_search_proves_top_k_without_candidate_explosion(self):
+        nodes = [node(f"n-{index:02d}", 1, 14, 240) for index in range(20)]
+        jobs = [
+            workload(
+                f"w-{index:02d}", f"u-{index:02d}", "trainingJob",
+                [placement(f"n-{index:02d}", 1, 14, 240)],
+            )
+            for index in range(20)
+        ]
+        evaluated = apply_policy(snapshot(nodes, jobs), self.policy)
+        result = solve_plan(evaluated, {
+            "snapshot_id": "s1",
+            "target": {"nodes": 1, "gpus_per_node": 8},
+            "strategies": ["min-gpu", "min-workloads", "min-users"],
+            "candidate_scope": "fragmented",
+            "alternatives": 3,
+            "search_seconds": 10,
+            "filters": {},
+        })
+        self.assertEqual(result["optimality"], "exact")
+        self.assertEqual(result["solver"]["backend"], "cp-sat")
+        self.assertEqual(result["solver"]["candidate_workload_count"], 20)
+        self.assertLess(result["search_elapsed_seconds"], 2)
+        self.assertEqual(len(result["plans"]), 9)
+        for strategy in result["strategy_results"]:
+            self.assertEqual(strategy["status"], "OPTIMAL")
+            self.assertTrue(strategy["top_k_complete"])
+            self.assertEqual(strategy["returned_alternatives"], 3)
+            signatures = {tuple(item["workloads"]) for item in strategy["plans"]}
+            self.assertEqual(len(signatures), 3)
+
+    def test_cp_sat_preserves_each_lexicographic_strategy(self):
+        jobs = [
+            workload("big", "big-user", "trainingJob", [placement("big-node", 3, 42, 720)]),
+            workload("small-a", "small-user", "trainingJob", [placement("small-node", 1, 14, 240)]),
+            workload("small-b", "small-user", "trainingJob", [placement("small-node", 1, 14, 240)]),
+        ]
+        evaluated = apply_policy(snapshot([
+            node("big-node", 3, 42, 720), node("small-node", 2, 28, 480),
+        ], jobs), self.policy)
+        result = solve_plan(evaluated, {
+            "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
+            "strategies": ["min-gpu", "min-workloads", "min-users"],
+            "candidate_scope": "fragmented", "alternatives": 1,
+            "search_seconds": 3, "filters": {},
+        })
+        plans = {item["strategy"]: item for item in result["plans"]}
+        self.assertEqual(plans["min-gpu"]["workloads"], ["small-a", "small-b"])
+        self.assertEqual(plans["min-workloads"]["workloads"], ["big"])
+        self.assertEqual(plans["min-users"]["workloads"], ["small-a", "small-b"])
+
+    def test_candidate_scope_only_counts_nodes_inside_the_requested_scope(self):
+        spanning = workload("spanning", "u", "trainingJob", [
+            placement("z-fragmented", 1, 14, 240, "frag-pod"),
+            placement("a-full", 8, 112, 1920, "full-pod"),
+        ])
+        evaluated = apply_policy(snapshot([
+            node("z-fragmented", 1, 14, 240), node("a-full", 8, 112, 1920),
+        ], [spanning]), self.policy)
+        result = solve_plan(evaluated, {
+            "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
+            "strategies": ["min-gpu"], "candidate_scope": "fragmented",
+            "alternatives": 1, "search_seconds": 2, "filters": {},
+        })
+        self.assertEqual(result["plans"][0]["target_nodes"], ["z-fragmented"])
+        self.assertEqual(result["plans"][0]["freed_nodes"], ["z-fragmented"])
+
+    def test_unknown_cp_sat_result_uses_verified_greedy_fallback(self):
+        from clusterx_monitor.planning.domain import SolveAttempt
+
+        busy = node("n", 1, 14, 240)
+        item = workload("a", "u", "trainingJob", [placement("n", 1, 14, 240)])
+        evaluated = apply_policy(snapshot([busy], [item]), self.policy)
+        unknown = SolveAttempt(
+            status="UNKNOWN", selected=(), objective_value=None,
+            best_objective_bound=None, wall_time_seconds=1,
+            deterministic_time_seconds=0.1, branches=1, conflicts=0,
+        )
+        with mock.patch(
+            "clusterx_monitor.planning.solver.solve_once", return_value=unknown,
+        ):
+            result = solve_plan(evaluated, {
+                "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
+                "strategies": ["min-gpu"], "candidate_scope": "fragmented",
+                "alternatives": 1, "search_seconds": 2, "filters": {},
+            })
+        self.assertEqual(result["optimality"], "heuristic")
+        self.assertEqual(result["plans"][0]["rank_status"], "HEURISTIC")
+        self.assertEqual(result["plans"][0]["workloads"], ["a"])
 
 
 class ConsoleLinkTests(unittest.TestCase):

@@ -271,7 +271,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--strategy", action="append", choices=("min-gpu", "min-workloads", "min-users"), default=[])
     plan.add_argument("--candidate-scope", choices=("fragmented", "full", "all"), default="fragmented")
     plan.add_argument("--alternatives", type=int, default=1)
-    plan.add_argument("--search-seconds", type=float, default=10)
+    plan.add_argument(
+        "--search-seconds", type=float, default=10,
+        help="total CP-SAT budget shared by all requested strategies",
+    )
     for option in ("type", "group", "user", "workload", "exclude-workload", "exclude-user"):
         plan.add_argument(f"--{option}", action="append", default=[])
     plan.add_argument("--over-quota-only", action="store_true")

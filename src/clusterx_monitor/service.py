@@ -25,6 +25,7 @@ from .auth import AdminAuth, AdminSession, SESSION_COOKIE
 from .collector import ClusterCollector
 from .models import PlanRequest
 from .planner import solve_plan
+from .planning.domain import MODEL_VERSION as PLANNER_MODEL_VERSION
 from .policy import ConfigConflictError, PolicyManager, apply_policy
 from .store import PlanCache, SnapshotStore
 
@@ -534,7 +535,10 @@ def create_app(
         if snapshot is None:
             raise HTTPException(status_code=404, detail="snapshot is not retained")
         payload = request.model_dump(mode="json")
-        key = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        key = hashlib.sha256(json.dumps({
+            "planner_model_version": PLANNER_MODEL_VERSION,
+            "request": payload,
+        }, sort_keys=True).encode()).hexdigest()
         cached = runtime.plans.get(key)
         if cached is not None:
             cached["cache_hit"] = True
@@ -555,7 +559,8 @@ def create_app(
         result["superseded"] = bool(latest and latest["snapshot_id"] != request.snapshot_id)
         result["computed_at"] = datetime.now(timezone.utc).isoformat()
         result["cache_hit"] = False
-        runtime.plans.put(key, result)
+        if result.get("optimality") in {"exact", "not-needed"}:
+            runtime.plans.put(key, result)
         return result
 
     root = Path(static_dir) if static_dir else Path(__file__).with_name("static")

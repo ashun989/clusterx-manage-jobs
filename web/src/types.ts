@@ -229,6 +229,10 @@ export type Snapshot = {
 export type PlanItem = {
   strategy: string;
   rank: number;
+  rank_status: "OPTIMAL" | "FEASIBLE" | "HEURISTIC" | string;
+  rank_backend: "cp-sat" | "greedy-fallback" | string;
+  objective_value: number | null;
+  best_objective_bound: number | null;
   workloads: string[];
   workload_count: number;
   users: number;
@@ -237,7 +241,23 @@ export type PlanItem = {
   cpus: number | null;
   memory_gib: number | null;
   freed_nodes: string[];
+  target_nodes: string[];
+  newly_schedulable_nodes: string[];
   workload_details: Workload[];
+};
+
+export type PlanStrategyResult = {
+  strategy: string;
+  status: "OPTIMAL" | "FEASIBLE" | "INFEASIBLE" | "UNKNOWN" | "HEURISTIC" | string;
+  termination_reason: string;
+  top_k_complete: boolean;
+  requested_alternatives: number;
+  returned_alternatives: number;
+  wall_time_seconds: number;
+  deterministic_time_seconds: number;
+  branches: number;
+  conflicts: number;
+  plans: PlanItem[];
 };
 
 export type PlanResult = {
@@ -262,6 +282,16 @@ export type PlanResult = {
   };
   no_plan_reason?: string | null;
   plans: PlanItem[];
+  strategy_results: PlanStrategyResult[];
+  solver: {
+    backend: "cp-sat" | string;
+    model_version: number;
+    status: string;
+    time_limit_seconds: number;
+    wall_time_seconds: number;
+    candidate_node_count?: number;
+    candidate_workload_count?: number;
+  };
 };
 
 export type ServiceStatus = {

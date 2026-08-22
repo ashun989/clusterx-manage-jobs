@@ -89,9 +89,14 @@ const planResult: PlanResult = {
   planning_profile: { default_cpu_per_gpu: 14, default_memory_gib_per_gpu: 240 },
   planning_exclusions: { node_count: 0, workload_count: 0, reasons: [] },
   no_plan_reason: null,
+  solver: { backend: "cp-sat", model_version: 2, status: "OPTIMAL", time_limit_seconds: 10, wall_time_seconds: 0.2, candidate_node_count: 2, candidate_workload_count: 2 },
+  strategy_results: [
+    { strategy: "min-gpu", status: "OPTIMAL", termination_reason: "alternatives-complete", top_k_complete: true, requested_alternatives: 1, returned_alternatives: 1, wall_time_seconds: 0.1, deterministic_time_seconds: 0.01, branches: 2, conflicts: 0, plans: [] },
+    { strategy: "min-workloads", status: "OPTIMAL", termination_reason: "alternatives-complete", top_k_complete: true, requested_alternatives: 1, returned_alternatives: 1, wall_time_seconds: 0.1, deterministic_time_seconds: 0.01, branches: 2, conflicts: 0, plans: [] },
+  ],
   optimality: "exact", superseded: false, search_elapsed_seconds: 0.2, plans: [
-    { strategy: "min-gpu", rank: 1, workloads: ["workload-a"], workload_count: 1, users: 1, groups: 1, gpus: 4, cpus: 56, memory_gib: 960, freed_nodes: ["node-a"], workload_details: [trainA] },
-    { strategy: "min-workloads", rank: 1, workloads: ["workload-b"], workload_count: 1, users: 1, groups: 1, gpus: 8, cpus: 112, memory_gib: 1920, freed_nodes: ["node-b"], workload_details: [trainB] },
+    { strategy: "min-gpu", rank: 1, rank_status: "OPTIMAL", rank_backend: "cp-sat", objective_value: 1, best_objective_bound: 1, workloads: ["workload-a"], workload_count: 1, users: 1, groups: 1, gpus: 4, cpus: 56, memory_gib: 960, freed_nodes: ["node-a"], target_nodes: ["node-a"], newly_schedulable_nodes: ["node-a"], workload_details: [trainA] },
+    { strategy: "min-workloads", rank: 1, rank_status: "OPTIMAL", rank_backend: "cp-sat", objective_value: 1, best_objective_bound: 1, workloads: ["workload-b"], workload_count: 1, users: 1, groups: 1, gpus: 8, cpus: 112, memory_gib: 1920, freed_nodes: ["node-b"], target_nodes: ["node-b"], newly_schedulable_nodes: ["node-b"], workload_details: [trainB] },
   ],
 };
 
@@ -132,7 +137,7 @@ describe("Clusterx monitor dashboard", () => {
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "0.3.2", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "0.4.0", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       const value = path.endsWith("/plans") && init?.method === "POST" ? planResult : path.endsWith("/policy") ? policyResponse : latestSnapshot;
       return { ok: true, status: 200, json: async () => structuredClone(value) };
     }));
@@ -153,7 +158,7 @@ describe("Clusterx monitor dashboard", () => {
   it("filters enum columns, sorts numeric columns and resets missing filter values", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
-    expect(screen.getByText("v0.3.2")).toBeInTheDocument();
+    expect(screen.getByText("v0.4.0")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);

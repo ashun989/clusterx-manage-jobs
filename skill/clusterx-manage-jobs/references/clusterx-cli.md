@@ -177,6 +177,16 @@ comma-separated `--finding-category`, `--finding-code`, and `--tag` values.
 than parsing display messages. Suggestions are
 coordination candidates only. The monitor and CLI contain no stop operation.
 
+The simulator uses an integer OR-Tools CP-SAT model instead of workload-subset
+enumeration. `--search-seconds` is the total budget shared fairly by the
+requested strategies. Each strategy reports `OPTIMAL`, `FEASIBLE`,
+`INFEASIBLE`, or `UNKNOWN`, its termination reason, objective/bound data, and
+whether the requested Top-K alternatives are complete. A feasible solution is
+independently recomputed against the pinned snapshot before it is returned;
+the deterministic greedy path is only a verified timeout fallback and is
+always labeled heuristic. `candidate-scope` limits the nodes that may satisfy
+the requested target, including for workloads spanning multiple nodes.
+
 The Web workload drawer lets any Monitor viewer fetch a bounded realtime
 training log preview after explicitly selecting a Worker and clicking the load
 action. Merely loading the dashboard or opening workload details does not call
