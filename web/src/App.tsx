@@ -21,6 +21,7 @@ const releaseNotes: Record<string, string[]> = {
     "调度模拟器升级为 CP-SAT，搜索时长作为请求总预算。",
     "明确展示精确性、策略状态与 Top-K 完整性。",
     "严格限制候选节点，并独立校验每个返回方案。",
+    "资源总量随节点数和 GPU 联动，筛选项改为快照候选多选。",
   ],
 };
 
@@ -181,51 +182,125 @@ function NodeHeatmap({ nodes, state, onState, onNode }: { nodes: NodeSummary[]; 
   </>;
 }
 
+type PlannerFilterKey = "types" | "groups" | "users" | "workloads" | "excludeWorkloads" | "excludeUsers" | "violationCategories" | "violationCodes" | "violationTags";
+type PlannerFilters = Record<PlannerFilterKey, string[]>;
+type PlannerOption = { value: string; label: string; detail?: string };
+
+const plannerFilterKeys: PlannerFilterKey[] = ["types", "groups", "users", "workloads", "excludeWorkloads", "excludeUsers", "violationCategories", "violationCodes", "violationTags"];
+const emptyPlannerFilters = (): PlannerFilters => ({ types: [], groups: [], users: [], workloads: [], excludeWorkloads: [], excludeUsers: [], violationCategories: [], violationCodes: [], violationTags: [] });
+const simpleOptions = (values: string[]): PlannerOption[] => [...new Set(values.filter(Boolean))].sort((left, right) => left.localeCompare(right)).map((value) => ({ value, label: value }));
+
+function PlannerMultiSelect({ label, options, selected, onChange, emptyLabel = "不限" }: { label: string; options: PlannerOption[]; selected: string[]; onChange: (values: string[]) => void; emptyLabel?: string }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visible = options.filter((option) => !normalizedQuery || `${option.label} ${option.value} ${option.detail ?? ""}`.toLocaleLowerCase().includes(normalizedQuery));
+  const selectedLabels = selected.map((value) => options.find((option) => option.value === value)?.label ?? value);
+  const selectionLabel = selectedLabels.length === 0 ? emptyLabel : selectedLabels.length <= 2 ? selectedLabels.join("、") : `${selectedLabels[0]} 等 ${selectedLabels.length} 项`;
+  return <details className="planner-multi" open={open}>
+    <summary onClick={(event) => { event.preventDefault(); setOpen((value) => !value); }}><span>{label}</span><em title={selectedLabels.join("、")}>{selectionLabel}</em></summary>
+    {open && <div className="planner-multi-popover">
+      {options.length > 5 && <input aria-label={`搜索${label}`} type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${label}候选`} />}
+      <div className="planner-multi-actions"><small>{visible.length}/{options.length} 个候选</small>{selected.length > 0 && <button type="button" onClick={() => onChange([])}>清空</button>}</div>
+      <div className="planner-multi-options">{visible.map((option) => <label key={option.value}>
+        <input type="checkbox" aria-label={`${label}：${option.label}`} checked={selected.includes(option.value)} onChange={(event) => onChange(event.target.checked ? [...selected, option.value] : selected.filter((value) => value !== option.value))} />
+        <span><b>{option.label}</b>{option.detail && <small>{option.detail}</small>}</span>
+      </label>)}{visible.length === 0 && <p>没有匹配候选</p>}</div>
+    </div>}
+  </details>;
+}
+
 function Planner({ snapshot, onResult }: { snapshot: Snapshot; onResult: (value: PlanResult) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [nodes, setNodes] = useState("2");
   const [gpus, setGpus] = useState("8");
-  const defaultFor = (perGpu: number) => String(Number(gpus) * perGpu);
-  const [cpus, setCpus] = useState(() => String(8 * snapshot.planning_profile.default_cpu_per_gpu));
-  const [memory, setMemory] = useState(() => String(8 * snapshot.planning_profile.default_memory_gib_per_gpu));
+  const defaultFor = (perGpu: number) => {
+    const nodeCount = Number(nodes); const gpuCount = Number(gpus);
+    return nodeCount > 0 && gpuCount > 0 ? String(nodeCount * gpuCount * perGpu) : "";
+  };
+  const [cpus, setCpus] = useState(() => String(2 * 8 * snapshot.planning_profile.default_cpu_per_gpu));
+  const [memory, setMemory] = useState(() => String(2 * 8 * snapshot.planning_profile.default_memory_gib_per_gpu));
   const [cpusUseDefault, setCpusUseDefault] = useState(true);
   const [memoryUsesDefault, setMemoryUsesDefault] = useState(true);
+  const [filters, setFilters] = useState<PlannerFilters>(emptyPlannerFilters);
+  const filterOptions = useMemo<Record<PlannerFilterKey, PlannerOption[]>>(() => {
+    const candidates = snapshot.workloads.filter((workload) => workload.planning_eligible !== false && workload.placements.length > 0 && workload.user && workload.user !== "unknown" && workload.group && workload.group !== "unattributed");
+    const workloadOptions = candidates.map((workload) => ({ value: workload.workload_id, label: workload.workload_name, detail: `${workload.user} / ${workload.group} · ${workload.workload_id}` })).sort((left, right) => left.label.localeCompare(right.label) || left.value.localeCompare(right.value));
+    const findings = [
+      ...candidates.flatMap((workload) => workload.policy_findings ?? []),
+      ...snapshot.groups.flatMap((group) => group.policy_findings ?? []),
+      ...snapshot.users.flatMap((user) => (user.policy_findings ?? []).filter((finding) => finding.code === "quota.development.instances_per_user")),
+    ].filter((finding) => finding.status === "violation");
+    return {
+      types: simpleOptions(candidates.map((workload) => workload.type)),
+      groups: simpleOptions(candidates.map((workload) => workload.group)),
+      users: simpleOptions(candidates.map((workload) => workload.user)),
+      workloads: workloadOptions,
+      excludeWorkloads: workloadOptions,
+      excludeUsers: simpleOptions(candidates.map((workload) => workload.user)),
+      violationCategories: simpleOptions(findings.map((finding) => finding.category)),
+      violationCodes: simpleOptions(findings.map((finding) => finding.code)),
+      violationTags: simpleOptions(findings.flatMap((finding) => finding.tags)),
+    };
+  }, [snapshot]);
   useEffect(() => {
     if (cpusUseDefault) setCpus(defaultFor(snapshot.planning_profile.default_cpu_per_gpu));
     if (memoryUsesDefault) setMemory(defaultFor(snapshot.planning_profile.default_memory_gib_per_gpu));
-  }, [gpus, snapshot.planning_profile.default_cpu_per_gpu, snapshot.planning_profile.default_memory_gib_per_gpu, cpusUseDefault, memoryUsesDefault]);
+  }, [nodes, gpus, snapshot.planning_profile.default_cpu_per_gpu, snapshot.planning_profile.default_memory_gib_per_gpu, cpusUseDefault, memoryUsesDefault]);
+  useEffect(() => {
+    setFilters((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const key of plannerFilterKeys) {
+        const allowed = new Set(filterOptions[key].map((option) => option.value));
+        next[key] = current[key].filter((value) => allowed.has(value));
+        changed ||= next[key].length !== current[key].length;
+      }
+      return changed ? next : current;
+    });
+  }, [filterOptions]);
+  const changeFilter = (key: PlannerFilterKey) => (values: string[]) => setFilters((current) => ({ ...current, [key]: values }));
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setBusy(true); setError("");
     const data = new FormData(event.currentTarget);
     const strategies = data.getAll("strategy") as string[];
-    const split = (name: string) => String(data.get(name) ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-    const optional = (name: string) => data.get(name) ? Number(data.get(name)) : null;
+    const nodeCount = Number(data.get("nodes"));
+    const totalAsPerNode = (name: string) => data.get(name) ? Number(data.get(name)) / nodeCount : null;
     try {
       const result = await api<PlanResult>("/plans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
         snapshot_id: snapshot.snapshot_id,
-        target: { nodes: Number(data.get("nodes")), gpus_per_node: Number(data.get("gpus")), cpus_per_node: optional("cpus"), memory_per_node_gib: optional("memory") },
+        target: { nodes: nodeCount, gpus_per_node: Number(data.get("gpus")), cpus_per_node: totalAsPerNode("cpus"), memory_per_node_gib: totalAsPerNode("memory") },
         strategies: strategies.length ? strategies : ["min-gpu"], candidate_scope: data.get("scope"), alternatives: Number(data.get("alternatives")), search_seconds: Number(data.get("searchSeconds")),
         filters: {
-          workload_types: split("types"), groups: split("groups"), users: split("users"), workloads: split("workloads"),
-          exclude_workloads: split("excludeWorkloads"), exclude_users: split("excludeUsers"), over_quota_only: data.get("overQuota") === "on",
-          violation_categories: split("violationCategories"), violation_codes: split("violationCodes"), violation_tags: split("violationTags"),
+          workload_types: filters.types, groups: filters.groups, users: filters.users, workloads: filters.workloads,
+          exclude_workloads: filters.excludeWorkloads, exclude_users: filters.excludeUsers, over_quota_only: data.get("overQuota") === "on",
+          violation_categories: filters.violationCategories, violation_codes: filters.violationCodes, violation_tags: filters.violationTags,
         },
       }) });
       onResult(result);
     } catch (value) { setError(value instanceof Error ? value.message : String(value)); } finally { setBusy(false); }
   };
   return <form className="planner" onSubmit={submit}>
-    <label>节点数<input name="nodes" type="number" min="1" max="1024" defaultValue="2" /></label><label>每节点 GPU<input name="gpus" type="number" min="1" max="1024" value={gpus} onChange={(event) => setGpus(event.target.value)} /></label>
-    <label>CPU（可覆盖）<input name="cpus" type="number" min="1" max="1000000" value={cpus} onChange={(event) => { setCpusUseDefault(false); setCpus(event.target.value); }} /></label><label>内存 GiB（可覆盖）<input name="memory" type="number" min="1" max="10000000" value={memory} onChange={(event) => { setMemoryUsesDefault(false); setMemory(event.target.value); }} /></label>
-    <label>候选范围<select name="scope" defaultValue="fragmented"><option value="fragmented">碎片节点</option><option value="full">满 GPU 节点</option><option value="all">全部</option></select></label><label>备选数<input name="alternatives" type="number" min="1" max="10" defaultValue="1" /></label>
-    <label>总求解预算（秒）<input name="searchSeconds" type="number" min="1" max="30" defaultValue="10" /></label>
-    <label>类型（逗号分隔）<input name="types" placeholder="trainingJob,aid" /></label><label>分组（逗号分隔）<input name="groups" placeholder="example-team" /></label>
-    <label>用户（逗号分隔）<input name="users" placeholder="alice" /></label><label>指定 workload ID<input name="workloads" placeholder="id-a,id-b" /></label>
-    <label>排除 workload ID<input name="excludeWorkloads" placeholder="id-c" /></label><label>排除用户<input name="excludeUsers" placeholder="username" /></label>
-    <label>违规分类（逗号分隔）<input name="violationCategories" placeholder="utilization,quota" /></label><label>规则代码（逗号分隔）<input name="violationCodes" placeholder="utilization.low_gpu_activity" /></label>
-    <label>违规标签（逗号分隔）<input name="violationTags" placeholder="low-utilization,gpu" /></label>
-    <fieldset><legend>策略</legend>{[["min-gpu", "最少 GPU"], ["min-workloads", "最少任务"], ["min-users", "最少用户"]].map(([value, label]) => <label className="check" key={value}><input name="strategy" value={value} type="checkbox" defaultChecked />{label}</label>)}</fieldset>
-    <label className="check"><input name="overQuota" type="checkbox" />仅超 quota 分组</label><button disabled={busy}>{busy ? "计算中…" : "计算方案"}</button>{error && <p className="error planner-error">{error}</p>}
+    <section className="planner-section"><h3>目标资源</h3>
+      <label>节点数<input name="nodes" type="number" min="1" max="1024" value={nodes} onChange={(event) => setNodes(event.target.value)} required /></label><label>每节点 GPU<input name="gpus" type="number" min="1" max="1024" value={gpus} onChange={(event) => setGpus(event.target.value)} required /></label>
+      <div className="planner-field"><label htmlFor="planner-cpus">CPU 总量（可覆盖）</label><input id="planner-cpus" name="cpus" type="number" min="1" max={1_000_000 * Math.max(1, Number(nodes) || 1)} step="any" value={cpus} onChange={(event) => { setCpusUseDefault(false); setCpus(event.target.value); }} required /><small><span>{cpusUseDefault ? `${nodes || "—"} 节点 × ${gpus || "—"} GPU × ${snapshot.planning_profile.default_cpu_per_gpu} CPU/GPU` : "使用自定义 CPU 总量"}</span>{!cpusUseDefault && <button type="button" aria-label="CPU 恢复默认比例" onClick={() => { setCpus(defaultFor(snapshot.planning_profile.default_cpu_per_gpu)); setCpusUseDefault(true); }}>恢复跟随</button>}</small></div>
+      <div className="planner-field"><label htmlFor="planner-memory">内存总量 GiB（可覆盖）</label><input id="planner-memory" name="memory" type="number" min="1" max={10_000_000 * Math.max(1, Number(nodes) || 1)} step="any" value={memory} onChange={(event) => { setMemoryUsesDefault(false); setMemory(event.target.value); }} required /><small><span>{memoryUsesDefault ? `${nodes || "—"} 节点 × ${gpus || "—"} GPU × ${snapshot.planning_profile.default_memory_gib_per_gpu} GiB/GPU` : "使用自定义内存总量"}</span>{!memoryUsesDefault && <button type="button" aria-label="内存恢复默认比例" onClick={() => { setMemory(defaultFor(snapshot.planning_profile.default_memory_gib_per_gpu)); setMemoryUsesDefault(true); }}>恢复跟随</button>}</small></div>
+    </section>
+    <section className="planner-section"><h3>求解设置</h3>
+      <label>候选范围<select name="scope" defaultValue="fragmented"><option value="fragmented">碎片节点</option><option value="full">满 GPU 节点</option><option value="all">全部</option></select></label><label>备选数<input name="alternatives" type="number" min="1" max="10" defaultValue="1" required /></label>
+      <label>总求解预算（秒）<input name="searchSeconds" type="number" min="1" max="30" defaultValue="10" required /></label>
+      <fieldset><legend>策略</legend>{[["min-gpu", "最少 GPU"], ["min-workloads", "最少任务"], ["min-users", "最少用户"]].map(([value, label]) => <label className="check" key={value}><input name="strategy" value={value} type="checkbox" defaultChecked />{label}</label>)}</fieldset>
+    </section>
+    <section className="planner-section"><h3>候选筛选</h3>
+      <PlannerMultiSelect label="类型" options={filterOptions.types} selected={filters.types} onChange={changeFilter("types")} /><PlannerMultiSelect label="分组" options={filterOptions.groups} selected={filters.groups} onChange={changeFilter("groups")} />
+      <PlannerMultiSelect label="用户" options={filterOptions.users} selected={filters.users} onChange={changeFilter("users")} /><PlannerMultiSelect label="指定 Workload" options={filterOptions.workloads} selected={filters.workloads} onChange={changeFilter("workloads")} />
+      <PlannerMultiSelect label="排除 Workload" options={filterOptions.excludeWorkloads} selected={filters.excludeWorkloads} onChange={changeFilter("excludeWorkloads")} emptyLabel="不排除" /><PlannerMultiSelect label="排除用户" options={filterOptions.excludeUsers} selected={filters.excludeUsers} onChange={changeFilter("excludeUsers")} emptyLabel="不排除" />
+      <PlannerMultiSelect label="违规分类" options={filterOptions.violationCategories} selected={filters.violationCategories} onChange={changeFilter("violationCategories")} /><PlannerMultiSelect label="规则代码" options={filterOptions.violationCodes} selected={filters.violationCodes} onChange={changeFilter("violationCodes")} />
+      <PlannerMultiSelect label="违规标签" options={filterOptions.violationTags} selected={filters.violationTags} onChange={changeFilter("violationTags")} /><label className="check planner-check-card"><input name="overQuota" type="checkbox" />仅超 quota 分组</label>
+      <p className="planner-filter-note">筛选候选来自当前快照；快照更新后，不再存在的选项会自动移除。</p>
+    </section>
+    <button disabled={busy}>{busy ? "计算中…" : "计算方案"}</button>{error && <p className="error planner-error">{error}</p>}
   </form>;
 }
 
@@ -242,7 +317,7 @@ function PlanResults({ plan, currentSnapshotId, onWorkload }: { plan: PlanResult
     <div className="plan-result-heading"><div><h3>{plan.optimality}</h3><span>{plan.solver.backend} · {plan.search_elapsed_seconds}s · snapshot {plan.snapshot_id.slice(0, 12)}</span></div>{superseded && <span className="status status-warning">快照已更新</span>}</div>
     <p className="plan-timestamp">快照时间 {new Date(plan.snapshot_generated_at).toLocaleString()}{plan.cache_hit ? " · cache hit" : ""}</p>
     {plan.strategy_results.length > 0 && <div className="tag-list">{plan.strategy_results.map((result) => <span key={result.strategy}>{result.strategy}: {result.status} · {result.returned_alternatives}/{result.requested_alternatives}{result.top_k_complete ? "" : " · partial"}</span>)}</div>}
-    <div className="plan-resolved"><b>实际资源画像</b><span>{number(plan.resolved_target.nodes)} × {number(plan.resolved_target.gpus_per_node)} GPU / {number(plan.resolved_target.cpus_per_node)} CPU / {number(plan.resolved_target.memory_per_node_gib)} GiB</span>{plan.defaults_applied.length > 0 && <small>已应用默认值：{plan.defaults_applied.join(", ")}</small>}<small>排除 {plan.planning_exclusions.node_count} 节点 / {plan.planning_exclusions.workload_count} Workload{plan.planning_exclusions.reasons.length ? ` · ${plan.planning_exclusions.reasons.join(", ")}` : ""}</small>{plan.planning_exclusions.nodes?.map((item) => <small key={`node:${item.node}`}>节点 {item.node}: {item.reasons.join(", ")}</small>)}{plan.planning_exclusions.workloads?.map((item) => <small key={`workload:${item.workload_id}`}>Workload {item.workload_id}: {item.reasons.join(", ")} ({item.nodes.join(", ")})</small>)}</div>
+    <div className="plan-resolved"><b>实际资源画像</b><span>{number(plan.resolved_target.nodes)} 节点 ×（每节点 {number(plan.resolved_target.gpus_per_node)} GPU / {number(plan.resolved_target.cpus_per_node)} CPU / {number(plan.resolved_target.memory_per_node_gib)} GiB）</span>{plan.defaults_applied.length > 0 && <small>已应用默认值：{plan.defaults_applied.join(", ")}</small>}<small>排除 {plan.planning_exclusions.node_count} 节点 / {plan.planning_exclusions.workload_count} Workload{plan.planning_exclusions.reasons.length ? ` · ${plan.planning_exclusions.reasons.join(", ")}` : ""}</small>{plan.planning_exclusions.nodes?.map((item) => <small key={`node:${item.node}`}>节点 {item.node}: {item.reasons.join(", ")}</small>)}{plan.planning_exclusions.workloads?.map((item) => <small key={`workload:${item.workload_id}`}>Workload {item.workload_id}: {item.reasons.join(", ")} ({item.nodes.join(", ")})</small>)}</div>
     {plan.plans.length === 0 ? plan.optimality === "not-needed" ? <div className="plan-notice"><b>无需协调 Workload</b><p>当前可调度节点：{plan.currently_schedulable_nodes?.join(", ") || "—"}</p></div> : <div className="plan-notice"><b>没有可行方案</b><p>{reasonLabels[plan.no_plan_reason ?? ""] ?? "当前候选范围不足以释放目标资源。"}</p></div> : plan.plans.map((item) => {
       const key = planKey(item); const open = expanded.includes(key);
       return <article className={open ? "plan-card expanded" : "plan-card"} key={key}><button type="button" className="plan-summary" aria-expanded={open} onClick={() => setExpanded(open ? expanded.filter((value) => value !== key) : [...expanded, key])}><span><b>{item.strategy} #{item.rank}</b><small>{item.rank_status} · {item.rank_backend} · {number(item.gpus)} GPU · {number(item.workload_count)} workloads</small></span><span className="freed-summary">{item.freed_nodes.join(", ") || "无释放节点"}</span><i>{open ? "−" : "+"}</i></button>

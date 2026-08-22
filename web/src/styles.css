@@ -105,17 +105,45 @@ tr.clickable:hover, tr.clickable:focus { background: #10252e; }
 .status-gpu-full { color: #a3b4ba; background: #202c31; }
 .status-cpu-memory-blocked { color: #efc16e; background: #332913; }
 
-.scheduler-panel { padding: 19px; }
+.scheduler-panel { padding: 19px; overflow: visible; }
 .planner-column > p { margin-top: -8px; color: #6e8994; font-size: 12px; }
-.planner { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.planner label { color: #78919b; font-size: 11px; }
-.planner input, .planner select { width: 100%; margin-top: 4px; padding: 8px; border: 1px solid #29414b; border-radius: 7px; color: #dce9ef; background: #09141a; }
-.planner fieldset { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; border: 1px solid #29414b; border-radius: 7px; }
-.planner .check { display: flex; gap: 5px; align-items: center; }
-.planner .check input { width: auto; margin: 0; }
-.planner > button { grid-column: 1 / -1; padding: 10px; border: 0; border-radius: 7px; color: #06201d; background: #5bd3c7; font-weight: 800; cursor: pointer; }
+.planner { display: grid; gap: 14px; font-size: 13px; }
+.planner-section { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; padding: 13px; border: 1px solid #203a45; border-radius: 10px; background: #0a161d; }
+.planner-section > h3 { grid-column: 1 / -1; margin: 0 0 2px; color: #9bb2ba; font-size: 12px; line-height: 1.2; letter-spacing: .04em; }
+.planner label { color: #849ca6; font-size: 12px; line-height: 1.2; }
+.planner-section > label:not(.check), .planner-field { display: grid; align-content: start; min-width: 0; gap: 6px; }
+.planner input, .planner select { width: 100%; height: 40px; margin: 0; padding: 0 10px; border: 1px solid #2b4854; border-radius: 7px; color: #dce9ef; background: #09141a; font-size: 13px; line-height: 1.2; }
+.planner input:hover, .planner select:hover, .planner-multi > summary:hover { border-color: #3a5e6a; }
+.planner-field > label { font-weight: 500; }
+.planner-field > small { display: flex; justify-content: space-between; gap: 7px; align-items: center; min-height: 20px; color: #6f8994; font-size: 11px; line-height: 1.3; }
+.planner-field > small button, .planner-multi-actions button { flex: 0 0 auto; padding: 2px 5px; border: 0; color: #66dbcf; background: none; font-size: 11px; cursor: pointer; }
+.planner-multi { position: relative; min-width: 0; }
+.planner-multi > summary { display: grid; align-content: center; gap: 6px; min-height: 59px; padding: 7px 10px; border: 1px solid #2b4854; border-radius: 7px; background: #09141a; list-style: none; cursor: pointer; }
+.planner-multi > summary::-webkit-details-marker { display: none; }
+.planner-multi > summary::after { position: absolute; right: 10px; bottom: 11px; content: "⌄"; color: #607984; font-size: 11px; }
+.planner-multi > summary span { color: #849ca6; font-size: 12px; line-height: 1.2; }
+.planner-multi > summary em { padding-right: 16px; overflow: hidden; color: #dce9ef; font-size: 13px; line-height: 1.2; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.planner-multi[open] > summary { border-color: #3b6570; }
+.planner-multi-popover { position: absolute; top: calc(100% + 5px); left: 0; z-index: 20; width: max(100%, 280px); max-width: min(360px, calc(100vw - 40px)); padding: 8px; border: 1px solid #31515d; border-radius: 9px; background: #0d1d25; box-shadow: 0 16px 38px #000a; }
+.planner-multi-popover > input { margin: 0 0 7px; }
+.planner-multi-actions { display: flex; justify-content: space-between; align-items: center; min-height: 24px; color: #6f8994; font-size: 11px; }
+.planner-multi-options { display: grid; max-height: 230px; overflow: auto; }
+.planner-multi-options label { display: flex; gap: 9px; align-items: flex-start; padding: 8px 7px; border-radius: 5px; cursor: pointer; }
+.planner-multi-options label:hover { background: #142832; }
+.planner-multi-options input { width: auto; height: auto; margin: 2px 0 0; padding: 0; accent-color: #5bd3c7; }
+.planner-multi-options span { display: grid; min-width: 0; gap: 2px; }
+.planner-multi-options b { overflow-wrap: anywhere; color: #c2d5db; font-size: 12px; font-weight: 600; }
+.planner-multi-options small { overflow-wrap: anywhere; color: #6f8994; font-size: 10px; }
+.planner-multi-options p { margin: 11px; color: #6f8994; text-align: center; font-size: 12px; }
+.planner-filter-note { grid-column: 1 / -1; margin: -1px 0 0; color: #6f8994; font-size: 11px; line-height: 1.4; }
+.planner fieldset { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 14px; min-height: 58px; margin: 0; padding: 10px 12px; border: 1px solid #2b4854; border-radius: 7px; }
+.planner fieldset legend { padding: 0 4px; color: #849ca6; font-size: 12px; }
+.planner .check { display: flex; gap: 7px; align-items: center; color: #b4c7ce; font-size: 12px; }
+.planner .check input { width: auto; height: auto; margin: 0; padding: 0; accent-color: #5bd3c7; }
+.planner .planner-check-card { min-height: 59px; padding: 10px; border: 1px solid #2b4854; border-radius: 7px; background: #09141a; }
+.planner > button { width: 100%; height: 42px; padding: 0 12px; border: 0; border-radius: 7px; color: #06201d; background: #5bd3c7; font-size: 13px; font-weight: 800; cursor: pointer; }
 .planner > button:disabled { opacity: .5; }
-.planner-error { grid-column: 1 / -1; }
+.planner-error { margin: 0; font-size: 12px; }
 .error { color: #ff8978; }
 .plan-empty { display: grid; min-height: 170px; place-items: center; padding: 20px; border: 1px dashed #24404b; border-radius: 9px; color: #607984; text-align: center; }
 .plan-results { min-width: 0; }
@@ -268,8 +296,7 @@ tr.clickable:hover, tr.clickable:focus { background: #10252e; }
   .cluster-context { margin-left: 56px; }
   .cards { grid-template-columns: minmax(0, 1fr); }
   .scheduler-panel { padding: 14px; }
-  .planner { grid-template-columns: minmax(0, 1fr); }
-  .planner fieldset, .planner > button, .planner-error { grid-column: 1; }
+  .planner-section { grid-template-columns: minmax(0, 1fr); padding: 11px; }
   .node-grid { grid-template-columns: minmax(0, 1fr); padding: 10px; }
   .table-tools { display: grid; }
   .filter-list { max-width: none; }
