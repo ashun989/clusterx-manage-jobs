@@ -16,10 +16,30 @@ const quota = (value: unknown) => value == null ? "不限" : number(value);
 const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
 const runtimeMark = (row: Workload) => row.runtime_quality === "observed" ? "（观测）" : row.runtime_quality === "estimated" || row.runtime_estimated ? "（估算）" : "";
 
+const releaseNotes: Record<string, string[]> = {
+  "0.4.0": [
+    "调度模拟器升级为 CP-SAT，搜索时长作为请求总预算。",
+    "明确展示精确性、策略状态与 Top-K 完整性。",
+    "严格限制候选节点，并独立校验每个返回方案。",
+  ],
+};
+
+function VersionBadge({ version }: { version: string }) {
+  const notes = releaseNotes[version];
+  if (!notes) return <span className="app-version">v{version}</span>;
+  return <details className="version-menu">
+    <summary aria-label={`查看 v${version} 更新内容`}>v{version}</summary>
+    <div className="version-popover">
+      <strong>本版更新</strong>
+      <ul>{notes.map((note) => <li key={note}>{note}</li>)}</ul>
+    </div>
+  </details>;
+}
+
 function Brand({ compact = false, version }: { compact?: boolean; version?: string }) {
   return <div className={compact ? "brand brand-compact" : "brand"}>
     <img className="brand-icon" src="/clusterx-icon.svg" alt="" />
-    <div>{!compact && <span className="eyebrow">Clusterx</span>}<div className="brand-title"><h1>{compact ? "Clusterx Monitor" : "Queue Observatory"}</h1>{version && <span className="app-version">v{version}</span>}</div></div>
+    <div>{!compact && <span className="eyebrow">Clusterx</span>}<div className="brand-title"><h1>{compact ? "Clusterx Monitor" : "Queue Observatory"}</h1>{version && <VersionBadge version={version} />}</div></div>
   </div>;
 }
 
