@@ -155,6 +155,18 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByText("5s 前更新")).toBeInTheDocument();
   });
 
+  it("shows the current release notes from the version badge", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+
+    fireEvent.click(screen.getByLabelText("查看 v0.4.0 更新内容"));
+
+    expect(screen.getByText("本版更新")).toBeInTheDocument();
+    expect(screen.getByText(/调度模拟器升级为 CP-SAT/)).toBeInTheDocument();
+    expect(screen.getByText(/明确展示精确性/)).toBeInTheDocument();
+    expect(screen.getByText(/独立校验每个返回方案/)).toBeInTheDocument();
+  });
+
   it("filters enum columns, sorts numeric columns and resets missing filter values", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
