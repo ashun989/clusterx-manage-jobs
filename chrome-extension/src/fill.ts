@@ -475,7 +475,10 @@ function existingAfsMount(
 
 function labeledInput(container: HTMLElement, labelText: string): HTMLInputElement | undefined {
   for (const label of Array.from(container.querySelectorAll<HTMLLabelElement>("label"))) {
-    if (text(label.textContent) !== labelText) continue;
+    const normalizedLabel = text(label.textContent)
+      .replace(/^[*＊]\s*/, "")
+      .replace(/\s*[:：]$/, "");
+    if (normalizedLabel !== labelText) continue;
     if (label.control instanceof HTMLInputElement && container.contains(label.control)) {
       return label.control;
     }
@@ -553,16 +556,76 @@ type AossAuthFields =
   | { mode: "kms"; control: HTMLInputElement }
   | { mode: "manual"; accessKey: HTMLInputElement; secretKey: HTMLInputElement };
 
-function aossContainerFromMountInput(mountInput: HTMLInputElement): HTMLElement {
-  return closestContainer(mountInput, (element) => {
-    const hasCommonFields = !!labeledInput(element, AOSS_BUCKET_LABEL)
-      && !!element.querySelector('input[placeholder="请输入http(s)://yourdomain.xxx"]')
-      && !!element.querySelector('input[placeholder="请输入存储目录，非必填"]');
-    const hasAuthFields = !!labeledInput(element, AOSS_KMS_LABEL)
-      || !!element.querySelector(`input[role="combobox"][placeholder="${AOSS_KMS_PLACEHOLDER}"]`)
-      || (!!labeledInput(element, AOSS_AK_LABEL) && !!labeledInput(element, AOSS_SK_LABEL));
-    return hasCommonFields && hasAuthFields;
-  });
+const AOSS_MOUNT_PATH_SELECTOR = 'input[placeholder="请输入路径，如 /data"]';
+
+function usableInputs(container: ParentNode): HTMLInputElement[] {
+  return Array.from(container.querySelectorAll<HTMLInputElement>("input")).filter(isUsable);
+}
+
+function aossCommonContainerFromMountInput(mountInput: HTMLInputElement): HTMLElement {
+  const body = mountInput.ownerDocument.body;
+  for (let current = mountInput.parentElement; current && current !== body; current = current.parentElement) {
+    const mountInputs = Array.from(
+      current.querySelectorAll<HTMLInputElement>(AOSS_MOUNT_PATH_SELECTOR),
+    ).filter(isUsable);
+    if (mountInputs.length === 1 && mountInputs[0] === mountInput && usableInputs(current).length >= 4) {
+      return current;
+    }
+  }
+  throw new PageControlError("无法定位新添加的挂载配置行");
+}
+
+function aossContainerFromMountInput(
+  mountInput: HTMLInputElement,
+  commonContainer: HTMLElement,
+): HTMLElement {
+  const body = mountInput.ownerDocument.body;
+  for (let current: HTMLElement | null = commonContainer; current && current !== body; current = current.parentElement) {
+    const hasAuthFields = !!labeledInput(current, AOSS_KMS_LABEL)
+      || usableInputs(current).some((input) => input.getAttribute("role") === "combobox")
+      || (!!labeledInput(current, AOSS_AK_LABEL) && !!labeledInput(current, AOSS_SK_LABEL))
+      || (usableInputs(current).some((input) => /access\s*key\s*id|\bAK\b/i.test(input.placeholder))
+        && usableInputs(current).some((input) => /secret\s*access\s*key|\bSK\b/i.test(input.placeholder)));
+    if (hasAuthFields) return current;
+  }
+  throw new PageControlError("对象存储挂载行缺少凭据控件");
+}
+
+function uniqueMatchingInput(
+  container: ParentNode,
+  predicate: (input: HTMLInputElement) => boolean,
+  missingMessage: string,
+  ambiguousMessage: string,
+): HTMLInputElement {
+  return unique(usableInputs(container).filter(predicate), missingMessage, ambiguousMessage);
+}
+
+function aossBucketInput(commonContainer: HTMLElement): HTMLInputElement | undefined {
+  const labeled = labeledInput(commonContainer, AOSS_BUCKET_LABEL);
+  if (labeled) return labeled;
+
+  const byId = Array.from(commonContainer.querySelectorAll<HTMLInputElement>(
+    'input[id^="dataSource_"][id$="_aoss"]',
+  )).filter(isUsable);
+  if (byId.length > 1) {
+    throw new PageControlError("对象存储挂载存在多个 Bucket 输入框");
+  }
+  if (byId[0]) return byId[0];
+
+  const byPlaceholder = usableInputs(commonContainer)
+    .filter((input) => /bucket/i.test(input.placeholder));
+  if (byPlaceholder.length > 1) {
+    throw new PageControlError("对象存储挂载存在多个候选 Bucket 输入框");
+  }
+  if (byPlaceholder[0]) return byPlaceholder[0];
+
+  const generic = Array.from(commonContainer.querySelectorAll<HTMLInputElement>(
+    'input[placeholder="请输入"]',
+  )).filter(isUsable);
+  if (generic.length > 1) {
+    throw new PageControlError("对象存储挂载存在多个候选 Bucket 输入框");
+  }
+  return generic[0];
 }
 
 interface AossFields {
@@ -570,22 +633,41 @@ interface AossFields {
   auth: AossAuthFields;
   bucket: HTMLInputElement;
   endpoint: HTMLInputElement;
-  subdir: HTMLInputElement;
+  subdir?: HTMLInputElement;
   mountPath: HTMLInputElement;
 }
 
 function aossFields(mountInput: HTMLInputElement): AossFields {
-  const container = aossContainerFromMountInput(mountInput);
+  const commonContainer = aossCommonContainerFromMountInput(mountInput);
+  const container = aossContainerFromMountInput(mountInput, commonContainer);
+  const unlabeledComboboxes = usableInputs(container).filter((input) =>
+    input.getAttribute("role") === "combobox" && input !== mountInput,
+  );
   const kmsControl = labeledInput(container, AOSS_KMS_LABEL)
     ?? container.querySelector<HTMLInputElement>(
       `input[role="combobox"][placeholder="${AOSS_KMS_PLACEHOLDER}"]`,
     )
+    ?? (unlabeledComboboxes.length === 1 ? unlabeledComboboxes[0] : undefined)
     ?? undefined;
-  const accessKey = labeledInput(container, AOSS_AK_LABEL);
-  const secretKey = labeledInput(container, AOSS_SK_LABEL);
-  const bucket = labeledInput(container, AOSS_BUCKET_LABEL);
-  const endpoint = exactPlaceholder(container, "请输入http(s)://yourdomain.xxx");
-  const subdir = exactPlaceholder(container, "请输入存储目录，非必填");
+  const accessKey = labeledInput(container, AOSS_AK_LABEL)
+    ?? usableInputs(container).find((input) => /access\s*key\s*id|\bAK\b/i.test(input.placeholder))
+    ?? undefined;
+  const secretKey = labeledInput(container, AOSS_SK_LABEL)
+    ?? usableInputs(container).find((input) => /secret\s*access\s*key|\bSK\b/i.test(input.placeholder))
+    ?? undefined;
+  const bucket = aossBucketInput(commonContainer);
+  const endpoint = uniqueMatchingInput(
+    commonContainer,
+    (input) => /https?|endpoint/i.test(input.placeholder),
+    "对象存储挂载缺少 Endpoint 输入框",
+    "对象存储挂载存在多个 Endpoint 输入框",
+  );
+  const subdirMatches = usableInputs(commonContainer)
+    .filter((input) => /存储目录|子目录|bucket.*目录/i.test(input.placeholder));
+  if (subdirMatches.length > 1) {
+    throw new PageControlError("对象存储挂载存在多个存储目录输入框");
+  }
+  const subdir = subdirMatches[0];
   let auth: AossAuthFields;
   if (kmsControl?.getAttribute("role") === "combobox") {
     auth = { mode: "kms", control: kmsControl };
@@ -624,7 +706,7 @@ function aossAuthMatches(auth: AossAuthFields, mount: AossMount): boolean {
 function aossFieldsAreEmpty(fields: AossFields): boolean {
   const commonFieldsEmpty = fields.bucket.value === ""
     && fields.endpoint.value === ""
-    && fields.subdir.value === ""
+    && (fields.subdir?.value ?? "") === ""
     && fields.mountPath.value === "";
   if (!commonFieldsEmpty) return false;
   return fields.auth.mode === "kms"
@@ -649,9 +731,12 @@ function existingAossMount(
 ): FillItemResult | undefined {
   const fields = aossFieldsByMountPath(document, mount.mountPath);
   if (!fields) return undefined;
+  if (mount.subdir && !fields.subdir) {
+    throw new PageControlError("配置包含对象存储 subdir，但当前页面没有存储目录输入框");
+  }
   const matches = fields.bucket.value === mount.name
     && fields.endpoint.value === mount.endpoint
-    && fields.subdir.value === (mount.subdir ?? "")
+    && (fields.subdir?.value ?? "") === (mount.subdir ?? "")
     && aossAuthMatches(fields.auth, mount);
   if (!matches) {
     throw new PageControlError("挂载路径已存在，但对象存储字段与配置不一致，已拒绝覆盖");
@@ -700,7 +785,11 @@ async function configureAossAuth(
 function populateAossCommonFields(fields: AossFields, mount: AossMount): void {
   inputSetter(fields.bucket, mount.name);
   inputSetter(fields.endpoint, mount.endpoint);
-  inputSetter(fields.subdir, mount.subdir ?? "");
+  if (fields.subdir) {
+    inputSetter(fields.subdir, mount.subdir ?? "");
+  } else if (mount.subdir) {
+    throw new PageControlError("配置包含对象存储 subdir，但当前页面没有存储目录输入框");
+  }
   inputSetter(fields.mountPath, mount.mountPath);
 }
 

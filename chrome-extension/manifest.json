@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ClusterX Development Autofill",
   "description": "Fill the ClusterX development-machine form from a local ClusterX YAML file without submitting it.",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "permissions": ["activeTab"],
   "host_permissions": ["https://console.d.pjlab.org.cn/*"],
   "action": {

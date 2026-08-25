@@ -67,6 +67,9 @@ interface FixtureOptions {
   retainClosedKmsDropdown?: boolean;
   refreshKmsControlAfterCommonFields?: boolean;
   deferKmsControlRefresh?: boolean;
+  requiredAossLabels?: boolean;
+  modernAossMarkup?: boolean;
+  omitAossSubdir?: boolean;
 }
 
 function installFixture(options: FixtureOptions = {}): HTMLButtonElement {
@@ -210,6 +213,29 @@ function installFixture(options: FixtureOptions = {}): HTMLButtonElement {
       </div>
       <div id="${listId}"></div>
     `;
+    if (options.requiredAossLabels) {
+      row.querySelectorAll("label").forEach((label) => {
+        const required = document.createElement("span");
+        required.textContent = "* ";
+        label.prepend(required);
+      });
+    }
+    if (options.modernAossMarkup) {
+      row.querySelector<HTMLInputElement>('[role="combobox"]')!.placeholder = "选择 AK/SK 密钥凭据";
+      row.querySelector<HTMLInputElement>('input[placeholder="请输入http(s)://yourdomain.xxx"]')!
+        .placeholder = "请输入对象存储 Endpoint（HTTP/HTTPS）";
+      row.querySelector<HTMLInputElement>('input[placeholder="请输入存储目录，非必填"]')!
+        .placeholder = "请输入 Bucket 内目录（可选）";
+      row.querySelectorAll("label").forEach((label) => {
+        const title = document.createElement("div");
+        title.className = "sensed-form-item-label";
+        title.textContent = label.textContent;
+        label.replaceWith(title);
+      });
+    }
+    if (options.omitAossSubdir) {
+      row.querySelector<HTMLInputElement>('input[placeholder*="目录"]')?.remove();
+    }
     const authFields = row.querySelector<HTMLElement>(".auth-fields")!;
     let kmsControl = row.querySelector<HTMLInputElement>('[role="combobox"]')!;
     const kmsList = row.querySelector<HTMLElement>(`#${listId}`)!;
@@ -561,6 +587,50 @@ describe("fillDevelopmentForm", () => {
       .toEqual(["bucket-example"]);
     expect(Array.from(document.querySelectorAll<HTMLInputElement>('input[type="password"]')).map((input) => input.value))
       .toEqual(["SECOND_SECRET_VALUE"]);
+  });
+
+  it("fills every object mount when the live form omits the optional subdir field", async () => {
+    installFixture({
+      requiredAossLabels: true,
+      modernAossMarkup: true,
+      omitAossSubdir: true,
+    });
+    const multiple = structuredClone(profile);
+    const objectMount = multiple.mounts.find((mount) => mount.type === "PV_AOSS")!;
+    multiple.mounts = Array.from({ length: 5 }, (_, index) => ({
+      ...objectMount,
+      subdir: undefined,
+      mountPath: `/data/objects-${index + 1}`,
+    }));
+
+    const report = await fillDevelopmentForm(multiple, document, pageUrl);
+
+    expect(report.ok).toBe(true);
+    expect(report.items.filter((item) => item.key.startsWith("mount.aoss"))).toHaveLength(5);
+    expect(report.items.filter((item) => item.status === "error")).toEqual([]);
+    expect(Array.from(
+      document.querySelectorAll<HTMLInputElement>('input[placeholder="请输入路径，如 /data"]'),
+    ).map((input) => input.value)).toEqual([
+      "/data/objects-1",
+      "/data/objects-2",
+      "/data/objects-3",
+      "/data/objects-4",
+      "/data/objects-5",
+    ]);
+  });
+
+  it("does not silently discard a configured object-storage subdir", async () => {
+    installFixture({ omitAossSubdir: true });
+    const onlyAoss = structuredClone(profile);
+    onlyAoss.mounts = [onlyAoss.mounts[1]];
+
+    const report = await fillDevelopmentForm(onlyAoss, document, pageUrl);
+
+    expect(report.ok).toBe(false);
+    expect(report.items.find((item) => item.key === "mount.aoss.0")).toMatchObject({
+      status: "error",
+      message: "配置包含对象存储 subdir，但当前页面没有存储目录输入框",
+    });
   });
 
   it("scopes retained AFS options to the current mount row", async () => {
