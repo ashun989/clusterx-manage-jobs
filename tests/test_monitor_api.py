@@ -42,6 +42,7 @@ def raw_snapshot():
         "workloads": [{
             "workload_id": "w", "workload_name": "w", "user": "alice",
             "resource_name": "job-resource", "type": "trainingJob", "total_gpu": 1, "total_cpu": 4,
+            "priority": "HIGH", "resource_create_time": "2026-08-14T00:00:00Z",
             "console_url": "https://console.d.pjlab.org.cn/cn-pj-03/ssp/model/training/detail/?rid=job",
             "total_memory_gib": 10, "resource_basis": "attributed", "task_resources": [],
             "placements": [{"node": "n1", "pod": "p", "gpu": 1, "cpu": 4, "memory_gib": 10}],
@@ -93,7 +94,7 @@ class MonitorApiTests(unittest.TestCase):
     def test_status_snapshot_policy_and_read_only_routes(self):
         client = TestClient(self.app)
         status_response = client.get("/api/v1/status")
-        self.assertEqual(status_response.json()["version"], "0.4.0")
+        self.assertEqual(status_response.json()["version"], "0.4.1")
         self.assertTrue(status_response.json()["snapshot"]["ready"])
         self.assertIn("default-src 'self'", status_response.headers["content-security-policy"])
         self.assertEqual(status_response.headers["x-content-type-options"], "nosniff")
@@ -102,6 +103,10 @@ class MonitorApiTests(unittest.TestCase):
         self.assertEqual(snapshot["workloads"][0]["total_cpu"], 4)
         self.assertEqual(snapshot["workloads"][0]["total_memory_gib"], 10)
         self.assertEqual(snapshot["workloads"][0]["resource_basis"], "attributed")
+        self.assertEqual(snapshot["workloads"][0]["priority"], "HIGH")
+        self.assertEqual(
+            snapshot["workloads"][0]["resource_create_time"], "2026-08-14T00:00:00Z",
+        )
         self.assertEqual(
             snapshot["workloads"][0]["console_url"],
             "https://console.d.pjlab.org.cn/cn-pj-03/ssp/model/training/detail/?rid=job",

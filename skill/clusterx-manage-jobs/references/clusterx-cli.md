@@ -149,7 +149,7 @@ python3 scripts/monitor_cli.py overview --format json
 python3 scripts/monitor_cli.py users --violations-only --format json
 python3 scripts/monitor_cli.py groups --format json
 python3 scripts/monitor_cli.py nodes --classification fragmented --format json
-python3 scripts/monitor_cli.py workloads --status pending --format json
+python3 scripts/monitor_cli.py workloads --status pending --priority high --format json
 python3 scripts/monitor_cli.py alerts \
   --finding-category utilization \
   --finding-code utilization.low_gpu_activity \
@@ -176,6 +176,15 @@ comma-separated `--finding-category`, `--finding-code`, and `--tag` values.
 `--violations-only` and `--fail-on violation` read structured findings rather
 than parsing display messages. Suggestions are
 coordination candidates only. The monitor and CLI contain no stop operation.
+
+Workload snapshots and table output include `resource_create_time` and
+`priority`. For Pending TrainingJobs, `status.create_time` is both the resource
+creation time and the initial queue-age anchor used by the monitor; it does not
+represent a later retry/requeue transition. Priorities are normalized to
+`NORMAL`, `HIGH`, or `HIGHEST` when Clusterx returns `spec.priority`.
+`workloads --priority` filters these values case-insensitively. Resources whose
+API response omits priority remain null instead of inheriting an assumed
+default.
 
 The simulator uses an integer OR-Tools CP-SAT model instead of workload-subset
 enumeration. `--search-seconds` is the total budget shared fairly by the

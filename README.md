@@ -1,7 +1,7 @@
 # Clusterx Manage Jobs Skill with Monitor
 
 用于安全管理 PT/SSP 集群 Clusterx 训练任务，并提供新增的只读队列监控、
-资源策略检查和调度模拟。当前版本为 `0.4.0`，已验证 Clusterx `2026.8.19`；
+资源策略检查和调度模拟。当前版本为 `0.4.1`，已验证 Clusterx `2026.8.19`；
 其他版本以安装后的动态帮助为准。
 
 原有任务生命周期能力保持不变：配置检查、提交预览与创建、任务/节点查询、
@@ -137,6 +137,12 @@ task 的副本申请汇总，并在 `task_resources` 中保留每个 task 的资
 取得 CPU 或内存时返回 `null`，不会将未知资源显示为零。
 Group 与 User 的已分配资源均汇总全部活跃 workload 类型（包括 `trainingJob`、
 `aid` 和 `air`）；Pending 仍只展示申请量，不计入当前已分配资源。
+
+Pending TrainingJob 的 `status.create_time` 是 Monitor 计算首次排队时长的起点，
+同时作为 `resource_create_time` 统一显示为“资源创建时间”；Pending 详情另行展示
+“已排队时长”，并说明重试或重新进入 Pending 不会重置该起算点。Workload 快照也公开归一化后的
+`priority`（`NORMAL`、`HIGH`、`HIGHEST`），Web 列表、详情和监控 CLI 均展示该
+字段；资源接口未返回优先级时保留为 `null`/`—`，不会推断默认值。
 
 Running `trainingJob` 的详情向所有 Monitor 访问者提供实时日志预览，但采用显式
 懒加载：打开详情不请求日志，只有选择快照中的 Worker 并点击“加载日志”后才抓取

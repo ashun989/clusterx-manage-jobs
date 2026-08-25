@@ -115,6 +115,10 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   monitoring views and `monitor_cli.py watch --count N --format jsonl` for a
   bounded stream of complete snapshots. The service must already be running;
   never fall back to an ad-hoc live collection when it is unavailable.
+- Workload views expose resource creation time and normalized priority when the
+  Clusterx resource API provides them. Pending TrainingJob creation time is the
+  initial queue-age anchor; it is not a later retry/requeue transition. Missing
+  priorities remain unknown and must not be inferred from submission defaults.
 - With Clusterx 2026.8.19, monitor collection follows `next_page_token` to read
   the complete bound-node inventory. Repeated cursors, duplicate node identity,
   changing totals, truncated pages, or a changed before/after node signature

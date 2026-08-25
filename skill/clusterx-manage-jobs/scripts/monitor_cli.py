@@ -53,7 +53,7 @@ def _snapshot(endpoint: str, snapshot_id: str) -> dict[str, Any]:
 
 def _filter_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
     result = rows
-    for field in ("user", "group", "status", "type", "classification"):
+    for field in ("user", "group", "status", "type", "priority", "classification"):
         value = getattr(args, field, None)
         if value:
             allowed = {item.strip().lower() for item in value.split(",")}
@@ -167,10 +167,11 @@ def _render_table(payload: Any, *, no_color: bool = False) -> str:
             return "No matching rows.\n"
         preferred = [
             "user", "group", "node", "workload_name", "type", "classification",
-            "status", "policy_status", "gpu_quota", "cpu_quota", "memory_quota_gib",
+            "priority", "status", "policy_status", "gpu_quota", "cpu_quota", "memory_quota_gib",
             "allocated_gpu", "allocated_cpu", "allocated_memory_gib", "total_gpu",
             "total_cpu", "total_memory_gib",
-            "resource_basis", "start_time", "runtime_hours", "runtime_quality",
+            "resource_basis", "resource_create_time", "queue_age_seconds", "start_time",
+            "runtime_hours", "runtime_quality",
             "runtime_source", "effective_free_gpu", "stranded_gpu", "unattributed",
             "planning_eligible", "planning_exclusion_reasons", "attribution_excess",
             "finding_categories", "finding_codes", "finding_tags", "historical_telemetry",
@@ -254,6 +255,8 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--group")
         child.add_argument("--status")
         child.add_argument("--type")
+        if command == "workloads":
+            child.add_argument("--priority")
         child.add_argument("--classification")
         child.add_argument("--node")
         child.add_argument("--workload")

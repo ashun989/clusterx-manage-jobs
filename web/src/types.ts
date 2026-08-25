@@ -76,6 +76,7 @@ export type Workload = FindingFacets & {
   create_time?: string | null;
   resource_create_time?: string | null;
   queue_age_seconds?: number | null;
+  priority?: string | null;
   start_time?: string | null;
   runtime_anchor_time?: string | null;
   runtime_source?: "training_status_start" | "aid_pod_started_event" | "air_available_condition" | "pod_create_time" | "resource_create_time" | null;
