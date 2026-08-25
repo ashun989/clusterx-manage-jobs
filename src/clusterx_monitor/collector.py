@@ -478,6 +478,20 @@ def _iso_time(value: Any) -> str | None:
     return parsed.isoformat() if parsed else None
 
 
+def _priority(value: Any) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    normalized = str(value).strip().upper()
+    if not normalized:
+        return None
+    return {"1": "NORMAL", "2": "HIGH", "3": "HIGHEST"}.get(normalized, normalized)
+
+
+def _resource_priority(resource: dict[str, Any]) -> str | None:
+    spec = resource.get("spec") or {}
+    return _priority(spec.get("priority") if isinstance(spec, dict) else None)
+
+
 def _running_training_lifecycle(
     cluster: Any, queue: str,
 ) -> tuple[dict[str, dict[str, Any]], bool]:
@@ -498,6 +512,7 @@ def _running_training_lifecycle(
             "_resource_name": str(row.get("name") or "") or None,
             "resource_create_time": _iso_time(status.get("create_time")),
             "start_time": _iso_time(status.get("start_time")),
+            "priority": _resource_priority(row),
             "runtime_source": "training_status_start",
             "runtime_quality": "exact",
         }
@@ -532,6 +547,7 @@ def _running_aid_lifecycle(cluster: Any) -> tuple[dict[str, dict[str, Any]], boo
                 "_resource_id": str(row.get("id") or "") or None,
                 "_resource_name": str(row.get("name") or "") or None,
                 "resource_create_time": _iso_time(row.get("create_time")),
+                "priority": _resource_priority(row),
             }
     return result, complete
 
@@ -562,6 +578,7 @@ def _running_air_lifecycle(cluster: Any) -> tuple[dict[str, dict[str, Any]], boo
             "_resource_name": str(row.get("name") or "") or None,
             "resource_create_time": _iso_time(status.get("create_time")),
             "start_time": _available_transition(status),
+            "priority": _resource_priority(row),
             "runtime_source": "air_available_condition",
             "runtime_quality": "observed",
         }
@@ -664,7 +681,9 @@ def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], 
             "user": str((job.get("ownership") or {}).get("creator_name") or "unknown").lower(),
             "status": "PENDING",
             "create_time": created.isoformat() if created else None,
+            "resource_create_time": created.isoformat() if created else None,
             "queue_age_seconds": max(0, (now - created).total_seconds()) if created else None,
+            "priority": _resource_priority(job),
             "num_nodes": sum(item["replicas"] for item in task_resources),
             "gpus_per_node": per_replica.get("gpu_per_replica"),
             "cpus_per_node": per_replica.get("cpu_per_replica"),
@@ -781,6 +800,7 @@ class ClusterCollector:
                 workspace=workload.get("workspace"),
             )
             workload["resource_create_time"] = cached.get("resource_create_time")
+            workload["priority"] = cached.get("priority") or workload.get("priority")
             start_time = cached.get("start_time")
             source = cached.get("runtime_source")
             quality = cached.get("runtime_quality")
@@ -884,6 +904,7 @@ class ClusterCollector:
                     "workspace": str(workspace.get("name") or ""),
                     "resource_name": str(raw_workload.get("name") or ""),
                     "create_time": None, "start_time": None,
+                    "priority": _resource_priority(raw_workload),
                     "_resource_id": str(raw_workload.get("id") or ""),
                     "placements": [], "gpus": [], "total_gpu": 0,
                     "total_cpu": None, "total_memory_gib": None,

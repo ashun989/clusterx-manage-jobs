@@ -5,6 +5,15 @@ import type { Alert, DetailRef, GroupSummary, NodeSummary, PolicyFinding, Snapsh
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
 const quota = (value: unknown) => value == null ? "不限" : number(value);
 const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
+const queueAge = (seconds: number | null | undefined) => {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "—";
+  const totalMinutes = Math.floor(seconds / 60);
+  if (totalMinutes < 1) return "少于 1 分钟";
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor(totalMinutes % (24 * 60) / 60);
+  const minutes = totalMinutes % 60;
+  return [days ? `${days} 天` : "", hours ? `${hours} 小时` : "", minutes ? `${minutes} 分钟` : ""].filter(Boolean).join(" ");
+};
 const allWorkloads = (snapshot: Snapshot) => [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])];
 const workloadResources = (workload: Workload) => `${number(workload.total_gpu)} GPU · ${number(workload.total_cpu)} CPU · ${number(workload.total_memory_gib)} GiB`;
 const runtimeQuality = (value: Workload["runtime_quality"]) => ({ exact: "精确", observed: "观测", estimated: "估算", unavailable: "不可用" })[value ?? "unavailable"];
@@ -212,6 +221,7 @@ function WorkloadLogPanel({ workload, snapshotId }: { workload: Workload; snapsh
 }
 
 function WorkloadDetail({ workload, snapshotId, open }: { workload: Workload; snapshotId: string; open: (ref: DetailRef) => void }) {
+  const pending = workload.policy_status === "pending";
   return <>
     <span className="eyebrow">{workload.type}</span><h2>{workload.workload_name}</h2>{workload.console_url && <a className="console-link" href={workload.console_url} target="_blank" rel="noopener noreferrer">在官方控制台查看 <span aria-hidden="true">↗</span></a>}<p><button className="inline-link" type="button" onClick={() => open({ kind: "user", id: workload.user, label: workload.user })}>{workload.user}</button> · <button className="inline-link" type="button" onClick={() => open({ kind: "group", id: workload.group, label: workload.group })}>{workload.group}</button></p><span className={statusClass(workload.policy_status)}>{workload.policy_status}</span>
     {workload.planning_eligible === false && <p className="banner">该 Workload 接触归属异常节点，不作为调度释放候选。</p>}
@@ -221,13 +231,16 @@ function WorkloadDetail({ workload, snapshotId, open }: { workload: Workload; sn
       <Metric label="CPU" value={number(workload.total_cpu)} />
       <Metric label="内存 GiB" value={number(workload.total_memory_gib)} />
       <Metric label="资源口径" value={workload.resource_basis === "requested" ? "申请资源" : "Pod 归属资源"} />
+      <Metric label="优先级" value={workload.priority || "—"} />
       <Metric label="运行时间" value={workload.runtime_hours == null ? "—" : `${number(workload.runtime_hours)}h${workload.runtime_quality === "observed" ? "（观测）" : workload.runtime_quality === "estimated" || workload.runtime_estimated ? "（估算）" : ""}`} />
       <Metric label="时间可信度" value={runtimeQuality(workload.runtime_quality)} />
       <Metric label="时间来源" value={runtimeSource(workload.runtime_source)} />
-      <Metric label="开始时间" value={workload.start_time ? new Date(workload.start_time).toLocaleString() : "—"} />
+      <Metric label="运行开始时间" value={workload.start_time ? new Date(workload.start_time).toLocaleString() : "—"} />
       <Metric label="资源创建时间" value={workload.resource_create_time ? new Date(workload.resource_create_time).toLocaleString() : "—"} />
+      {pending && <Metric label="已排队时长" value={queueAge(workload.queue_age_seconds)} />}
       <Metric label="Workspace" value={workload.workspace || "—"} />
     </Metrics>
+    {pending && <p className="muted">Pending 时以资源创建时间计算初始排队时长；重试或重新进入 Pending 不会重置。</p>}
     {workload.resource_basis === "requested" && <section className="detail-section"><h3>Task 请求<span className="section-count">{workload.task_resources?.length ?? 0}</span></h3>{workload.task_resources?.length ? <div className="plan-workloads"><table><thead><tr><th>Task</th><th>角色</th><th>副本数</th><th>每副本 GPU</th><th>每副本 CPU</th><th>每副本内存 GiB</th></tr></thead><tbody>{workload.task_resources.map((task, index) => <tr key={`${task.name}:${task.role}:${index}`}><td>{task.name}</td><td>{task.role || "—"}</td><td>{number(task.replicas)}</td><td>{number(task.gpu_per_replica)}</td><td>{number(task.cpu_per_replica)}</td><td>{number(task.memory_gib_per_replica)}</td></tr>)}</tbody></table></div> : <p className="muted">无 Task 资源明细</p>}</section>}
     {workload.resource_basis === "attributed" && <section className="detail-section"><h3>Placements（当前归属）<span className="section-count">{workload.placements.length}</span></h3><div className="placement-list">{workload.placements.map((placement, index) => <button type="button" key={`${placement.node}-${placement.pod ?? index}`} onClick={() => open({ kind: "node", id: placement.node, label: placement.node })}><span><b>{placement.node}</b><small>{placement.pod || "—"}</small></span><em>{number(placement.gpu)} GPU · {number(placement.cpu)} CPU · {number(placement.memory_gib)} GiB</em></button>)}</div></section>}
     {workload.type === "trainingJob" && workload.resource_basis === "attributed" && workload.placements.some((item) => item.pod) && <WorkloadLogPanel key={workload.workload_id} workload={workload} snapshotId={snapshotId} />}

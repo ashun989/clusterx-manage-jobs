@@ -15,8 +15,18 @@ const number = (value: unknown, suffix = "") => value == null ? "—" : `${Numbe
 const quota = (value: unknown) => value == null ? "不限" : number(value);
 const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
 const runtimeMark = (row: Workload) => row.runtime_quality === "observed" ? "（观测）" : row.runtime_quality === "estimated" || row.runtime_estimated ? "（估算）" : "";
+const dateTime = (value: string | null | undefined) => {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
+};
 
 const releaseNotes: Record<string, string[]> = {
+  "0.4.1": [
+    "Pending Workload 展示资源创建时间和已排队时长。",
+    "Workload 列表、详情和监控 CLI 展示归一化优先级。",
+    "详情区分运行开始时间与资源创建时间，并说明重新排队不会重置起算点。",
+  ],
   "0.4.0": [
     "调度模拟器升级为 CP-SAT，搜索时长作为请求总预算。",
     "明确展示精确性、策略状态与 Top-K 完整性。",
@@ -102,10 +112,12 @@ const workloadColumns: ColumnDef<Workload>[] = [
   { key: "user", label: "用户", kind: "enum", value: (row) => row.user },
   { key: "group", label: "分组", kind: "enum", value: (row) => row.group },
   { key: "type", label: "类型", kind: "enum", value: (row) => row.type },
+  { key: "priority", label: "优先级", kind: "enum", value: (row) => row.priority },
   { key: "policy_status", label: "状态", kind: "enum", value: (row) => row.policy_status },
   { key: "total_gpu", label: "GPU 总量", kind: "number", value: (row) => row.total_gpu },
   { key: "total_cpu", label: "CPU 总量", kind: "number", value: (row) => row.total_cpu },
   { key: "total_memory_gib", label: "内存 GiB", kind: "number", value: (row) => row.total_memory_gib },
+  { key: "resource_create_time", label: "资源创建时间", kind: "number", value: (row) => row.resource_create_time ? Date.parse(row.resource_create_time) : null, format: (_value, row) => dateTime(row.resource_create_time) },
   { key: "runtime_hours", label: "运行小时", kind: "number", value: (row) => row.runtime_hours, format: (value, row) => value == null ? "—" : `${number(value)}${runtimeMark(row)}` },
   { key: "finding_categories", label: "违规分类", kind: "enum", value: (row) => row.finding_categories, hidden: true },
   { key: "finding_codes", label: "规则代码", kind: "enum", value: (row) => row.finding_codes, hidden: true },

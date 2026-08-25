@@ -27,6 +27,7 @@ from clusterx_monitor.collector import (
     _list_queue_nodes,
     _node_signature,
     _pending_workloads,
+    _priority,
     _query_workload_history,
     _running_air_lifecycle,
     _running_training_lifecycle,
@@ -990,6 +991,12 @@ class ConsoleLinkTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_priority_normalizes_clusterx_numeric_and_named_values(self):
+        self.assertEqual(_priority(1), "NORMAL")
+        self.assertEqual(_priority("high"), "HIGH")
+        self.assertEqual(_priority("3"), "HIGHEST")
+        self.assertIsNone(_priority(None))
+
     def test_training_lifecycle_uses_status_start_time_and_uid(self):
         cluster = mock.Mock()
         cluster._get_queue_id.return_value = "queue-id"
@@ -997,6 +1004,7 @@ class LifecycleTests(unittest.TestCase):
             "total_size": 1,
             "training_jobs": [{
                 "uid": "job-uid",
+                "spec": {"priority": "HIGH"},
                 "status": {
                     "create_time": "2026-08-13T06:28:12Z",
                     "start_time": "2026-08-13T08:02:26Z",
@@ -1006,6 +1014,7 @@ class LifecycleTests(unittest.TestCase):
         rows, complete = _running_training_lifecycle(cluster, "queue")
         self.assertTrue(complete)
         self.assertEqual(rows["job-uid"]["start_time"], "2026-08-13T08:02:26+00:00")
+        self.assertEqual(rows["job-uid"]["priority"], "HIGH")
         self.assertEqual(rows["job-uid"]["runtime_quality"], "exact")
         cluster.client.list_training_jobs.assert_called_once_with(
             filter_str='queue_id="queue-id" AND state="RUNNING"', page_size=1000,
@@ -1018,6 +1027,7 @@ class LifecycleTests(unittest.TestCase):
             "total_size": 1,
             "airs": [{
                 "uid": "air-uid",
+                "spec": {"priority": 3},
                 "status": {
                     "create_time": "2026-08-14T08:00:00Z",
                     "conditions": [
@@ -1031,6 +1041,7 @@ class LifecycleTests(unittest.TestCase):
         rows, complete = _running_air_lifecycle(mock.Mock(client=client))
         self.assertTrue(complete)
         self.assertEqual(rows["air-uid"]["start_time"], "2026-08-14T08:03:00+00:00")
+        self.assertEqual(rows["air-uid"]["priority"], "HIGHEST")
         self.assertEqual(rows["air-uid"]["runtime_quality"], "observed")
         self.assertEqual(
             _available_transition({"conditions": [{"type": "Available", "status": "False"}]}),
@@ -1116,6 +1127,7 @@ class LifecycleTests(unittest.TestCase):
             "job": {
                 "resource_create_time": "2026-08-14T06:00:00+00:00",
                 "start_time": "2026-08-14T08:00:00+00:00",
+                "priority": "HIGH",
                 "runtime_source": "training_status_start",
                 "runtime_quality": "exact",
             },
@@ -1131,6 +1143,7 @@ class LifecycleTests(unittest.TestCase):
             collector._enrich_lifecycle(second, warnings)
 
         self.assertEqual(second["job"]["start_time"], "2026-08-14T08:00:00+00:00")
+        self.assertEqual(second["job"]["priority"], "HIGH")
         self.assertEqual(second["job"]["runtime_quality"], "exact")
         self.assertFalse(second["job"]["runtime_estimated"])
         self.assertIn("trainingJob lifecycle inventory is unavailable", warnings)
@@ -1407,7 +1420,7 @@ class StoreAndTelemetryTests(unittest.TestCase):
             "training_jobs": [{
                 "name": "cpu-only", "ownership": {"creator_name": "UserA"},
                 "status": {"create_time": created.isoformat()},
-                "spec": {"vc_job": {"tasks": [{
+                "spec": {"priority": "HIGH", "vc_job": {"tasks": [{
                     "replicas": 1,
                     "resource_spec": {"accelerate_device_count": 0, "cpu_count": 14, "memory_gib": 240},
                 }]}},
@@ -1418,6 +1431,8 @@ class StoreAndTelemetryTests(unittest.TestCase):
         self.assertEqual(jobs[0]["gpus_per_node"], 0)
         self.assertEqual(jobs[0]["user"], "usera")
         self.assertEqual(jobs[0]["create_time"], created.isoformat())
+        self.assertEqual(jobs[0]["resource_create_time"], created.isoformat())
+        self.assertEqual(jobs[0]["priority"], "HIGH")
         self.assertGreaterEqual(jobs[0]["queue_age_seconds"], 15 * 60)
         self.assertEqual(jobs[0]["total_cpu"], 14)
         self.assertEqual(jobs[0]["total_memory_gib"], 240)
@@ -1506,7 +1521,9 @@ class StoreAndTelemetryTests(unittest.TestCase):
         jobs, complete = _pending_workloads(cluster, "queue")
         self.assertTrue(complete)
         self.assertIsNone(jobs[0]["create_time"])
+        self.assertIsNone(jobs[0]["resource_create_time"])
         self.assertIsNone(jobs[0]["queue_age_seconds"])
+        self.assertIsNone(jobs[0]["priority"])
 
 
 class SkillCliTests(unittest.TestCase):
@@ -1540,11 +1557,14 @@ class SkillCliTests(unittest.TestCase):
             rendered = self.module._render_table([{
                 "workload_name": "train", "total_gpu": 2, "total_cpu": 8,
                 "total_memory_gib": 200, "resource_basis": "requested",
+                "priority": "HIGH", "resource_create_time": "2026-08-14T07:55:00Z",
+                "queue_age_seconds": 300,
                 "start_time": "2026-08-14T08:00:00Z", "runtime_hours": 2.5,
                 "runtime_quality": "exact", "runtime_source": "training_status_start",
             }], no_color=True)
         for field in (
             "total_gpu", "total_cpu", "total_memory_gib", "resource_basis",
+            "priority", "resource_create_time", "queue_age_seconds",
             "start_time", "runtime_hours", "runtime_quality", "runtime_source",
         ):
             self.assertIn(field, rendered)
@@ -1590,16 +1610,18 @@ class SkillCliTests(unittest.TestCase):
         args = self.module.build_parser().parse_args([
             "workloads", "--finding-category", "utilization",
             "--finding-code", "utilization.low_gpu_activity", "--tag", "gpu",
+            "--priority", "high",
         ])
         matching = {
             "workload_id": "low", "finding_categories": ["utilization"],
             "finding_codes": ["utilization.low_gpu_activity"],
             "finding_tags": ["historical", "gpu"],
+            "priority": "HIGH",
             "policy_findings": [{"status": "violation"}],
         }
         rows = self.module._filter_rows([matching, {
             "workload_id": "other", "finding_categories": ["quota"],
-            "finding_codes": ["quota.gpu"], "finding_tags": ["quota"],
+            "finding_codes": ["quota.gpu"], "finding_tags": ["quota"], "priority": "NORMAL",
         }], args)
         self.assertEqual([item["workload_id"] for item in rows], ["low"])
         self.assertTrue(self.module._has_failure(rows, "violation"))

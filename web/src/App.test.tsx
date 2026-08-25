@@ -22,6 +22,7 @@ const telemetry = (allocated: number, util: number | null, watts: number | null)
 const workload = (id: string, name: string, user: string, group: string, gpu: number, node: string): Workload => ({
   workload_id: id, workload_name: name, user, group, type: "trainingJob", workspace: "workspace",
   create_time: "2026-08-14T00:00:00Z", resource_create_time: "2026-08-13T23:50:00Z",
+  priority: "NORMAL",
   start_time: "2026-08-14T00:10:00Z", runtime_anchor_time: "2026-08-14T00:10:00Z",
   runtime_source: "training_status_start", runtime_quality: "exact", runtime_hours: 2,
   runtime_estimated: false, total_gpu: gpu, total_cpu: gpu * 14, total_memory_gib: gpu * 240,
@@ -137,7 +138,7 @@ describe("Clusterx monitor dashboard", () => {
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "0.4.0", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "0.4.1", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       const value = path.endsWith("/plans") && init?.method === "POST" ? planResult : path.endsWith("/policy") ? policyResponse : latestSnapshot;
       return { ok: true, status: 200, json: async () => structuredClone(value) };
     }));
@@ -159,18 +160,18 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
 
-    fireEvent.click(screen.getByLabelText("查看 v0.4.0 更新内容"));
+    fireEvent.click(screen.getByLabelText("查看 v0.4.1 更新内容"));
 
     expect(screen.getByText("本版更新")).toBeInTheDocument();
-    expect(screen.getByText(/调度模拟器升级为 CP-SAT/)).toBeInTheDocument();
-    expect(screen.getByText(/明确展示精确性/)).toBeInTheDocument();
-    expect(screen.getByText(/独立校验每个返回方案/)).toBeInTheDocument();
+    expect(screen.getByText(/资源创建时间和已排队时长/)).toBeInTheDocument();
+    expect(screen.getByText(/展示归一化优先级/)).toBeInTheDocument();
+    expect(screen.getByText(/重新排队不会重置起算点/)).toBeInTheDocument();
   });
 
   it("filters enum columns, sorts numeric columns and resets missing filter values", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
-    expect(screen.getByText("v0.4.0")).toBeInTheDocument();
+    expect(screen.getByText("v0.4.1")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);
@@ -194,6 +195,7 @@ describe("Clusterx monitor dashboard", () => {
       ...workload("pending-a", "pending-a", "charlie", "default", 3, "unused"),
       policy_status: "pending", placements: [], gpus: [], telemetry: telemetry(0, null, null),
       total_gpu: 3, total_cpu: null, total_memory_gib: 700, resource_basis: "requested",
+      priority: "HIGHEST", resource_create_time: "2026-08-14T00:30:00Z", queue_age_seconds: 1800,
       task_resources: [
         { name: "master", role: "PYTORCH_MASTER", replicas: 1, gpu_per_replica: 1, cpu_per_replica: null, memory_gib_per_replica: 100 },
         { name: "worker", role: "PYTORCH_WORKER", replicas: 1, gpu_per_replica: 2, cpu_per_replica: null, memory_gib_per_replica: 600 },
@@ -207,14 +209,28 @@ describe("Clusterx monitor dashboard", () => {
     expect(within(table).getByRole("button", { name: "排序 GPU 总量" })).toBeInTheDocument();
     expect(within(table).getByRole("button", { name: "排序 CPU 总量" })).toBeInTheDocument();
     expect(within(table).getByRole("button", { name: "排序 内存 GiB" })).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: "排序 资源创建时间" })).toBeInTheDocument();
     expect(within(table).getByRole("button", { name: "排序 运行小时" })).toBeInTheDocument();
+    expect(screen.getByText("优先级", { selector: "summary" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "HIGHEST" })).toBeInTheDocument();
     fireEvent.click(within(table).getByRole("button", { name: "排序 CPU 总量" }));
     expect(within(table).getAllByRole("row").at(-1)).toHaveTextContent("pending-a");
-    expect(within(table).getByRole("row", { name: "查看 pending-a 详情" })).toHaveTextContent("—");
+    const pendingRow = within(table).getByRole("row", { name: "查看 pending-a 详情" });
+    expect(pendingRow).toHaveTextContent("HIGHEST");
+    expect(pendingRow).toHaveTextContent(new Date("2026-08-14T00:30:00Z").toLocaleString());
+    expect(pendingRow).toHaveTextContent("—");
 
-    fireEvent.click(within(table).getByRole("row", { name: "查看 pending-a 详情" }));
+    fireEvent.click(pendingRow);
     const drawer = screen.getByRole("complementary", { name: "pending-a 详情" });
     expect(drawer).toHaveTextContent("申请资源");
+    expect(drawer).toHaveTextContent("优先级");
+    expect(drawer).toHaveTextContent("HIGHEST");
+    expect(drawer).toHaveTextContent("运行开始时间");
+    expect(drawer).toHaveTextContent("资源创建时间");
+    expect(drawer).toHaveTextContent("已排队时长30 分钟");
+    expect(drawer).toHaveTextContent("Pending 时以资源创建时间计算初始排队时长；重试或重新进入 Pending 不会重置。");
+    expect(drawer).not.toHaveTextContent("排队开始时间（资源创建）");
+    expect(drawer).toHaveTextContent(new Date("2026-08-14T00:30:00Z").toLocaleString());
     expect(drawer).toHaveTextContent("Task 请求");
     expect(within(drawer).getByRole("cell", { name: "master" })).toBeInTheDocument();
     expect(within(drawer).getByRole("cell", { name: "PYTORCH_WORKER" })).toBeInTheDocument();
@@ -344,7 +360,7 @@ describe("Clusterx monitor dashboard", () => {
     const drawer = screen.getByRole("complementary", { name: "train-a 详情" });
     expect(drawer).toHaveTextContent("时间可信度观测");
     expect(drawer).toHaveTextContent("时间来源AIR Available 状态");
-    expect(drawer).toHaveTextContent("开始时间");
+    expect(drawer).toHaveTextContent("运行开始时间");
     expect(drawer).toHaveTextContent("资源创建时间");
   });
 
