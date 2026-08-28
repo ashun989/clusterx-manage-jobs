@@ -1,16 +1,249 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from contextlib import closing
 from copy import deepcopy
 from datetime import datetime, timezone
+import math
+from pathlib import Path
+import sqlite3
 from threading import RLock
 from typing import Any, Callable
+
+
+HISTORY_NUMERIC_FIELDS = (
+    "bound_gpu", "planning_eligible_gpu", "allocated_gpu", "free_gpu",
+    "pending_workloads", "pending_eligible_jobs", "alert_count",
+    "critical_alert_count", "gpu_compute_util_avg_pct",
+    "gpu_memory_util_avg_pct", "gpu_power_total_w",
+)
+
+
+def _timestamp(value: str | None) -> float:
+    if not value:
+        return datetime.now(timezone.utc).timestamp()
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
+class SQLiteHistoryStore:
+    """Structured, aggregate-only trend history with bounded local retention."""
+
+    def __init__(
+        self, path: str | Path, *, retention_days: int = 30,
+        max_points: int = 100_000, max_db_mib: int = 256,
+    ) -> None:
+        if retention_days < 1 or max_points < 2 or max_db_mib < 1:
+            raise ValueError("history limits must be positive")
+        self.path = Path(path).expanduser().resolve()
+        self.retention_days = retention_days
+        self.max_points = max_points
+        self.max_db_mib = max_db_mib
+        self._lock = RLock()
+        self.last_error: str | None = None
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.path.parent.chmod(0o700)
+        except OSError:
+            pass
+        self._initialize()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=5)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute(f"PRAGMA wal_autocheckpoint = {max(1, min(1000, self.max_db_mib * 64))}")
+        return connection
+
+    def _initialize(self) -> None:
+        with self._lock, closing(self._connect()) as connection, connection:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS history_points (
+                    snapshot_id TEXT PRIMARY KEY,
+                    generated_at TEXT NOT NULL,
+                    generated_ts REAL NOT NULL,
+                    bound_gpu REAL,
+                    planning_eligible_gpu REAL,
+                    allocated_gpu REAL,
+                    free_gpu REAL,
+                    pending_workloads INTEGER NOT NULL,
+                    pending_eligible_jobs INTEGER NOT NULL,
+                    alert_count INTEGER NOT NULL,
+                    critical_alert_count INTEGER NOT NULL,
+                    gpu_compute_util_avg_pct REAL,
+                    gpu_memory_util_avg_pct REAL,
+                    gpu_power_total_w REAL
+                );
+                CREATE INDEX IF NOT EXISTS history_points_generated_ts
+                    ON history_points(generated_ts);
+                CREATE TABLE IF NOT EXISTS history_node_classifications (
+                    snapshot_id TEXT NOT NULL REFERENCES history_points(snapshot_id) ON DELETE CASCADE,
+                    classification TEXT NOT NULL,
+                    count INTEGER NOT NULL,
+                    PRIMARY KEY(snapshot_id, classification)
+                );
+                CREATE TABLE IF NOT EXISTS history_alert_severities (
+                    snapshot_id TEXT NOT NULL REFERENCES history_points(snapshot_id) ON DELETE CASCADE,
+                    severity TEXT NOT NULL,
+                    count INTEGER NOT NULL,
+                    PRIMARY KEY(snapshot_id, severity)
+                );
+            """)
+            connection.execute("PRAGMA user_version = 1")
+        try:
+            self.path.chmod(0o600)
+        except OSError:
+            pass
+
+    def publish(self, point: dict[str, Any], alerts: list[dict[str, Any]]) -> None:
+        severities: dict[str, int] = {}
+        for alert in alerts:
+            severity = str(alert.get("severity") or "unknown").lower()
+            severities[severity] = severities.get(severity, 0) + 1
+        values = [point.get(field) for field in HISTORY_NUMERIC_FIELDS]
+        try:
+            with self._lock, closing(self._connect()) as connection, connection:
+                connection.execute(
+                    f"INSERT OR REPLACE INTO history_points (snapshot_id, generated_at, generated_ts, {', '.join(HISTORY_NUMERIC_FIELDS)}) VALUES ({', '.join('?' for _ in range(3 + len(HISTORY_NUMERIC_FIELDS)))})",
+                    [point["snapshot_id"], point.get("generated_at") or datetime.now(timezone.utc).isoformat(), _timestamp(point.get("generated_at")), *values],
+                )
+                connection.execute("DELETE FROM history_node_classifications WHERE snapshot_id = ?", (point["snapshot_id"],))
+                connection.executemany(
+                    "INSERT INTO history_node_classifications(snapshot_id, classification, count) VALUES (?, ?, ?)",
+                    [(point["snapshot_id"], key, int(value)) for key, value in (point.get("node_classifications") or {}).items()],
+                )
+                connection.execute("DELETE FROM history_alert_severities WHERE snapshot_id = ?", (point["snapshot_id"],))
+                connection.executemany(
+                    "INSERT INTO history_alert_severities(snapshot_id, severity, count) VALUES (?, ?, ?)",
+                    [(point["snapshot_id"], key, value) for key, value in severities.items()],
+                )
+                cutoff = datetime.now(timezone.utc).timestamp() - self.retention_days * 86_400
+                connection.execute("DELETE FROM history_points WHERE generated_ts < ?", (cutoff,))
+                connection.execute(
+                    "DELETE FROM history_points WHERE snapshot_id IN (SELECT snapshot_id FROM history_points ORDER BY generated_ts DESC, snapshot_id DESC LIMIT -1 OFFSET ?)",
+                    (self.max_points,),
+                )
+                self._enforce_size(connection)
+            self.last_error = None
+        except Exception as error:
+            self.last_error = str(error)
+            raise
+
+    def _enforce_size(self, connection: sqlite3.Connection) -> None:
+        max_bytes = self.max_db_mib * 1024 * 1024
+        page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+        for _ in range(32):
+            pages = int(connection.execute("PRAGMA page_count").fetchone()[0])
+            free = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+            if (pages - free) * page_size <= max_bytes:
+                return
+            count = int(connection.execute("SELECT COUNT(*) FROM history_points").fetchone()[0])
+            if count <= 2:
+                return
+            remove = max(1, count // 4)
+            connection.execute(
+                "DELETE FROM history_points WHERE snapshot_id IN (SELECT snapshot_id FROM history_points ORDER BY generated_ts, snapshot_id LIMIT ?)",
+                (remove,),
+            )
+
+    @staticmethod
+    def _resolution(span_seconds: float, max_result_points: int, requested: int | None) -> int:
+        if requested is not None:
+            return max(1, requested)
+        needed = max(1, math.ceil(span_seconds / max_result_points))
+        for step in (1, 60, 300, 900, 3600, 21_600, 86_400, 604_800):
+            if step >= needed:
+                return step
+        return needed
+
+    def history(
+        self, *, limit: int = 240, since: str | None = None,
+        until: str | None = None, resolution_seconds: int | None = None,
+        max_result_points: int = 800,
+    ) -> dict[str, Any]:
+        try:
+            with self._lock, closing(self._connect()) as connection:
+                if since is None and until is None:
+                    rows = list(reversed(connection.execute(
+                        "SELECT * FROM history_points ORDER BY generated_ts DESC, snapshot_id DESC LIMIT ?", (limit,),
+                    ).fetchall()))
+                else:
+                    lower = _timestamp(since) if since else 0
+                    upper = _timestamp(until) if until else datetime.now(timezone.utc).timestamp()
+                    rows = connection.execute(
+                        "SELECT * FROM history_points WHERE generated_ts BETWEEN ? AND ? ORDER BY generated_ts, snapshot_id", (lower, upper),
+                    ).fetchall()
+                ids = [str(row["snapshot_id"]) for row in rows]
+                classifications: dict[str, dict[str, int]] = {item: {} for item in ids}
+                for offset in range(0, len(ids), 500):
+                    chunk = ids[offset:offset + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    for row in connection.execute(f"SELECT snapshot_id, classification, count FROM history_node_classifications WHERE snapshot_id IN ({placeholders})", chunk):
+                        classifications[str(row["snapshot_id"])][str(row["classification"])] = int(row["count"])
+                points = [{
+                    "snapshot_id": str(row["snapshot_id"]), "generated_at": str(row["generated_at"]),
+                    **{field: row[field] for field in HISTORY_NUMERIC_FIELDS},
+                    "node_classifications": classifications[str(row["snapshot_id"])],
+                } for row in rows]
+                resolution = 1
+                if points and (since is not None or until is not None):
+                    span = max(1, _timestamp(points[-1]["generated_at"]) - _timestamp(points[0]["generated_at"]))
+                    resolution = self._resolution(span, max_result_points, resolution_seconds)
+                    points = self._downsample(points, resolution)
+                total = int(connection.execute("SELECT COUNT(*) FROM history_points").fetchone()[0])
+            self.last_error = None
+            return {
+                "points": points[-max_result_points:], "retained_snapshots": total,
+                "history_capacity": self.max_points,
+                "window_started_at": points[0].get("generated_at") if points else None,
+                "newest_at": points[-1].get("generated_at") if points else None,
+                "storage": "sqlite", "resolution_seconds": resolution,
+                "retention_days": self.retention_days,
+            }
+        except Exception as error:
+            self.last_error = str(error)
+            raise
+
+    @staticmethod
+    def _downsample(points: list[dict[str, Any]], resolution: int) -> list[dict[str, Any]]:
+        buckets: dict[int, list[dict[str, Any]]] = {}
+        for point in points:
+            bucket = int(_timestamp(point.get("generated_at")) // resolution)
+            buckets.setdefault(bucket, []).append(point)
+        result: list[dict[str, Any]] = []
+        for items in buckets.values():
+            latest = items[-1]
+            merged: dict[str, Any] = {"snapshot_id": latest["snapshot_id"], "generated_at": latest["generated_at"]}
+            for field in HISTORY_NUMERIC_FIELDS:
+                values = [float(item[field]) for item in items if isinstance(item.get(field), (int, float))]
+                merged[field] = round(sum(values) / len(values), 6) if values else None
+            keys = {key for item in items for key in item.get("node_classifications", {})}
+            merged["node_classifications"] = {
+                key: round(sum(float(item.get("node_classifications", {}).get(key, 0)) for item in items) / len(items), 3)
+                for key in sorted(keys)
+            }
+            result.append(merged)
+        return result
+
+    def status(self) -> dict[str, Any]:
+        with self._lock, closing(self._connect()) as connection:
+            count = int(connection.execute("SELECT COUNT(*) FROM history_points").fetchone()[0])
+            oldest = connection.execute("SELECT generated_at FROM history_points ORDER BY generated_ts LIMIT 1").fetchone()
+            newest = connection.execute("SELECT generated_at FROM history_points ORDER BY generated_ts DESC LIMIT 1").fetchone()
+        size = sum(
+            candidate.stat().st_size for candidate in (
+                self.path, Path(f"{self.path}-wal"), Path(f"{self.path}-shm"),
+            ) if candidate.exists()
+        )
+        return {"enabled": True, "storage": "sqlite", "points": count, "oldest_at": oldest[0] if oldest else None, "newest_at": newest[0] if newest else None, "retention_days": self.retention_days, "max_points": self.max_points, "max_db_mib": self.max_db_mib, "database_bytes": size, "last_error": self.last_error}
 
 
 class SnapshotStore:
     """Thread-safe bounded store for complete immutable-by-convention snapshots."""
 
-    def __init__(self, capacity: int = 5, history_capacity: int = 2880) -> None:
+    def __init__(self, capacity: int = 5, history_capacity: int = 2880, persistent_history: SQLiteHistoryStore | None = None) -> None:
         if capacity < 1:
             raise ValueError("capacity must be positive")
         if history_capacity < capacity:
@@ -19,6 +252,8 @@ class SnapshotStore:
         self.history_capacity = history_capacity
         self._items: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._history: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self.persistent_history = persistent_history
+        self.history_error: str | None = None
         self._lock = RLock()
         self.last_error: str | None = None
         self.last_attempt_at: str | None = None
@@ -30,12 +265,19 @@ class SnapshotStore:
             self._items.move_to_end(snapshot_id)
             while len(self._items) > self.capacity:
                 self._items.popitem(last=False)
-            self._history[snapshot_id] = self._history_point(snapshot)
+            point = self._history_point(snapshot)
+            self._history[snapshot_id] = point
             self._history.move_to_end(snapshot_id)
             while len(self._history) > self.history_capacity:
                 self._history.popitem(last=False)
             self.last_error = None
             self.last_attempt_at = datetime.now(timezone.utc).isoformat()
+        if self.persistent_history is not None:
+            try:
+                self.persistent_history.publish(point, list(snapshot.get("alerts") or []))
+                self.history_error = None
+            except Exception as error:
+                self.history_error = str(error)
 
     def record_failure(self, error: Exception | str) -> None:
         with self._lock:
@@ -84,7 +326,20 @@ class SnapshotStore:
             "node_classifications": classifications,
         }
 
-    def history(self, limit: int = 240) -> dict[str, Any]:
+    def history(
+        self, limit: int = 240, *, since: str | None = None,
+        until: str | None = None, resolution_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        if self.persistent_history is not None:
+            try:
+                result = self.persistent_history.history(
+                    limit=limit, since=since, until=until,
+                    resolution_seconds=resolution_seconds,
+                )
+                self.history_error = None
+                return result
+            except Exception as error:
+                self.history_error = str(error)
         with self._lock:
             points = list(self._history.values())[-limit:]
             return {
@@ -93,6 +348,8 @@ class SnapshotStore:
                 "history_capacity": self.history_capacity,
                 "window_started_at": points[0].get("generated_at") if points else None,
                 "newest_at": points[-1].get("generated_at") if points else None,
+                "storage": "memory", "resolution_seconds": 1,
+                "error": self.history_error,
             }
 
     def index(self) -> list[dict[str, Any]]:
@@ -143,7 +400,7 @@ class SnapshotStore:
         if latest:
             generated = datetime.fromisoformat(latest["generated_at"])
             age = max(0.0, (datetime.now(timezone.utc) - generated).total_seconds())
-        return {
+        result = {
             "ready": latest is not None,
             "snapshot_id": latest.get("snapshot_id") if latest else None,
             "generated_at": latest.get("generated_at") if latest else None,
@@ -153,7 +410,16 @@ class SnapshotStore:
             "last_attempt_at": self.last_attempt_at,
             "retained_snapshots": len(self._items),
             "history_points": len(self._history),
+            "history": {"enabled": False, "storage": "memory", "points": len(self._history), "last_error": self.history_error},
         }
+        if self.persistent_history is not None:
+            try:
+                result["history"] = self.persistent_history.status()
+                result["history"]["last_error"] = self.history_error or result["history"].get("last_error")
+            except Exception as error:
+                self.history_error = str(error)
+                result["history"] = {"enabled": True, "storage": "sqlite", "points": 0, "last_error": self.history_error}
+        return result
 
 
 class PlanCache:

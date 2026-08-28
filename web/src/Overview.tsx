@@ -1,6 +1,7 @@
 import { alertIdentity } from "./DetailDrawer";
 import { statusClass } from "./Table";
 import type { DetailRef, HistoryPoint, HistoryResponse, Snapshot, Workload } from "./types";
+import type { TrendRange } from "./navigation";
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
 const percent = (part: unknown, total: unknown) => Number(total) > 0 ? Math.round(Number(part) / Number(total) * 100) : 0;
@@ -20,33 +21,59 @@ function delta(points: HistoryPoint[], key: keyof HistoryPoint) {
   return current - previous;
 }
 
-function Delta({ value }: { value: number | null }) {
-  if (value == null || value === 0) return <small className="metric-delta neutral">较上一快照持平</small>;
-  return <small className={value > 0 ? "metric-delta up" : "metric-delta down"}>较上一快照 {value > 0 ? "+" : ""}{number(value)}</small>;
+function Delta({ value, aggregate }: { value: number | null; aggregate: boolean }) {
+  const comparison = aggregate ? "较上一聚合点" : "较上一快照";
+  const formatted = value == null ? "" : number(Math.round(value * 10) / 10);
+  if (value == null || value === 0) return <small className="metric-delta neutral">{comparison}持平</small>;
+  return <small className={value > 0 ? "metric-delta up" : "metric-delta down"}>{comparison} {value > 0 ? "+" : ""}{formatted}</small>;
+}
+
+function axisLabel(value: string, spanMs: number) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  if (spanMs <= 48 * 60 * 60 * 1_000) return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (spanMs <= 90 * 24 * 60 * 60 * 1_000) return date.toLocaleDateString([], { month: "numeric", day: "numeric" });
+  return date.toLocaleDateString([], { year: "2-digit", month: "numeric", day: "numeric" });
 }
 
 function Sparkline({ points, field, label }: { points: HistoryPoint[]; field: keyof HistoryPoint; label: string }) {
-  const values = points.map((point) => point[field]).filter((value): value is number => typeof value === "number").slice(-60);
-  if (values.length < 2) return <div className="sparkline-empty">积累两个快照后显示趋势</div>;
+  const samples = points.flatMap((point) => typeof point[field] === "number" ? [{ value: point[field] as number, generatedAt: point.generated_at }] : []);
+  if (samples.length < 2) return <div className="sparkline-empty">积累两个快照后显示趋势</div>;
+  const values = samples.map((sample) => sample.value);
   const min = Math.min(...values);
   const max = Math.max(...values);
+  const flat = max === min;
   const range = max - min || 1;
-  const path = values.map((value, index) => `${index ? "L" : "M"} ${index / (values.length - 1) * 100} ${36 - (value - min) / range * 30}`).join(" ");
-  return <svg className="sparkline" viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label={`${label}趋势，当前 ${values.at(-1)}`}>
-    <path className="sparkline-area" d={`${path} L 100 40 L 0 40 Z`} />
-    <path className="sparkline-line" d={path} />
-  </svg>;
+  const path = values.map((value, index) => `${index ? "L" : "M"} ${index / (values.length - 1) * 100} ${flat ? 20 : 36 - (value - min) / range * 30}`).join(" ");
+  const latest = Math.round(Number(values.at(-1)) * 10) / 10;
+  const startedAt = new Date(samples[0].generatedAt).getTime();
+  const endedAt = new Date(samples.at(-1)?.generatedAt ?? "").getTime();
+  const spanMs = Number.isFinite(startedAt) && Number.isFinite(endedAt) ? Math.max(0, endedAt - startedAt) : 0;
+  const axisSamples = samples.length > 2 ? [samples[0], samples[Math.floor((samples.length - 1) / 2)], samples.at(-1)!] : [samples[0], samples.at(-1)!];
+  return <div className="sparkline-chart">
+    <svg className="sparkline" viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label={`${label}趋势，当前 ${number(latest)}`}>
+      <line className="sparkline-axis" x1="0" y1="39" x2="100" y2="39" />
+      <path className="sparkline-area" d={`${path} L 100 39 L 0 39 Z`} />
+      <path className="sparkline-line" d={path} />
+    </svg>
+    <div className={`sparkline-labels ${axisSamples.length === 2 ? "two" : ""}`} aria-label={`${label}时间轴`}>
+      {axisSamples.map((sample, index) => <time key={`${sample.generatedAt}:${index}`} dateTime={sample.generatedAt} title={new Date(sample.generatedAt).toLocaleString()}>{axisLabel(sample.generatedAt, spanMs)}</time>)}
+    </div>
+  </div>;
 }
 
 function InsightList({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return <section className="overview-panel"><header><h3>{title}</h3>{action}</header><div className="insight-list">{children}</div></section>;
 }
 
-export function Overview({ snapshot, history, open, navigate }: {
+export function Overview({ snapshot, history, open, navigate, range, onRange, historyRefreshing }: {
   snapshot: Snapshot;
   history: HistoryResponse | null;
   open: (ref: DetailRef) => void;
   navigate: (tab: "nodes" | "workloads" | "alerts") => void;
+  range: TrendRange;
+  onRange: (range: TrendRange) => void;
+  historyRefreshing: boolean;
 }) {
   const points = history?.points ?? [];
   const capacity = snapshot.capacity;
@@ -56,6 +83,9 @@ export function Overview({ snapshot, history, open, navigate }: {
   const attentionNodes = snapshot.nodes.filter((node) => ["fragmented", "cpu-memory-blocked", "unavailable"].includes(node.classification)).slice(0, 5);
   const severeAlerts = snapshot.alerts.filter((alert) => ["critical", "error", "warning"].includes(alert.severity)).slice(0, 5);
   const openWorkload = (workload: Workload) => open({ kind: "workload", id: workload.workload_id, label: workload.workload_name });
+  const ranges: Array<[TrendRange, string]> = [["1h", "1 小时"], ["6h", "6 小时"], ["24h", "24 小时"], ["7d", "7 天"], ["30d", "30 天"], ["all", "全部"]];
+  const resolution = history?.resolution_seconds ?? 1;
+  const resolutionLabel = resolution < 60 ? "原始点" : resolution < 3600 ? `${Math.round(resolution / 60)} 分钟聚合` : resolution < 86_400 ? `${Math.round(resolution / 3600)} 小时聚合` : `${Math.round(resolution / 86_400)} 天聚合`;
 
   return <div className="overview-page">
     <section className="overview-hero">
@@ -63,10 +93,15 @@ export function Overview({ snapshot, history, open, navigate }: {
       <div className="capacity-ring" style={{ "--value": `${percent(capacity.allocated_gpu, capacity.bound_gpu)}%` } as React.CSSProperties} aria-label={`GPU 分配率 ${percent(capacity.allocated_gpu, capacity.bound_gpu)}%`}><strong>{percent(capacity.allocated_gpu, capacity.bound_gpu)}%</strong><small>GPU 分配率</small></div>
     </section>
 
+    <section className="trend-toolbar" aria-label="趋势时间范围">
+      <div>{ranges.map(([value, label]) => <button type="button" className={range === value ? "active" : ""} key={value} onClick={() => onRange(value)}>{label}</button>)}</div>
+      <small>{historyRefreshing ? "正在加载历史…" : `${history?.storage === "sqlite" ? "SQLite 历史" : "内存历史"} · ${number(points.length)} 个展示点 · ${resolutionLabel}${history?.retention_days ? ` · 最多保留 ${history.retention_days} 天` : ""}`}</small>
+    </section>
+
     <section className="overview-metrics">
-      <article><span>已分配 GPU</span><strong>{number(capacity.allocated_gpu)}<small> / {number(capacity.bound_gpu)}</small></strong><Delta value={delta(points, "allocated_gpu")} /><Sparkline points={points} field="allocated_gpu" label="已分配 GPU" /></article>
+      <article><span>已分配 GPU</span><strong>{number(capacity.allocated_gpu)}<small> / {number(capacity.bound_gpu)}</small></strong><Delta value={delta(points, "allocated_gpu")} aggregate={resolution > 1} /><Sparkline points={points} field="allocated_gpu" label="已分配 GPU" /></article>
       <article><span>有效空闲 GPU</span><strong>{number(capacity.planning_eligible_free_gpu ?? capacity.free_gpu)}</strong><small className="metric-caption">原始空闲 {number(capacity.free_gpu)}</small><Sparkline points={points} field="free_gpu" label="空闲 GPU" /></article>
-      <article><span>Pending Workload</span><strong>{number(pending.length)}</strong><Delta value={delta(points, "pending_workloads")} /><Sparkline points={points} field="pending_workloads" label="Pending Workload" /></article>
+      <article><span>Pending Workload</span><strong>{number(pending.length)}</strong><Delta value={delta(points, "pending_workloads")} aggregate={resolution > 1} /><Sparkline points={points} field="pending_workloads" label="Pending Workload" /></article>
       <article><span>需关注告警</span><strong className={severeAlerts.length ? "attention" : "healthy"}>{number(severeAlerts.length)}</strong><small className="metric-caption">共 {number(snapshot.alerts.length)} 条告警</small><Sparkline points={points} field="alert_count" label="告警数" /></article>
     </section>
 

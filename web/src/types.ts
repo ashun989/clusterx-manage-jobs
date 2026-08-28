@@ -250,6 +250,10 @@ export type HistoryResponse = {
   history_capacity: number;
   window_started_at: string | null;
   newest_at: string | null;
+  storage?: "sqlite" | "memory";
+  resolution_seconds?: number;
+  retention_days?: number;
+  error?: string | null;
 };
 
 export type PlanItem = {
@@ -328,7 +332,7 @@ export type ServiceStatus = {
   setup_required: boolean;
   admin_enabled: boolean;
   admin_configured: boolean;
-  snapshot: { ready: boolean; stale: boolean; last_error: string | null };
+  snapshot: { ready: boolean; stale: boolean; last_error: string | null; history?: { enabled: boolean; storage: "sqlite" | "memory"; points: number; last_error: string | null } };
   policy: { valid: boolean; error: string | null; audit_error?: string | null };
 };
 

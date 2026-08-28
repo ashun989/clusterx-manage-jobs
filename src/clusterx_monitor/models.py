@@ -140,6 +140,7 @@ class PlanFilters(FrozenModel):
 class PlanRequest(FrozenModel):
     snapshot_id: str = Field(min_length=1)
     target: PlanTarget
+    target_nodes: tuple[str, ...] = ()
     strategies: tuple[Literal["min-gpu", "min-workloads", "min-users"], ...] = (
         "min-gpu",
     )
@@ -154,3 +155,19 @@ class PlanRequest(FrozenModel):
         if not value:
             raise ValueError("at least one strategy is required")
         return tuple(dict.fromkeys(value))
+
+    @field_validator("target_nodes", mode="before")
+    @classmethod
+    def normalize_target_nodes(cls, value: object) -> tuple[str, ...]:
+        nodes = tuple(str(item).strip() for item in (value or []))
+        if any(not item or len(item) > 256 for item in nodes):
+            raise ValueError("target node names must contain 1 to 256 characters")
+        if len(set(nodes)) != len(nodes):
+            raise ValueError("target_nodes must be unique")
+        return nodes
+
+    @model_validator(mode="after")
+    def validate_target_nodes(self) -> "PlanRequest":
+        if self.target_nodes and len(self.target_nodes) != self.target.nodes:
+            raise ValueError("target_nodes count must equal target.nodes")
+        return self

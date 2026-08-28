@@ -1,11 +1,12 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AdminPanel } from "./AdminPanel";
 import { GlobalSearch } from "./GlobalSearch";
 import { Overview } from "./Overview";
 import { alertIdentity, DetailDrawer } from "./DetailDrawer";
-import { DataTable, emptyTableState, formatPower, statusClass, TelemetryCell } from "./Table";
+import { DataTable, formatPower, statusClass, TelemetryCell } from "./Table";
 import type { ColumnDef, TableState } from "./Table";
 import { api } from "./api";
+import { emptyNavigationState, monitorTabs, navigationUrl, readNavigationState, type MonitorTab as Tab, type NodeSortKey, type NodeViewState, type PlannerIntent, type TableTab, type NavigationState, type TrendRange } from "./navigation";
 import { useMonitorData } from "./useMonitorData";
 import type { Alert, DetailRef, GroupSummary, NodeSummary, PlanItem, PlanResult, PolicyResponse, Snapshot, UserSummary, Workload } from "./types";
 
@@ -20,6 +21,11 @@ const dateTime = (value: string | null | undefined) => {
 };
 
 const releaseNotes: Record<string, string[]> = {
+  "1.0.0": [
+    "视图、筛选、排序、趋势区间与多层详情支持可分享深链接和浏览器历史。",
+    "可从节点、Workload、用户、分组和告警上下文直接进入可编辑的调度模拟。",
+    "趋势数据采用有界 SQLite 聚合存储，支持 1 小时至 30 天及全部历史区间。",
+  ],
   "0.5.0": [
     "新增集群运行总览、轻量趋势和快照变化洞察。",
     "支持全局搜索、表格搜索、列管理、密度切换和 CSV 导出。",
@@ -51,9 +57,9 @@ function VersionBadge({ version }: { version: string }) {
   </details>;
 }
 
-function Brand({ compact = false, version }: { compact?: boolean; version?: string }) {
+function Brand({ compact = false, version, onHome }: { compact?: boolean; version?: string; onHome?: () => void }) {
   return <div className={compact ? "brand brand-compact" : "brand"}>
-    <img className="brand-icon" src="/clusterx-icon.svg" alt="" />
+    {onHome ? <button type="button" className="brand-home" onClick={onHome} aria-label="清除上下文并返回总览" title="清除上下文并返回总览"><img className="brand-icon" src="/clusterx-icon.svg" alt="" /></button> : <img className="brand-icon" src="/clusterx-icon.svg" alt="" />}
     <div>{!compact && <span className="eyebrow">Clusterx</span>}<div className="brand-title"><h1>{compact ? "Clusterx Monitor" : "Queue Observatory"}</h1>{version && <VersionBadge version={version} />}</div></div>
   </div>;
 }
@@ -140,11 +146,6 @@ const alertColumns: ColumnDef<Alert>[] = [
   { key: "message", label: "说明", kind: "text", value: (row) => row.message },
 ];
 
-type TableTab = "groups" | "users" | "workloads" | "alerts";
-type Tab = TableTab | "overview" | "nodes" | "planner" | "rules";
-type NodeSortKey = "allocated_gpu" | "effective_free_gpu" | "stranded_gpu" | "gpu_util" | "gpu_mem" | "power";
-type NodeViewState = { classifications: string[]; states: string[]; sort: NodeSortKey | null; direction: "asc" | "desc" };
-
 function MultiFilter({ label, options, selected, onChange }: { label: string; options: string[]; selected: string[]; onChange: (values: string[]) => void }) {
   return <details className="filter-menu"><summary>{label}{selected.length > 0 && <span>{selected.length}</span>}</summary><div className="filter-popover">{options.map((option) => <label key={`${label}:${option}`}><input type="checkbox" checked={selected.includes(option)} onChange={(event) => onChange(event.target.checked ? [...selected, option] : selected.filter((item) => item !== option))} /><span>{option}</span></label>)}</div></details>;
 }
@@ -226,7 +227,7 @@ function PlannerMultiSelect({ label, options, selected, onChange, emptyLabel = "
   </details>;
 }
 
-function Planner({ snapshot, onResult }: { snapshot: Snapshot; onResult: (value: PlanResult) => void }) {
+function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapshot; onResult: (value: PlanResult) => void; intent: PlannerIntent | null; clearIntent: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [nodes, setNodes] = useState("2");
@@ -240,6 +241,7 @@ function Planner({ snapshot, onResult }: { snapshot: Snapshot; onResult: (value:
   const [cpusUseDefault, setCpusUseDefault] = useState(true);
   const [memoryUsesDefault, setMemoryUsesDefault] = useState(true);
   const [filters, setFilters] = useState<PlannerFilters>(emptyPlannerFilters);
+  const [scope, setScope] = useState<"fragmented" | "full" | "all">("fragmented");
   const filterOptions = useMemo<Record<PlannerFilterKey, PlannerOption[]>>(() => {
     const candidates = snapshot.workloads.filter((workload) => workload.planning_eligible !== false && workload.placements.length > 0 && workload.user && workload.user !== "unknown" && workload.group && workload.group !== "unattributed");
     const workloadOptions = candidates.map((workload) => ({ value: workload.workload_id, label: workload.workload_name, detail: `${workload.user} / ${workload.group} · ${workload.workload_id}` })).sort((left, right) => left.label.localeCompare(right.label) || left.value.localeCompare(right.value));
@@ -276,6 +278,19 @@ function Planner({ snapshot, onResult }: { snapshot: Snapshot; onResult: (value:
       return changed ? next : current;
     });
   }, [filterOptions]);
+  const intentSignature = JSON.stringify(intent);
+  useEffect(() => {
+    if (!intent) return;
+    setNodes(String(intent.nodes));
+    setGpus(String(intent.gpusPerNode));
+    setCpus(intent.cpusTotal == null ? String(intent.nodes * intent.gpusPerNode * snapshot.planning_profile.default_cpu_per_gpu) : String(intent.cpusTotal));
+    setMemory(intent.memoryTotalGib == null ? String(intent.nodes * intent.gpusPerNode * snapshot.planning_profile.default_memory_gib_per_gpu) : String(intent.memoryTotalGib));
+    setCpusUseDefault(intent.cpusTotal == null);
+    setMemoryUsesDefault(intent.memoryTotalGib == null);
+    setScope(intent.scope);
+    setFilters({ ...emptyPlannerFilters(), types: intent.workloadTypes, groups: intent.groups, users: intent.users, workloads: intent.workloads });
+    setError("");
+  }, [intentSignature, snapshot.planning_profile.default_cpu_per_gpu, snapshot.planning_profile.default_memory_gib_per_gpu]);
   const changeFilter = (key: PlannerFilterKey) => (values: string[]) => setFilters((current) => ({ ...current, [key]: values }));
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setBusy(true); setError("");
@@ -286,6 +301,7 @@ function Planner({ snapshot, onResult }: { snapshot: Snapshot; onResult: (value:
     try {
       const result = await api<PlanResult>("/plans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
         snapshot_id: snapshot.snapshot_id,
+        target_nodes: intent?.targetNodes ?? [],
         target: { nodes: nodeCount, gpus_per_node: Number(data.get("gpus")), cpus_per_node: totalAsPerNode("cpus"), memory_per_node_gib: totalAsPerNode("memory") },
         strategies: strategies.length ? strategies : ["min-gpu"], candidate_scope: data.get("scope"), alternatives: Number(data.get("alternatives")), search_seconds: Number(data.get("searchSeconds")),
         filters: {
@@ -298,13 +314,14 @@ function Planner({ snapshot, onResult }: { snapshot: Snapshot; onResult: (value:
     } catch (value) { setError(value instanceof Error ? value.message : String(value)); } finally { setBusy(false); }
   };
   return <form className="planner" onSubmit={submit}>
+    {intent && <div className="planner-context"><div><span className="eyebrow">问题上下文</span><b>{intent.sourceLabel}</b><p>{intent.note}</p>{intent.targetNodes.length > 0 && <small>指定目标节点：{intent.targetNodes.join("、")}</small>}</div><button type="button" onClick={clearIntent}>清除上下文</button></div>}
     <section className="planner-section"><h3>目标资源</h3>
       <label>节点数<input name="nodes" type="number" min="1" max="1024" value={nodes} onChange={(event) => setNodes(event.target.value)} required /></label><label>每节点 GPU<input name="gpus" type="number" min="1" max="1024" value={gpus} onChange={(event) => setGpus(event.target.value)} required /></label>
       <div className="planner-field"><label htmlFor="planner-cpus">CPU 总量（可覆盖）</label><input id="planner-cpus" name="cpus" type="number" min="1" max={1_000_000 * Math.max(1, Number(nodes) || 1)} step="any" value={cpus} onChange={(event) => { setCpusUseDefault(false); setCpus(event.target.value); }} required /><small><span>{cpusUseDefault ? `${nodes || "—"} 节点 × ${gpus || "—"} GPU × ${snapshot.planning_profile.default_cpu_per_gpu} CPU/GPU` : "使用自定义 CPU 总量"}</span>{!cpusUseDefault && <button type="button" aria-label="CPU 恢复默认比例" onClick={() => { setCpus(defaultFor(snapshot.planning_profile.default_cpu_per_gpu)); setCpusUseDefault(true); }}>恢复跟随</button>}</small></div>
       <div className="planner-field"><label htmlFor="planner-memory">内存总量 GiB（可覆盖）</label><input id="planner-memory" name="memory" type="number" min="1" max={10_000_000 * Math.max(1, Number(nodes) || 1)} step="any" value={memory} onChange={(event) => { setMemoryUsesDefault(false); setMemory(event.target.value); }} required /><small><span>{memoryUsesDefault ? `${nodes || "—"} 节点 × ${gpus || "—"} GPU × ${snapshot.planning_profile.default_memory_gib_per_gpu} GiB/GPU` : "使用自定义内存总量"}</span>{!memoryUsesDefault && <button type="button" aria-label="内存恢复默认比例" onClick={() => { setMemory(defaultFor(snapshot.planning_profile.default_memory_gib_per_gpu)); setMemoryUsesDefault(true); }}>恢复跟随</button>}</small></div>
     </section>
     <section className="planner-section"><h3>求解设置</h3>
-      <label>候选范围<select name="scope" defaultValue="fragmented"><option value="fragmented">碎片节点</option><option value="full">满 GPU 节点</option><option value="all">全部</option></select></label><label>备选数<input name="alternatives" type="number" min="1" max="10" defaultValue="1" required /></label>
+      <label>候选范围<select name="scope" value={scope} onChange={(event) => setScope(event.target.value as typeof scope)}><option value="fragmented">碎片节点</option><option value="full">满 GPU 节点</option><option value="all">全部</option></select></label><label>备选数<input name="alternatives" type="number" min="1" max="10" defaultValue="1" required /></label>
       <label>总求解预算（秒）<input name="searchSeconds" type="number" min="1" max="30" defaultValue="10" required /></label>
       <fieldset><legend>策略</legend>{[["min-gpu", "最少 GPU"], ["min-workloads", "最少任务"], ["min-users", "最少用户"]].map(([value, label]) => <label className="check" key={value}><input name="strategy" value={value} type="checkbox" defaultChecked />{label}</label>)}</fieldset>
     </section>
@@ -328,7 +345,7 @@ function PlanResults({ plan, currentSnapshotId, onWorkload }: { plan: PlanResult
   useEffect(() => setExpanded(plan?.plans[0] ? [planKey(plan.plans[0])] : []), [signature]);
   if (!plan) return <div className="plan-empty"><p>提交查询后，可在这里比较调度方案。</p></div>;
   const superseded = plan.superseded || plan.snapshot_id !== currentSnapshotId;
-  const reasonLabels: Record<string, string> = { "attribution-excluded": "归属异常节点及关联 Workload 已被安全排除。", "no-candidates-after-filters": "筛选后没有可协调的 Workload。", "insufficient-releasable-resources": "候选 Workload 可释放的资源不足。", "solver-time-limit": "求解器在时间预算内没有找到可验证方案。" };
+  const reasonLabels: Record<string, string> = { "target-node-unavailable": "指定目标节点不存在、状态不可调度或已因资源归属异常被排除。", "attribution-excluded": "归属异常节点及关联 Workload 已被安全排除。", "no-candidates-after-filters": "筛选后没有可协调的 Workload。", "insufficient-releasable-resources": "候选 Workload 可释放的资源不足。", "solver-time-limit": "求解器在时间预算内没有找到可验证方案。" };
   return <div className="plan-results">
     <div className="plan-result-heading"><div><h3>{plan.optimality}</h3><span>{plan.solver.backend} · {plan.search_elapsed_seconds}s · snapshot {plan.snapshot_id.slice(0, 12)}</span></div>{superseded && <span className="status status-warning">快照已更新</span>}</div>
     <p className="plan-timestamp">快照时间 {new Date(plan.snapshot_generated_at).toLocaleString()}{plan.cache_hit ? " · cache hit" : ""}</p>
@@ -346,8 +363,8 @@ function PlanResults({ plan, currentSnapshotId, onWorkload }: { plan: PlanResult
   </div>;
 }
 
-function SchedulerPanel({ snapshot, plan, onResult, onWorkload }: { snapshot: Snapshot; plan: PlanResult | null; onResult: (result: PlanResult) => void; onWorkload: (workload: Workload) => void }) {
-  return <div className="scheduler-panel"><div className="planner-column"><span className="eyebrow">Read-only simulation</span><h2>调度模拟器</h2><p>固定使用当前缓存快照，不访问集群。</p><Planner snapshot={snapshot} onResult={onResult} /></div><PlanResults plan={plan} currentSnapshotId={snapshot.snapshot_id} onWorkload={onWorkload} /></div>;
+function SchedulerPanel({ snapshot, plan, onResult, onWorkload, intent, clearIntent }: { snapshot: Snapshot; plan: PlanResult | null; onResult: (result: PlanResult) => void; onWorkload: (workload: Workload) => void; intent: PlannerIntent | null; clearIntent: () => void }) {
+  return <div className="scheduler-panel"><div className="planner-column"><span className="eyebrow">Read-only simulation</span><h2>调度模拟器</h2><p>固定使用当前缓存快照，不访问集群；预填条件可在计算前调整。</p><Planner snapshot={snapshot} onResult={onResult} intent={intent} clearIntent={clearIntent} /></div><PlanResults plan={plan} currentSnapshotId={snapshot.snapshot_id} onWorkload={onWorkload} /></div>;
 }
 
 const policyLabel = (value: string) => value.replaceAll("_", " ");
@@ -378,46 +395,139 @@ function RulesPage({ response, snapshot, error }: { response: PolicyResponse | n
 }
 
 export default function App() {
-  const { snapshot, policy, serviceStatus, history, error, policyError, statusError, connection, refreshing, lastSuccessfulAt, refresh } = useMonitorData();
-  const [tab, setTab] = useState<Tab>(() => {
+  const fallbackTab = (() => {
     const saved = import.meta.env.MODE === "test" ? null : window.localStorage.getItem("clusterx-monitor:tab:v1");
-    return (["overview", "groups", "users", "nodes", "workloads", "alerts", "planner", "rules"] as Tab[]).includes(saved as Tab) ? saved as Tab : "groups";
-  });
-  const [details, setDetails] = useState<DetailRef[]>([]);
+    return monitorTabs.includes(saved as Tab) ? saved as Tab : "groups";
+  })();
+  const [navigation, setNavigation] = useState<NavigationState>(() => readNavigationState(fallbackTab));
+  const { snapshot, policy, serviceStatus, history, error, policyError, statusError, connection, refreshing, historyRefreshing, lastSuccessfulAt, refresh } = useMonitorData(navigation.trendRange);
+  const detailDepth = useRef(0);
   const [plan, setPlan] = useState<PlanResult | null>(null);
   const [adminOpen, setAdminOpen] = useState(false);
-  const [tableStates, setTableStates] = useState<Record<TableTab, TableState>>({ groups: emptyTableState(), users: emptyTableState(), workloads: emptyTableState(), alerts: emptyTableState() });
-  const [nodeState, setNodeState] = useState<NodeViewState>({ classifications: [], states: [], sort: null, direction: "desc" });
+  const [linkCopied, setLinkCopied] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">(() => import.meta.env.MODE !== "test" && window.localStorage.getItem("clusterx-monitor:theme:v1") === "light" ? "light" : "dark");
+  const { tab, details, tableStates, nodeState, plannerIntent, trendRange } = navigation;
+
+  const commitNavigation = useCallback((next: NavigationState, mode: "push" | "replace", nextDetailDepth = detailDepth.current) => {
+    detailDepth.current = nextDetailDepth;
+    setNavigation(next);
+    const state = { ...(window.history.state ?? {}), clusterxMonitor: true, detailDepth: nextDetailDepth };
+    if (mode === "push") window.history.pushState(state, "", navigationUrl(next));
+    else window.history.replaceState(state, "", navigationUrl(next));
+  }, []);
+
+  useEffect(() => {
+    window.history.replaceState({ ...(window.history.state ?? {}), clusterxMonitor: true, detailDepth: 0 }, "", navigationUrl(navigation));
+    const pop = (event: PopStateEvent) => {
+      detailDepth.current = Number(event.state?.detailDepth ?? 0);
+      setNavigation((current) => readNavigationState(current.tab, current));
+    };
+    window.addEventListener("popstate", pop);
+    return () => window.removeEventListener("popstate", pop);
+  }, []);
+
+  const navigateTab = (nextTab: Tab) => {
+    if (nextTab === tab && details.length === 0) return;
+    commitNavigation({ ...navigation, tab: nextTab, details: [] }, "push", 0);
+  };
+  const open = (ref: DetailRef) => commitNavigation({ ...navigation, details: [...details, ref] }, "push", detailDepth.current + 1);
+  const backDetail = () => {
+    if (detailDepth.current > 0) window.history.back();
+    else commitNavigation({ ...navigation, details: details.slice(0, -1) }, "replace", 0);
+  };
+  const closeDetails = () => {
+    if (detailDepth.current > 0) window.history.go(-detailDepth.current);
+    else commitNavigation({ ...navigation, details: [] }, "replace", 0);
+  };
+  const updateTable = (name: TableTab, state: TableState) => commitNavigation({ ...navigation, tableStates: { ...tableStates, [name]: state } }, "replace");
+  const updateNodeState = (state: NodeViewState) => commitNavigation({ ...navigation, nodeState: state }, "replace");
+  const updateTrendRange = (range: TrendRange) => commitNavigation({ ...navigation, trendRange: range }, "replace");
+  const resetNavigation = () => {
+    const next = emptyNavigationState("overview");
+    detailDepth.current = 0;
+    setPlan(null);
+    setNavigation(next);
+    window.history.pushState({ ...(window.history.state ?? {}), clusterxMonitor: true, detailDepth: 0 }, "", window.location.pathname);
+  };
+  const copyCurrentView = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 1_500);
+    } catch {
+      setLinkCopied(false);
+    }
+  };
+
   useEffect(() => { if (import.meta.env.MODE !== "test") window.localStorage.setItem("clusterx-monitor:tab:v1", tab); }, [tab]);
   useEffect(() => { document.documentElement.dataset.theme = theme; if (import.meta.env.MODE !== "test") window.localStorage.setItem("clusterx-monitor:theme:v1", theme); }, [theme]);
   const workloads = useMemo(() => snapshot ? [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])] : [], [snapshot]);
-  const open = (ref: DetailRef) => setDetails((current) => [...current, ref]);
-  const updateTable = (name: TableTab, state: TableState) => setTableStates((current) => ({ ...current, [name]: state }));
   if (!snapshot) {
     const loadingMessages = [error, statusError, policyError, serviceStatus?.setup_required ? "服务处于 setup-required，请由管理员补全本地配置。" : "", serviceStatus?.snapshot.last_error, serviceStatus?.policy.error, serviceStatus?.policy.audit_error].filter(Boolean);
     return <main className="loading"><Brand compact version={serviceStatus?.version} /><div className="pulse" /><p>{loadingMessages.join(" · ") || "正在等待第一份完整快照…"}</p><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button>{adminOpen && <AdminPanel close={() => setAdminOpen(false)} onConfigured={() => { void refresh(); }} />}</main>;
   }
   const telemetryCoverage = snapshot.telemetry;
   const coverageMessages = [["compute", telemetryCoverage.compute_reported_gpu_count], ["memory", telemetryCoverage.memory_reported_gpu_count], ["power", telemetryCoverage.power_reported_gpu_count]].filter(([, count]) => Number(count) < telemetryCoverage.allocated_gpu_count).map(([metric, count]) => `${metric} 遥测覆盖 ${count}/${telemetryCoverage.allocated_gpu_count}`);
-  const bannerMessages = [error, policyError, statusError, policy?.error, policy?.audit_error, serviceStatus?.policy.audit_error, serviceStatus?.snapshot.last_error, serviceStatus?.setup_required ? "服务处于 setup-required" : "", serviceStatus?.skipped_refreshes ? `已跳过 ${serviceStatus.skipped_refreshes} 次刷新` : "", snapshot.policy_config?.error, ...snapshot.warnings, ...coverageMessages, snapshot.historical_telemetry_status === "unavailable" ? "历史 GPU 遥测不可用，低利用率规则本轮未评估" : ""].filter(Boolean);
+  const bannerMessages = [error, policyError, statusError, policy?.error, policy?.audit_error, serviceStatus?.policy.audit_error, serviceStatus?.snapshot.last_error, serviceStatus?.snapshot.history?.last_error ? `本地趋势历史降级：${serviceStatus.snapshot.history.last_error}` : "", serviceStatus?.setup_required ? "服务处于 setup-required" : "", serviceStatus?.skipped_refreshes ? `已跳过 ${serviceStatus.skipped_refreshes} 次刷新` : "", snapshot.policy_config?.error, ...snapshot.warnings, ...coverageMessages, snapshot.historical_telemetry_status === "unavailable" ? "历史 GPU 遥测不可用，低利用率规则本轮未评估" : ""].filter(Boolean);
   const workloadRef = (workload: Workload): DetailRef => ({ kind: "workload", id: workload.workload_id, label: workload.workload_name });
+  const plannerIntentFor = (ref: DetailRef): PlannerIntent => {
+    const defaults: PlannerIntent = {
+      sourceKind: ref.kind, sourceId: ref.id, sourceLabel: ref.label, note: "已从当前问题预填模拟条件，请核对后再计算。",
+      nodes: 2, gpusPerNode: 8, cpusTotal: null, memoryTotalGib: null, targetNodes: [], scope: "fragmented",
+      groups: [], users: [], workloads: [], workloadTypes: [],
+    };
+    if (ref.kind === "node") {
+      const node = snapshot.nodes.find((item) => item.node === ref.id);
+      if (!node) return defaults;
+      return { ...defaults, sourceLabel: node.node, note: "模拟将只验证释放这一台指定节点所需协调的运行中 Workload。", nodes: 1, gpusPerNode: Math.max(1, node.total_gpu), cpusTotal: node.total_cpu, memoryTotalGib: node.total_memory_gib, targetNodes: [node.node], scope: "all" };
+    }
+    if (ref.kind === "group") return { ...defaults, sourceLabel: ref.id, note: "候选 Workload 已限定为该分组；目标资源仍可调整。", groups: [ref.id] };
+    if (ref.kind === "user") return { ...defaults, sourceLabel: ref.id, note: "候选 Workload 已限定为该用户；目标资源仍可调整。", users: [ref.id] };
+    if (ref.kind === "workload") {
+      const workload = workloads.find((item) => item.workload_id === ref.id);
+      if (!workload) return defaults;
+      const placementNodes = [...new Set(workload.placements.map((item) => item.node).filter(Boolean))];
+      const nodes = Math.max(1, (workload.num_nodes ?? placementNodes.length) || 1);
+      const gpusPerNode = Math.max(1, workload.gpus_per_node ?? Math.ceil((workload.total_gpu || 1) / nodes));
+      const pending = workload.policy_status === "pending" || workload.placements.length === 0;
+      return {
+        ...defaults, sourceLabel: workload.workload_name, nodes, gpusPerNode,
+        cpusTotal: workload.total_cpu ?? null, memoryTotalGib: workload.total_memory_gib ?? null,
+        note: pending ? "目标资源按该 Pending Workload 的请求画像预填；模拟会寻找可释放任意合适节点的协调方案。" : "目标资源按该运行中 Workload 的画像预填，并将候选限定为它，用于验证协调后的释放效果。",
+        workloads: pending ? [] : [workload.workload_id], workloadTypes: pending ? [] : [workload.type],
+      };
+    }
+    if (ref.kind === "alert") {
+      const alert = snapshot.alerts.find((item) => alertIdentity(item) === ref.id);
+      if (!alert) return defaults;
+      const workload = workloads.find((item) => item.workload_id === alert.subject || item.workload_name === alert.subject);
+      const related = workload ? workloadRef(workload) : snapshot.nodes.some((item) => item.node === alert.subject) ? { kind: "node" as const, id: alert.subject, label: alert.subject } : snapshot.groups.some((item) => item.group === alert.subject) ? { kind: "group" as const, id: alert.subject, label: alert.subject } : snapshot.users.some((item) => item.user === alert.subject) ? { kind: "user" as const, id: alert.subject, label: alert.subject } : null;
+      const derived = related ? plannerIntentFor(related) : defaults;
+      return { ...derived, sourceKind: "alert", sourceId: ref.id, sourceLabel: alert.subject, note: `来自告警 ${alert.code || alert.kind}。${derived.note}` };
+    }
+    return defaults;
+  };
+  const planFrom = (ref: DetailRef) => {
+    setPlan(null);
+    commitNavigation({ ...navigation, tab: "planner", details: [], plannerIntent: plannerIntentFor(ref) }, "push", 0);
+  };
+  const clearPlannerIntent = () => commitNavigation({ ...navigation, plannerIntent: null }, "replace");
   const tabLabels: Record<Tab, string> = { overview: "总览", groups: "分组", users: "用户", nodes: "节点", workloads: "Workload", alerts: "告警", planner: "调度模拟", rules: "规则" };
   return <div className="app">
-    <header className="app-header"><div className="brand-block"><Brand version={serviceStatus?.version} /><span className="cluster-context">{snapshot.cluster} / {snapshot.queue}</span></div><GlobalSearch snapshot={snapshot} open={open} /><div className="header-actions"><div className={`connection connection-${connection}`}><span />{{ connecting: "正在连接", live: "实时", reconnecting: "重连中", polling: "轮询" }[connection]}</div><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="icon-button" disabled={refreshing} onClick={() => { void refresh(); }} aria-label="立即刷新" title={lastSuccessfulAt ? `上次成功：${new Date(lastSuccessfulAt).toLocaleTimeString()}` : "立即刷新"}>{refreshing ? "…" : "↻"}</button><button type="button" className="icon-button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="切换明暗主题">{theme === "dark" ? "☼" : "☾"}</button><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
+    <header className="app-header"><div className="brand-block"><Brand version={serviceStatus?.version} onHome={resetNavigation} /><span className="cluster-context">{snapshot.cluster} / {snapshot.queue}</span></div><GlobalSearch snapshot={snapshot} open={open} /><div className="header-actions"><div className={`connection connection-${connection}`}><span />{{ connecting: "正在连接", live: "实时", reconnecting: "重连中", polling: "轮询" }[connection]}</div><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="icon-button" disabled={refreshing} onClick={() => { void refresh(); }} aria-label="立即刷新" title={lastSuccessfulAt ? `上次成功：${new Date(lastSuccessfulAt).toLocaleTimeString()}` : "立即刷新"}>{refreshing ? "…" : "↻"}</button><button type="button" className="icon-button" onClick={() => { void copyCurrentView(); }} aria-label="复制当前视图链接" title="复制当前视图链接">{linkCopied ? "✓" : "⌁"}</button><button type="button" className="icon-button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="切换明暗主题">{theme === "dark" ? "☼" : "☾"}</button><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
     {tab !== "overview" && <section className="cards"><article><span>绑定容量</span><strong>{number(snapshot.capacity.bound_gpu)}</strong><small>{number(snapshot.capacity.planning_eligible_gpu)} 可参与调度</small></article><article><span>已分配</span><strong>{number(snapshot.capacity.allocated_gpu)}</strong><small>{number(snapshot.capacity.free_gpu)} 空闲</small></article><article><span>Pending 压力</span><strong className={statusClass(snapshot.pending_pressure.state)}>{String(snapshot.pending_pressure.state)}</strong><small>{number(snapshot.pending_pressure.eligible_jobs)} 个有效排队任务</small></article><article><span>GPU 功率</span><strong>{power(snapshot.telemetry.gpu_power_total_w)}</strong><small>{snapshot.telemetry.power_reported_gpu_count}/{snapshot.telemetry.allocated_gpu_count} 已覆盖 · {snapshot.telemetry_status ?? "unknown"}</small></article></section>}
     {bannerMessages.length > 0 && <div className="banner">{bannerMessages.join(" · ")}</div>}
-    <section className="workspace"><div className="main-panel"><nav aria-label="Monitor 主导航">{(["overview", "groups", "users", "nodes", "workloads", "alerts", "planner", "rules"] as Tab[]).map((name) => <button aria-label={name} className={tab === name ? "active" : ""} key={name} onClick={() => setTab(name)}>{tabLabels[name]}{name === "alerts" && snapshot.alerts.length > 0 && <span className="nav-count">{snapshot.alerts.length}</span>}</button>)}</nav>
-      {tab === "overview" && <Overview snapshot={snapshot} history={history} open={open} navigate={setTab} />}
+    <section className="workspace"><div className="main-panel"><nav aria-label="Monitor 主导航">{monitorTabs.map((name) => <button aria-label={name} className={tab === name ? "active" : ""} key={name} onClick={() => navigateTab(name)}>{tabLabels[name]}{name === "alerts" && snapshot.alerts.length > 0 && <span className="nav-count">{snapshot.alerts.length}</span>}</button>)}</nav>
+      {tab === "overview" && <Overview snapshot={snapshot} history={history} historyRefreshing={historyRefreshing} range={trendRange} onRange={updateTrendRange} open={open} navigate={navigateTab} />}
       {tab === "groups" && <DataTable rows={snapshot.groups} columns={groupColumns} state={tableStates.groups} onState={(state) => updateTable("groups", state)} rowKey={(row) => row.group} rowLabel={(row) => row.group} onRow={(row) => open({ kind: "group", id: row.group, label: row.group })} />}
       {tab === "users" && <DataTable rows={snapshot.users} columns={userColumns} state={tableStates.users} onState={(state) => updateTable("users", state)} rowKey={(row) => row.user} rowLabel={(row) => row.user} onRow={(row) => open({ kind: "user", id: row.user, label: row.user })} />}
-      {tab === "nodes" && <NodeHeatmap nodes={snapshot.nodes} state={nodeState} onState={setNodeState} onNode={(row) => open({ kind: "node", id: row.node, label: row.node })} />}
+      {tab === "nodes" && <NodeHeatmap nodes={snapshot.nodes} state={nodeState} onState={updateNodeState} onNode={(row) => open({ kind: "node", id: row.node, label: row.node })} />}
       {tab === "workloads" && <DataTable rows={workloads} columns={workloadColumns} state={tableStates.workloads} onState={(state) => updateTable("workloads", state)} rowKey={(row) => row.workload_id} rowLabel={(row) => row.workload_name} onRow={(row) => open(workloadRef(row))} />}
       {tab === "alerts" && <DataTable rows={snapshot.alerts} columns={alertColumns} state={tableStates.alerts} onState={(state) => updateTable("alerts", state)} rowKey={(row, index) => `${alertIdentity(row)}:${index}`} rowLabel={(row) => row.subject} onRow={(row) => open({ kind: "alert", id: alertIdentity(row), label: row.subject })} />}
-      {tab === "planner" && <SchedulerPanel snapshot={snapshot} plan={plan} onResult={setPlan} onWorkload={(workload) => open(workloadRef(workload))} />}
+      {tab === "planner" && <SchedulerPanel snapshot={snapshot} plan={plan} onResult={setPlan} onWorkload={(workload) => open(workloadRef(workload))} intent={plannerIntent} clearIntent={clearPlannerIntent} />}
       {tab === "rules" && <RulesPage response={policy} snapshot={snapshot} error={policyError} />}
     </div></section>
-    <DetailDrawer stack={details} snapshot={snapshot} open={open} back={() => setDetails((current) => current.slice(0, -1))} close={() => setDetails([])} />
+    <DetailDrawer stack={details} snapshot={snapshot} open={open} back={backDetail} close={closeDetails} planFrom={planFrom} />
     {adminOpen && <AdminPanel close={() => setAdminOpen(false)} onConfigured={() => { void refresh(); }} />}
   </div>;
 }

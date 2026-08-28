@@ -250,7 +250,9 @@ Pod restarts or node movement. Zero-GPU workloads are `not-applicable`, newer
 workloads are `warming-up`, and a missing compute or memory metric is
 `unavailable`. A historical query failure leaves the normal snapshot and
 5-minute telemetry available and emits a telemetry warning. Completed jobs are
-not retained or evaluated, and no history database is used.
+not retained or evaluated by this rule. The Monitor's local SQLite trend
+database stores cluster-level aggregate points only; it never stores workload
+identities or completed-workload telemetry.
 
 ### Monitor administrator configuration
 
@@ -274,8 +276,19 @@ clusterx-monitor serve \
   --policy-config config/resource-policy.local.json \
   --group-config config/groups.local.yaml \
   --auth-config config/admin.local.yaml \
+  --history-db ~/.clusterx-monitor/history.sqlite3 \
+  --history-retention-days 30 \
   --host 127.0.0.1 --port 8765
 ```
+
+The Web UI encodes the active view, table query/filter/sort, trend range, and
+detail stack in the URL. Problem details can prefill an editable scheduling
+simulation; an exact node uses the backend `target_nodes` constraint. Aggregate
+trend points persist in SQLite with WAL and bounded time/count/size retention.
+They contain capacity, pending, telemetry, alert-count, and node-classification
+metrics only—never workload, user/member, or log content. Configure the bounds
+with `--history-retention-days`, `--history-max-points`, and
+`--history-max-db-mib`.
 
 The administrator UI saves each resource/group file independently after schema
 validation and revision matching. Writes use a same-directory temporary file,

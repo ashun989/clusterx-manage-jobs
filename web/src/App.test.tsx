@@ -118,6 +118,7 @@ class FakeEventSource {
 
 describe("Clusterx monitor dashboard", () => {
   beforeEach(() => {
+    window.history.replaceState({}, "", "/");
     latestSnapshot = structuredClone(baseSnapshot);
     emitSnapshot = undefined;
     adminAuthenticated = false;
@@ -138,7 +139,7 @@ describe("Clusterx monitor dashboard", () => {
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "0.5.0", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "1.0.0", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       if (path.includes("/history?")) return { ok: true, status: 200, json: async () => ({ retained_snapshots: 2, history_capacity: 2880, window_started_at: "2026-08-14T00:59:30Z", newest_at: "2026-08-14T01:00:00Z", points: [
         { snapshot_id: "snapshot-0", generated_at: "2026-08-14T00:59:30Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: { fragmented: 1, "gpu-full": 1 } },
         { snapshot_id: "snapshot-1", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 12, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: { fragmented: 1, "gpu-full": 1 } },
@@ -146,6 +147,49 @@ describe("Clusterx monitor dashboard", () => {
       const value = path.endsWith("/plans") && init?.method === "POST" ? planResult : path.endsWith("/policy") ? policyResponse : latestSnapshot;
       return { ok: true, status: 200, json: async () => structuredClone(value) };
     }));
+  });
+
+  it("restores a shareable table view and nested detail from the URL", async () => {
+    window.history.replaceState({}, "", "/?view=workloads&q.workloads=train-a&f.workloads.group=group-a&s.workloads.total_gpu=desc&detail=workload:workload-a");
+    render(<App />);
+
+    await screen.findByText("Queue Observatory");
+    expect(screen.getByRole("button", { name: "workloads" })).toHaveClass("active");
+    expect(screen.getByRole("searchbox", { name: "搜索当前表格" })).toHaveValue("train-a");
+    expect(screen.getByRole("row", { name: "查看 train-a 详情" })).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: "查看 train-b 详情" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "train-a 详情" })).toBeInTheDocument();
+  });
+
+  it("keeps table state and the detail stack in browser history", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "workloads" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索当前表格" }), { target: { value: "train" } });
+    expect(new URLSearchParams(window.location.search).get("q.workloads")).toBe("train");
+
+    fireEvent.click(screen.getByRole("row", { name: "查看 train-a 详情" }));
+    fireEvent.click(screen.getByRole("button", { name: /group-a/ }));
+    expect(new URLSearchParams(window.location.search).getAll("detail")).toEqual(["workload:workload-a", "group:group-a"]);
+    window.history.back();
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "train-a 详情" })).toBeInTheDocument());
+    expect(new URLSearchParams(window.location.search).getAll("detail")).toEqual(["workload:workload-a"]);
+  });
+
+  it("clears navigation context and returns to the minimal URL from the brand icon", async () => {
+    window.history.replaceState({}, "", "/?view=workloads&q.workloads=train-a&f.workloads.group=group-a&s.workloads.total_gpu=desc&range=7d&detail=workload:workload-a");
+    render(<App />);
+
+    await screen.findByText("Queue Observatory");
+    expect(screen.getByRole("dialog", { name: "train-a 详情" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "清除上下文并返回总览" }));
+
+    expect(window.location.pathname).toBe("/");
+    expect(window.location.search).toBe("");
+    expect(window.location.hash).toBe("");
+    expect(screen.getByRole("button", { name: "overview" })).toHaveClass("active");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "24 小时" })).toHaveClass("active");
   });
   afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -164,12 +208,12 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
 
-    fireEvent.click(screen.getByLabelText("查看 v0.5.0 更新内容"));
+    fireEvent.click(screen.getByLabelText("查看 v1.0.0 更新内容"));
 
     expect(screen.getByText("本版更新")).toBeInTheDocument();
-    expect(screen.getByText(/集群运行总览/)).toBeInTheDocument();
-    expect(screen.getByText(/全局搜索/)).toBeInTheDocument();
-    expect(screen.getByText(/明暗主题/)).toBeInTheDocument();
+    expect(screen.getByText(/可分享深链接/)).toBeInTheDocument();
+    expect(screen.getByText(/可从节点.*调度模拟/)).toBeInTheDocument();
+    expect(screen.getByText(/SQLite/)).toBeInTheDocument();
   });
 
   it("provides an operational overview and global entity search", async () => {
@@ -179,7 +223,12 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByRole("heading", { name: "集群运行总览" })).toBeInTheDocument();
     expect(screen.getByText("较上一快照 +2")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /已分配 GPU趋势/ })).toBeInTheDocument();
+    expect(screen.getByLabelText("已分配 GPU时间轴").querySelectorAll("time")).toHaveLength(2);
     expect(screen.getByText("节点健康")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "7 天" }));
+    expect(new URLSearchParams(window.location.search).get("range")).toBe("7d");
+    expect(screen.getByRole("button", { name: "7 天" })).toHaveClass("active");
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes("/history?limit=800&since="))).toBe(true));
 
     const search = screen.getByLabelText("全局搜索");
     fireEvent.focus(search);
@@ -202,7 +251,7 @@ describe("Clusterx monitor dashboard", () => {
   it("filters enum columns, sorts numeric columns and resets missing filter values", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
-    expect(screen.getByText("v0.5.0")).toBeInTheDocument();
+    expect(screen.getByText("v1.0.0")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);
@@ -435,13 +484,13 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: /train-a/ }));
     expect(screen.getByRole("heading", { name: "train-a" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "返回上一详情" }));
-    expect(screen.getByRole("heading", { name: "group-a" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "group-a" })).toBeInTheDocument());
 
     latestSnapshot = { ...latestSnapshot, groups: latestSnapshot.groups.filter((group) => group.group !== "group-a"), snapshot_id: "snapshot-2" };
     emitSnapshot?.();
     await screen.findByText("该对象已不在最新快照中。");
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "group-a 详情" })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "group-a 详情" })).not.toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "alerts" }));
     fireEvent.click(screen.getByRole("row", { name: "查看 workload-b 详情" }));
@@ -552,6 +601,27 @@ describe("Clusterx monitor dashboard", () => {
     expect(payload.filters.exclude_users).toEqual(["bob"]);
     expect(payload.filters.violation_categories).toEqual(["quota"]);
     expect(payload.filters.violation_codes).toEqual(["quota.gpu"]);
+  });
+
+  it("enters an editable exact-node simulation from problem details", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "nodes" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看 node-a 详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "进入调度模拟" }));
+
+    expect(screen.getByRole("button", { name: "planner" })).toHaveClass("active");
+    expect(screen.getByText("问题上下文").closest(".planner-context")).toHaveTextContent("指定目标节点：node-a");
+    expect(screen.getByLabelText("节点数")).toHaveValue(1);
+    expect(screen.getByLabelText("每节点 GPU")).toHaveValue(8);
+    expect(new URLSearchParams(window.location.search).getAll("plan.target")).toEqual(["node-a"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "计算方案" }));
+    await screen.findByRole("button", { name: /min-gpu #1/ });
+    const calls = vi.mocked(fetch).mock.calls.filter(([input, init]) => String(input).endsWith("/plans") && init?.method === "POST");
+    const payload = JSON.parse(String(calls.at(-1)?.[1]?.body));
+    expect(payload.target_nodes).toEqual(["node-a"]);
+    expect(payload.target).toEqual({ nodes: 1, gpus_per_node: 8, cpus_per_node: 112, memory_per_node_gib: 1920 });
   });
 
   it("filters array-valued finding facets and renders finding details", async () => {

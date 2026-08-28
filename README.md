@@ -1,7 +1,7 @@
 # Clusterx Manage Jobs Skill with Monitor
 
 用于安全管理 PT/SSP 集群 Clusterx 训练任务，并提供新增的只读队列监控、
-资源策略检查和调度模拟。当前版本为 `0.5.0`，已验证 Clusterx `2026.8.19`；
+资源策略检查和调度模拟。当前版本为 `1.0.0`，已验证 Clusterx `2026.8.19`；
 其他版本以安装后的动态帮助为准。
 
 原有任务生命周期能力保持不变：配置检查、提交预览与创建、任务/节点查询、
@@ -12,7 +12,8 @@
 
 ```text
 Clusterx SDK → clusterx-monitor → immutable snapshots → Web / Skill CLI
-                                             └──────→ CP-SAT scheduling simulator
+                       │                     └──────→ CP-SAT scheduling simulator
+                       └──── aggregate trends ─────→ bounded local SQLite
 ```
 
 - `src/clusterx_monitor`：集中采集、策略、缓存、API 和求解器。
@@ -88,6 +89,8 @@ clusterx-monitor serve \
   --policy-config config/resource-policy.local.json \
   --group-config config/groups.local.yaml \
   --auth-config config/admin.local.yaml \
+  --history-db ~/.clusterx-monitor/history.sqlite3 \
+  --history-retention-days 30 \
   --host 127.0.0.1 \
   --port 8765
 ```
@@ -155,11 +158,19 @@ Running `trainingJob` 的详情向所有 Monitor 访问者提供实时日志预�
 每 5 分钟刷新；该缓存只驻留内存，重启后立即重建，不使用数据库。历史查询失败
 不会阻止快照和 5 分钟遥测发布，但会产生结构化遥测告警。
 
-Web 控制台提供新增的运行总览、全局实体搜索、明暗主题、表格文本搜索、列管理、
-密度切换和当前视图 CSV 导出。调度模拟器作为独立导航页面呈现，原有请求与结果
-语义不变。完整快照仍只在内存中保留 5 份；服务另保留最多 2880 个轻量历史指标点，
-用于总览趋势与相邻快照变化量，不保存 Workload、成员或日志正文，也不写入磁盘。
-`/api/v1/history`、`/api/v1/snapshots` 和 `/api/v1/snapshots/compare` 均为新增只读接口。
+Web 控制台提供运行总览、全局实体搜索、明暗主题、表格文本搜索、列管理、密度切换
+和当前视图 CSV 导出。页签、查询、筛选、排序、趋势区间与多层详情写入 URL，可复制
+当前视图并使用浏览器前进/后退恢复上下文。节点、Workload、用户、分组和告警详情
+均可进入带来源说明的可编辑调度模拟；指定节点由后端 `target_nodes` 精确约束。
+
+完整快照仍只在内存中保留 5 份；趋势指标默认写入权限受限的本地 SQLite，采用 WAL，
+只保存容量、Pending、遥测、告警计数和节点分类等聚合字段，不保存 Workload、成员或
+日志正文。`--history-retention-days`、`--history-max-points` 和
+`--history-max-db-mib` 分别限制时间、记录数和数据库空间；默认值为 30 天、100000 点
+和 256 MiB，也可使用同名 `CLUSTERX_MONITOR_HISTORY_*` 环境变量。查询会按区间自动
+降采样，Web 支持 1 小时、6 小时、24 小时、7 天、30 天和全部历史。SQLite 失败只会
+使趋势降级到内存，不阻止实时快照发布。`/api/v1/history`、`/api/v1/snapshots` 和
+`/api/v1/snapshots/compare` 都是只读接口。
 
 管理员资源策略支持常用字段表单和完整 JSON 两种编辑方式，并在保存前展示结构化
 差异。配置页只展示不含配置正文的审计记录；已有 `.bak` 可通过显式确认回滚，回滚

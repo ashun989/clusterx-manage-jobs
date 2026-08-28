@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -38,7 +39,7 @@ from clusterx_monitor.auth import AdminAuth, initialize_auth_config
 from clusterx_monitor.models import PlanRequest, PolicyConfig
 from clusterx_monitor.planner import solve_plan
 from clusterx_monitor.policy import PolicyManager, apply_policy, load_policy
-from clusterx_monitor.store import PlanCache, SnapshotStore
+from clusterx_monitor.store import PlanCache, SnapshotStore, SQLiteHistoryStore
 
 
 class AdminAuthTests(unittest.TestCase):
@@ -735,6 +736,39 @@ class PlannerTests(unittest.TestCase):
         })
         self.assertEqual(result["optimality"], "not-needed")
 
+    def test_exact_target_node_restricts_the_solution(self):
+        evaluated = apply_policy(snapshot(
+            [node("n1", 1), node("n2", 1)],
+            [
+                workload("a", "u1", "trainingJob", [placement("n1", 1)]),
+                workload("b", "u2", "trainingJob", [placement("n2", 1)]),
+            ],
+        ), self.policy)
+        result = solve_plan(evaluated, {
+            "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
+            "target_nodes": ["n2"], "strategies": ["min-gpu"],
+            "candidate_scope": "full", "filters": {},
+        })
+        self.assertEqual(result["plans"][0]["target_nodes"], ["n2"])
+        self.assertEqual(result["plans"][0]["workloads"], ["b"])
+        self.assertEqual(result["requested_target_nodes"], ["n2"])
+
+    def test_exact_target_node_reports_unavailable_and_validates_count(self):
+        evaluated = apply_policy(snapshot([node("n1", 1)], [
+            workload("a", "u", "trainingJob", [placement("n1", 1)]),
+        ]), self.policy)
+        result = solve_plan(evaluated, {
+            "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
+            "target_nodes": ["missing"], "strategies": ["min-gpu"], "filters": {},
+        })
+        self.assertEqual(result["plans"], [])
+        self.assertEqual(result["no_plan_reason"], "target-node-unavailable")
+        with self.assertRaises(ValueError):
+            PlanRequest.model_validate({
+                "snapshot_id": "s1", "target": {"nodes": 2, "gpus_per_node": 8},
+                "target_nodes": ["n1"],
+            })
+
     def test_planner_never_counts_an_unavailable_node_as_schedulable(self):
         offline = node("offline", 0)
         offline["state"] = "NOT_READY"
@@ -1194,6 +1228,52 @@ class StoreAndTelemetryTests(unittest.TestCase):
         comparison = store.compare("history-2", "history-3")
         self.assertEqual(comparison["deltas"]["allocated_gpu"], 1)
         self.assertEqual(comparison["deltas"]["pending_workloads"], 1)
+
+    def test_sqlite_history_persists_deduplicates_bounds_and_downsamples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            persistent = SQLiteHistoryStore(path, retention_days=1, max_points=5, max_db_mib=8)
+            store = SnapshotStore(capacity=2, persistent_history=persistent)
+            now = datetime.now(timezone.utc)
+            for index in range(7):
+                store.publish({
+                    "snapshot_id": f"sql-{index}",
+                    "generated_at": (now + timedelta(seconds=index * 10)).isoformat(),
+                    "capacity": {"allocated_gpu": index, "bound_gpu": 8, "free_gpu": 8 - index},
+                    "pending_workloads": [{}] * index,
+                    "pending_pressure": {"eligible_jobs": index},
+                    "telemetry": {"gpu_compute_util_avg_pct": index * 10},
+                    "alerts": [{"severity": "error"}] if index % 2 else [],
+                    "nodes": [{"classification": "fragmented"}] * index,
+                    "workloads": [{"workload_id": "private-workload"}],
+                })
+            raw = store.history(limit=20)
+            self.assertEqual(raw["storage"], "sqlite")
+            self.assertEqual(len(raw["points"]), 5)
+            self.assertEqual(raw["points"][0]["snapshot_id"], "sql-2")
+            self.assertEqual(raw["points"][-1]["node_classifications"], {"fragmented": 6})
+
+            replacement = {
+                "snapshot_id": "sql-6", "generated_at": (now + timedelta(seconds=60)).isoformat(),
+                "capacity": {"allocated_gpu": 99}, "pending_workloads": [],
+                "pending_pressure": {}, "telemetry": {}, "alerts": [], "nodes": [], "workloads": [],
+            }
+            store.publish(replacement)
+            restarted = SQLiteHistoryStore(path, retention_days=1, max_points=5, max_db_mib=8)
+            self.assertEqual(restarted.history(limit=20)["points"][-1]["allocated_gpu"], 99)
+            sampled = restarted.history(
+                since=(now - timedelta(seconds=1)).isoformat(),
+                until=(now + timedelta(minutes=2)).isoformat(), resolution_seconds=60,
+            )
+            self.assertLessEqual(len(sampled["points"]), 2)
+            self.assertEqual(sampled["resolution_seconds"], 60)
+            connection = sqlite3.connect(path)
+            try:
+                tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            finally:
+                connection.close()
+            self.assertNotIn("workloads", tables)
+            self.assertNotIn("users", tables)
 
     def test_plan_cache_returns_copy(self):
         cache = PlanCache(capacity=1)
