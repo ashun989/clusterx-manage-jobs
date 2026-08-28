@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { alertIdentity } from "./DetailDrawer";
 import { statusClass } from "./Table";
 import type { DetailRef, HistoryPoint, HistoryResponse, Snapshot, Workload } from "./types";
@@ -36,34 +37,75 @@ function axisLabel(value: string, spanMs: number) {
   return date.toLocaleDateString([], { year: "2-digit", month: "numeric", day: "numeric" });
 }
 
-function Sparkline({ points, field, label }: { points: HistoryPoint[]; field: keyof HistoryPoint; label: string }) {
-  const samples = points.flatMap((point) => typeof point[field] === "number" ? [{ value: point[field] as number, generatedAt: point.generated_at }] : []);
-  if (samples.length < 2) return <div className="sparkline-empty">积累两个快照后显示趋势</div>;
+const trendNumber = (value: unknown) => typeof value === "number" ? number(Math.round(value * 10) / 10) : "—";
+
+function Sparkline({ points, field, label, activeSnapshotId, onActivate }: {
+  points: HistoryPoint[];
+  field: keyof HistoryPoint;
+  label: string;
+  activeSnapshotId: string | null;
+  onActivate: (snapshotId: string) => void;
+}) {
+  const samples = points.flatMap((point, pointIndex) => typeof point[field] === "number" ? [{ value: point[field] as number, pointIndex }] : []);
+  const hasTrend = samples.length >= 2;
   const values = samples.map((sample) => sample.value);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const min = hasTrend ? Math.min(...values) : 0;
+  const max = hasTrend ? Math.max(...values) : 0;
   const flat = max === min;
   const range = max - min || 1;
-  const path = values.map((value, index) => `${index ? "L" : "M"} ${index / (values.length - 1) * 100} ${flat ? 20 : 36 - (value - min) / range * 30}`).join(" ");
-  const latest = Math.round(Number(values.at(-1)) * 10) / 10;
-  const startedAt = new Date(samples[0].generatedAt).getTime();
-  const endedAt = new Date(samples.at(-1)?.generatedAt ?? "").getTime();
+  const xAt = (index: number) => points.length < 2 ? 0 : index / (points.length - 1) * 100;
+  const yAt = (value: number) => flat ? 20 : 36 - (value - min) / range * 30;
+  const path = samples.map((sample, index) => `${index ? "L" : "M"} ${xAt(sample.pointIndex)} ${yAt(sample.value)}`).join(" ");
+  const areaPath = hasTrend ? `${path} L ${xAt(samples.at(-1)!.pointIndex)} 39 L ${xAt(samples[0].pointIndex)} 39 Z` : "";
+  const latest = values.at(-1);
+  const startedAt = new Date(points[0]?.generated_at ?? "").getTime();
+  const endedAt = new Date(points.at(-1)?.generated_at ?? "").getTime();
   const spanMs = Number.isFinite(startedAt) && Number.isFinite(endedAt) ? Math.max(0, endedAt - startedAt) : 0;
-  const axisSamples = samples.length > 2 ? [samples[0], samples[Math.floor((samples.length - 1) / 2)], samples.at(-1)!] : [samples[0], samples.at(-1)!];
-  return <div className="sparkline-chart">
-    <svg className="sparkline" viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label={`${label}趋势，当前 ${number(latest)}`}>
+  const axisSamples = points.length > 2 ? [points[0], points[Math.floor((points.length - 1) / 2)], points.at(-1)!] : [points[0], points.at(-1)!];
+  const activeIndex = activeSnapshotId == null ? -1 : points.findIndex((point) => point.snapshot_id === activeSnapshotId);
+  const activePoint = activeIndex >= 0 ? points[activeIndex] : null;
+  const activeValue = activePoint?.[field];
+  const activeX = activePoint ? xAt(activeIndex) : null;
+  const interactive = points.length >= 2;
+  const activateFromPointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (bounds.width <= 0) return;
+    const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+    onActivate(points[Math.round(ratio * (points.length - 1))].snapshot_id);
+  };
+  const activateFromKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!interactive || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const current = activeIndex >= 0 ? activeIndex : points.length - 1;
+    const next = event.key === "Home" ? 0 : event.key === "End" ? points.length - 1 : event.key === "ArrowLeft" ? Math.max(0, current - 1) : Math.min(points.length - 1, current + 1);
+    onActivate(points[next].snapshot_id);
+  };
+
+  return <div
+    className="sparkline-chart"
+    role="group"
+    aria-label={`${label}趋势交互`}
+    tabIndex={interactive ? 0 : undefined}
+    onPointerMove={interactive ? activateFromPointer : undefined}
+    onFocus={() => { if (interactive && !activePoint) onActivate(points.at(-1)!.snapshot_id); }}
+    onKeyDown={activateFromKeyboard}
+  >
+    <svg className="sparkline" viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label={`${label}趋势，当前 ${trendNumber(latest)}`}>
       <line className="sparkline-axis" x1="0" y1="39" x2="100" y2="39" />
-      <path className="sparkline-area" d={`${path} L 100 39 L 0 39 Z`} />
-      <path className="sparkline-line" d={path} />
+      {hasTrend && <path className="sparkline-area" d={areaPath} />}
+      {hasTrend && <path className="sparkline-line" d={path} />}
+      {activeX != null && <line className="sparkline-guide" x1={activeX} y1="1" x2={activeX} y2="39" />}
+      {activeX != null && typeof activeValue === "number" && <circle className="sparkline-point" cx={activeX} cy={yAt(activeValue)} r="1.8" />}
     </svg>
-    <div className={`sparkline-labels ${axisSamples.length === 2 ? "two" : ""}`} aria-label={`${label}时间轴`}>
-      {axisSamples.map((sample, index) => <time key={`${sample.generatedAt}:${index}`} dateTime={sample.generatedAt} title={new Date(sample.generatedAt).toLocaleString()}>{axisLabel(sample.generatedAt, spanMs)}</time>)}
-    </div>
+    {activeX != null && <output className={`sparkline-readout ${activeX > 50 ? "left" : "right"}`} aria-label={`${label}选中值`}><small>{label}</small><strong>{trendNumber(activeValue)}</strong></output>}
+    {hasTrend ? <div className={`sparkline-labels ${axisSamples.length === 2 ? "two" : ""}`} aria-label={`${label}时间轴`}>
+      {axisSamples.map((sample, index) => <time key={`${sample.generated_at}:${index}`} dateTime={sample.generated_at} title={new Date(sample.generated_at).toLocaleString()}>{axisLabel(sample.generated_at, spanMs)}</time>)}
+    </div> : <div className="sparkline-empty">积累两个快照后显示趋势</div>}
   </div>;
 }
 
 function InsightList({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
-  return <section className="overview-panel"><header><h3>{title}</h3>{action}</header><div className="insight-list">{children}</div></section>;
+  return <section className="overview-panel"><header><h3>{title}</h3>{action}</header><div className="insight-list" role="region" aria-label={`${title}列表`} tabIndex={0}>{children}</div></section>;
 }
 
 export function Overview({ snapshot, history, open, navigate, range, onRange, historyRefreshing }: {
@@ -76,16 +118,26 @@ export function Overview({ snapshot, history, open, navigate, range, onRange, hi
   historyRefreshing: boolean;
 }) {
   const points = history?.points ?? [];
+  const [activeSnapshotId, setActiveSnapshotId] = useState<string | null>(null);
   const capacity = snapshot.capacity;
   const pending = [...(snapshot.pending_workloads ?? [])].sort((a, b) => Number(b.queue_age_seconds ?? 0) - Number(a.queue_age_seconds ?? 0));
   const lowUtilization = snapshot.workloads.filter((workload) => workload.finding_codes?.includes("utilization.low_gpu_activity"));
   const nodeCounts = snapshot.nodes.reduce<Record<string, number>>((result, node) => ({ ...result, [node.classification]: (result[node.classification] ?? 0) + 1 }), {});
-  const attentionNodes = snapshot.nodes.filter((node) => ["fragmented", "cpu-memory-blocked", "unavailable"].includes(node.classification)).slice(0, 5);
-  const severeAlerts = snapshot.alerts.filter((alert) => ["critical", "error", "warning"].includes(alert.severity)).slice(0, 5);
+  const attentionNodes = snapshot.nodes.filter((node) => ["fragmented", "cpu-memory-blocked", "unavailable"].includes(node.classification));
+  const severeAlerts = snapshot.alerts.filter((alert) => ["critical", "error", "warning"].includes(alert.severity));
   const openWorkload = (workload: Workload) => open({ kind: "workload", id: workload.workload_id, label: workload.workload_name });
   const ranges: Array<[TrendRange, string]> = [["1h", "1 小时"], ["6h", "6 小时"], ["24h", "24 小时"], ["7d", "7 天"], ["30d", "30 天"], ["all", "全部"]];
   const resolution = history?.resolution_seconds ?? 1;
   const resolutionLabel = resolution < 60 ? "原始点" : resolution < 3600 ? `${Math.round(resolution / 60)} 分钟聚合` : resolution < 86_400 ? `${Math.round(resolution / 3600)} 小时聚合` : `${Math.round(resolution / 86_400)} 天聚合`;
+  const activePoint = activeSnapshotId == null ? null : points.find((point) => point.snapshot_id === activeSnapshotId) ?? null;
+  const historySummary = `${history?.storage === "sqlite" ? "SQLite 历史" : "内存历史"} · ${number(points.length)} 个展示点 · ${resolutionLabel}${history?.retention_days ? ` · 最多保留 ${history.retention_days} 天` : ""}`;
+  const activeDate = activePoint ? new Date(activePoint.generated_at) : null;
+  const activeTime = activeDate && !Number.isNaN(activeDate.getTime()) ? activeDate.toLocaleString() : "—";
+
+  useEffect(() => setActiveSnapshotId(null), [range]);
+  useEffect(() => {
+    if (activeSnapshotId != null && !points.some((point) => point.snapshot_id === activeSnapshotId)) setActiveSnapshotId(null);
+  }, [activeSnapshotId, points]);
 
   return <div className="overview-page">
     <section className="overview-hero">
@@ -94,20 +146,20 @@ export function Overview({ snapshot, history, open, navigate, range, onRange, hi
     </section>
 
     <section className="trend-toolbar" aria-label="趋势时间范围">
-      <div>{ranges.map(([value, label]) => <button type="button" className={range === value ? "active" : ""} key={value} onClick={() => onRange(value)}>{label}</button>)}</div>
-      <small>{historyRefreshing ? "正在加载历史…" : `${history?.storage === "sqlite" ? "SQLite 历史" : "内存历史"} · ${number(points.length)} 个展示点 · ${resolutionLabel}${history?.retention_days ? ` · 最多保留 ${history.retention_days} 天` : ""}`}</small>
+      <div>{ranges.map(([value, label]) => <button type="button" className={range === value ? "active" : ""} key={value} onClick={() => { setActiveSnapshotId(null); onRange(value); }}>{label}</button>)}</div>
+      <small>{activePoint ? <><b>{resolution > 1 ? "聚合点截至" : "快照时间"} {activeTime}</b><span> · {historySummary}</span></> : historyRefreshing ? "正在加载历史…" : historySummary}</small>
     </section>
 
-    <section className="overview-metrics">
-      <article><span>已分配 GPU</span><strong>{number(capacity.allocated_gpu)}<small> / {number(capacity.bound_gpu)}</small></strong><Delta value={delta(points, "allocated_gpu")} aggregate={resolution > 1} /><Sparkline points={points} field="allocated_gpu" label="已分配 GPU" /></article>
-      <article><span>有效空闲 GPU</span><strong>{number(capacity.planning_eligible_free_gpu ?? capacity.free_gpu)}</strong><small className="metric-caption">原始空闲 {number(capacity.free_gpu)}</small><Sparkline points={points} field="free_gpu" label="空闲 GPU" /></article>
-      <article><span>Pending Workload</span><strong>{number(pending.length)}</strong><Delta value={delta(points, "pending_workloads")} aggregate={resolution > 1} /><Sparkline points={points} field="pending_workloads" label="Pending Workload" /></article>
-      <article><span>需关注告警</span><strong className={severeAlerts.length ? "attention" : "healthy"}>{number(severeAlerts.length)}</strong><small className="metric-caption">共 {number(snapshot.alerts.length)} 条告警</small><Sparkline points={points} field="alert_count" label="告警数" /></article>
+    <section className="overview-metrics" onPointerLeave={() => setActiveSnapshotId(null)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setActiveSnapshotId(null); }}>
+      <article><span>已分配 GPU</span><strong>{number(capacity.allocated_gpu)}<small> / {number(capacity.bound_gpu)}</small></strong><Delta value={delta(points, "allocated_gpu")} aggregate={resolution > 1} /><Sparkline points={points} field="allocated_gpu" label="已分配 GPU" activeSnapshotId={activeSnapshotId} onActivate={setActiveSnapshotId} /></article>
+      <article><span>有效空闲 GPU</span><strong>{number(capacity.planning_eligible_free_gpu ?? capacity.free_gpu)}</strong><small className="metric-caption">原始空闲 {number(capacity.free_gpu)}</small><Sparkline points={points} field="free_gpu" label="空闲 GPU" activeSnapshotId={activeSnapshotId} onActivate={setActiveSnapshotId} /></article>
+      <article><span>Pending Workload</span><strong>{number(pending.length)}</strong><Delta value={delta(points, "pending_workloads")} aggregate={resolution > 1} /><Sparkline points={points} field="pending_workloads" label="Pending Workload" activeSnapshotId={activeSnapshotId} onActivate={setActiveSnapshotId} /></article>
+      <article><span>需关注告警</span><strong className={severeAlerts.length ? "attention" : "healthy"}>{number(severeAlerts.length)}</strong><small className="metric-caption">共 {number(snapshot.alerts.length)} 条告警</small><Sparkline points={points} field="alert_count" label="告警数" activeSnapshotId={activeSnapshotId} onActivate={setActiveSnapshotId} /></article>
     </section>
 
     <section className="overview-grid">
       <InsightList title="排队焦点" action={<button type="button" onClick={() => navigate("workloads")}>查看全部</button>}>
-        {pending.slice(0, 5).map((workload) => <button type="button" key={workload.workload_id} onClick={() => openWorkload(workload)}><span><b>{workload.workload_name}</b><small>{workload.user} · {workload.group}</small></span><em><b>{queueAge(workload.queue_age_seconds)}</b><small>{number(workload.total_gpu)} GPU · {workload.priority ?? "无优先级"}</small></em></button>)}
+        {pending.map((workload) => <button type="button" key={workload.workload_id} onClick={() => openWorkload(workload)}><span><b>{workload.workload_name}</b><small>{workload.user} · {workload.group}</small></span><em><b>{queueAge(workload.queue_age_seconds)}</b><small>{number(workload.total_gpu)} GPU · {workload.priority ?? "无优先级"}</small></em></button>)}
         {!pending.length && <p className="overview-empty">当前没有 Pending Workload</p>}
       </InsightList>
 
@@ -118,7 +170,7 @@ export function Overview({ snapshot, history, open, navigate, range, onRange, hi
       </InsightList>
 
       <InsightList title="策略与利用率" action={<button type="button" onClick={() => navigate("workloads")}>Workload 视图</button>}>
-        {lowUtilization.slice(0, 5).map((workload) => <button type="button" key={workload.workload_id} onClick={() => openWorkload(workload)}><span><b>{workload.workload_name}</b><small>{workload.user} · 低 GPU 活跃度</small></span><em><b>{number(workload.telemetry.gpu_compute_util_avg_pct, "%")}</b><small>最近 5 分钟</small></em></button>)}
+        {lowUtilization.map((workload) => <button type="button" className="low-utilization-item" key={workload.workload_id} onClick={() => openWorkload(workload)}><span><b>{workload.workload_name}</b><small>{workload.user} · 低 GPU 活跃度</small></span><em className="low-utilization-readout" role="group" aria-label="GPU 利用率预览"><small>最近 {number(workload.historical_telemetry?.window_hours)} 小时 GPU 利用率</small><b>{number(workload.historical_telemetry?.gpu_compute_util_avg_pct, "%")}</b></em></button>)}
         {!lowUtilization.length && <p className="overview-empty">当前没有低利用率策略发现</p>}
       </InsightList>
 

@@ -398,6 +398,7 @@ tr.clickable:hover, tr.clickable:focus { background: var(--surface-hover); }
 .trend-toolbar button { padding: 6px 9px; border: 1px solid transparent; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; }
 .trend-toolbar button.active { border-color: var(--line-hover); color: var(--accent-strong); background: var(--accent-surface); }
 .trend-toolbar small { color: var(--muted); text-align: right; }
+.trend-toolbar small b { color: var(--text-soft); font-weight: 700; }
 .capacity-ring { --value: 0%; position: relative; display: grid; width: 108px; height: 108px; place-content: center; border-radius: 50%; background: conic-gradient(var(--accent) var(--value), color-mix(in srgb, var(--surface-raised) 70%, var(--muted)) 0); text-align: center; box-shadow: 0 12px 34px #0004; }
 .capacity-ring::before { position: absolute; inset: 9px; border-radius: 50%; background: var(--surface-raised); content: ""; }
 .capacity-ring strong, .capacity-ring small { position: relative; z-index: 1; }
@@ -413,11 +414,20 @@ tr.clickable:hover, tr.clickable:focus { background: var(--surface-hover); }
 .metric-delta, .metric-caption { position: relative; z-index: 1; display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
 .metric-delta.up { color: var(--warning); }
 .metric-delta.down { color: var(--success); }
-.sparkline-chart { position: absolute; right: 0; bottom: 0; left: 0; height: 76px; }
+.sparkline-chart { position: absolute; right: 0; bottom: 0; left: 0; height: 76px; outline: none; }
+.sparkline-chart[tabindex="0"] { cursor: crosshair; }
+.sparkline-chart:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
 .sparkline { display: block; width: 100%; height: 55px; overflow: visible; }
 .sparkline-axis { stroke: var(--line-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .sparkline-line { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .sparkline-area { fill: color-mix(in srgb, var(--accent) 13%, transparent); stroke: none; }
+.sparkline-guide { stroke: color-mix(in srgb, var(--accent) 72%, var(--text)); stroke-dasharray: 3 3; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.sparkline-point { fill: var(--surface-raised); stroke: var(--accent-strong); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.sparkline-readout { position: absolute; z-index: 2; top: 3px; display: grid; min-width: 58px; gap: 1px; padding: 4px 6px; border: 1px solid var(--line-hover); border-radius: 6px; color: var(--text); background: color-mix(in srgb, var(--surface-raised) 94%, transparent); box-shadow: 0 4px 14px #0003; pointer-events: none; }
+.sparkline-readout.left { left: 8px; }
+.sparkline-readout.right { right: 8px; }
+.sparkline-readout small { color: var(--muted); font-size: 8px; line-height: 1.1; }
+.sparkline-readout strong { font: 700 11px/1.2 ui-monospace, monospace; }
 .sparkline-labels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 2px 8px 0; color: var(--text-faint); font: 500 9px/1.2 ui-monospace, monospace; }
 .sparkline-labels.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .sparkline-labels time { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -429,11 +439,15 @@ tr.clickable:hover, tr.clickable:focus { background: var(--surface-hover); }
 .overview-panel > header { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 10px; }
 .overview-panel h3 { margin: 0; color: var(--text-soft); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
 .overview-panel > header button { padding: 3px; border: 0; color: var(--accent); background: none; font-size: 10px; cursor: pointer; }
-.insight-list { display: grid; gap: 5px; }
+.insight-list { display: grid; height: 280px; gap: 5px; align-content: start; padding-right: 4px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; outline: none; }
+.insight-list:focus-visible { border-radius: 6px; box-shadow: inset 0 0 0 2px var(--accent); }
 .insight-list > button { display: flex; justify-content: space-between; gap: 12px; align-items: center; min-width: 0; width: 100%; padding: 9px 10px; border: 1px solid transparent; border-radius: 8px; color: var(--text); background: color-mix(in srgb, var(--surface-raised) 68%, transparent); text-align: left; cursor: pointer; }
 .insight-list > button:hover { border-color: var(--line-strong); background: color-mix(in srgb, var(--accent) 8%, var(--surface-raised)); }
 .insight-list > button > span, .insight-list > button > em { display: grid; min-width: 0; gap: 2px; font-style: normal; }
 .insight-list > button > em { flex: 0 0 auto; text-align: right; }
+.insight-list > button > em.low-utilization-readout { min-width: 150px; gap: 3px; }
+.insight-list > button > em.low-utilization-readout > small { color: var(--accent-strong); }
+.insight-list > button > em.low-utilization-readout > b { font-size: 15px; }
 .insight-list > button b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .insight-list > button small { color: var(--muted); font-size: 10px; }
 .overview-empty { padding: 22px 8px; color: var(--muted); text-align: center; font-size: 11px; }
@@ -521,6 +535,8 @@ tr.clickable:hover, tr.clickable:focus { background: var(--surface-hover); }
   .trend-toolbar small { text-align: left; }
   .capacity-ring { display: none; }
   .overview-metrics { grid-template-columns: minmax(0, 1fr); }
+  .insight-list > button.low-utilization-item { align-items: flex-start; flex-direction: column; }
+  .insight-list > button > em.low-utilization-readout { width: 100%; text-align: left; }
   .guided-config fieldset > div { grid-template-columns: minmax(0, 1fr); }
   .admin-section-heading { display: grid; }
   .change-preview p { grid-template-columns: minmax(0, 1fr); }

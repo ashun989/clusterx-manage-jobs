@@ -3,7 +3,8 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { FreshnessBadge } from "./App";
-import type { PlanResult, PolicyFinding, PolicyResponse, Snapshot, Telemetry, Workload } from "./types";
+import { Overview } from "./Overview";
+import type { HistoryPoint, HistoryResponse, PlanResult, PolicyFinding, PolicyResponse, Snapshot, Telemetry, Workload } from "./types";
 
 const quotaFinding: PolicyFinding = {
   code: "quota.gpu", category: "quota", status: "violation", message: "group GPU usage exceeds quota",
@@ -243,6 +244,83 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.change(search, { target: { value: "node-b" } });
     fireEvent.click(await screen.findByRole("option", { name: /node-b/ }));
     expect(screen.getByRole("dialog", { name: "node-b 详情" })).toBeInTheDocument();
+  });
+
+  it("links all four overview trends to the nearest hovered history point", () => {
+    const points: HistoryPoint[] = [
+      { snapshot_id: "trend-0", generated_at: "2026-08-14T00:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 60, gpu_memory_util_avg_pct: 55, gpu_power_total_w: 3000, node_classifications: {} },
+      { snapshot_id: "trend-1", generated_at: "2026-08-14T00:30:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 11.25, free_gpu: null, pending_workloads: 1.25, pending_eligible_jobs: 0, alert_count: 1.75, critical_alert_count: 0.5, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: {} },
+      { snapshot_id: "trend-2", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: {} },
+    ];
+    const history: HistoryResponse = { points, retained_snapshots: 3, history_capacity: 2880, window_started_at: points[0].generated_at, newest_at: points[2].generated_at, storage: "sqlite", resolution_seconds: 300 };
+    const onRange = vi.fn();
+    const view = render(<Overview snapshot={structuredClone(baseSnapshot)} history={history} open={() => {}} navigate={() => {}} range="24h" onRange={onRange} historyRefreshing={false} />);
+    const chart = screen.getByLabelText("已分配 GPU趋势交互");
+    vi.spyOn(chart, "getBoundingClientRect").mockReturnValue({ left: 0, right: 100, width: 100, top: 0, bottom: 76, height: 76, x: 0, y: 0, toJSON: () => ({}) });
+
+    fireEvent.pointerMove(chart, { clientX: 50 });
+
+    expect(screen.getByLabelText("已分配 GPU选中值")).toHaveTextContent("11.3");
+    expect(screen.getByLabelText("空闲 GPU选中值")).toHaveTextContent("—");
+    expect(screen.getByLabelText("Pending Workload选中值")).toHaveTextContent("1.3");
+    expect(screen.getByLabelText("告警数选中值")).toHaveTextContent("1.8");
+    expect(view.container.querySelectorAll(".sparkline-guide")).toHaveLength(4);
+    expect(view.container.querySelectorAll(".sparkline-point")).toHaveLength(3);
+    expect(screen.getByText(/聚合点截至/)).toBeInTheDocument();
+    expect([...view.container.querySelectorAll(".sparkline-line")].every((path) => !path.getAttribute("d")?.includes("NaN"))).toBe(true);
+
+    fireEvent.pointerLeave(chart.closest(".overview-metrics")!);
+    expect(screen.queryByLabelText("已分配 GPU选中值")).not.toBeInTheDocument();
+
+    fireEvent.focus(chart);
+    expect(screen.getByLabelText("已分配 GPU选中值")).toHaveTextContent("10");
+    fireEvent.keyDown(chart, { key: "ArrowLeft" });
+    expect(screen.getByLabelText("已分配 GPU选中值")).toHaveTextContent("11.3");
+    fireEvent.keyDown(chart, { key: "Home" });
+    expect(screen.getByLabelText("已分配 GPU选中值")).toHaveTextContent("10");
+
+    fireEvent.click(screen.getByRole("button", { name: "7 天" }));
+    expect(onRange).toHaveBeenCalledWith("7d");
+    expect(screen.queryByLabelText("已分配 GPU选中值")).not.toBeInTheDocument();
+
+    fireEvent.focus(chart);
+    fireEvent.keyDown(chart, { key: "ArrowLeft" });
+    view.rerender(<Overview snapshot={structuredClone(baseSnapshot)} history={{ ...history, points: [points[0], points[2]] }} open={() => {}} navigate={() => {}} range="24h" onRange={onRange} historyRefreshing={false} />);
+    return waitFor(() => expect(screen.queryByLabelText("已分配 GPU选中值")).not.toBeInTheDocument());
+  });
+
+  it("keeps single-point overview trends non-interactive", () => {
+    const point: HistoryPoint = { snapshot_id: "trend-only", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 12, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: {} };
+    const history: HistoryResponse = { points: [point], retained_snapshots: 1, history_capacity: 2880, window_started_at: point.generated_at, newest_at: point.generated_at, resolution_seconds: 1 };
+    const view = render(<Overview snapshot={structuredClone(baseSnapshot)} history={history} open={() => {}} navigate={() => {}} range="24h" onRange={() => {}} historyRefreshing={false} />);
+
+    expect(screen.getAllByText("积累两个快照后显示趋势")).toHaveLength(4);
+    expect(screen.getByLabelText("已分配 GPU趋势交互")).not.toHaveAttribute("tabindex");
+    expect(view.container.querySelectorAll(".sparkline-guide")).toHaveLength(0);
+  });
+
+  it("renders complete scrollable insight lists and labels the utilization preview from its configured history window", () => {
+    const snapshot = structuredClone(baseSnapshot);
+    snapshot.workloads = Array.from({ length: 6 }, (_, index) => ({
+      ...structuredClone(trainA), workload_id: `low-${index}`, workload_name: `low-${index}`,
+      finding_codes: ["utilization.low_gpu_activity"], telemetry: telemetry(4, 44, 1000),
+      historical_telemetry: { window_hours: 36, fetched_at: "2026-08-14T01:00:00Z", collection_status: "available", evaluation_status: "evaluated", gpu_compute_util_avg_pct: 12, gpu_memory_util_avg_pct: 8, compute_sample_count: 100, memory_sample_count: 100 },
+    }));
+    snapshot.pending_workloads = Array.from({ length: 6 }, (_, index) => ({ ...structuredClone(trainA), workload_id: `pending-${index}`, workload_name: `pending-${index}`, queue_age_seconds: index * 60 }));
+    snapshot.nodes = Array.from({ length: 6 }, (_, index) => ({ ...structuredClone(baseSnapshot.nodes[0]), node: `attention-node-${index}`, id: `attention-node-${index}` }));
+    snapshot.alerts = Array.from({ length: 6 }, (_, index) => ({ ...structuredClone(baseSnapshot.alerts[0]), subject: `attention-alert-${index}` }));
+
+    render(<Overview snapshot={snapshot} history={null} open={() => {}} navigate={() => {}} range="24h" onRange={() => {}} historyRefreshing={false} />);
+
+    expect(screen.getByText("pending-5")).toBeInTheDocument();
+    expect(screen.getByText("attention-node-5")).toBeInTheDocument();
+    expect(screen.getByText("low-5")).toBeInTheDocument();
+    expect(screen.getByText("attention-alert-5")).toBeInTheDocument();
+    for (const label of ["排队焦点列表", "节点健康列表", "策略与利用率列表", "最新告警列表"]) expect(screen.getByRole("region", { name: label })).toHaveAttribute("tabindex", "0");
+    const lowItem = screen.getByText("low-0").closest("button")!;
+    expect(within(lowItem).getByRole("group", { name: "GPU 利用率预览" })).toHaveTextContent("最近 36 小时 GPU 利用率12%");
+    expect(lowItem).not.toHaveTextContent("显存");
+    expect(lowItem).not.toHaveTextContent("实时");
   });
 
   it("searches table text and lets operators hide columns", async () => {
