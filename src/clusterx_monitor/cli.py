@@ -37,7 +37,9 @@ def build_runtime(
     clusterx_config: str | Path,
     policy_config: str | Path,
     group_config: str | Path,
-    *, audit_log: str | Path | None = None,
+    *, audit_log: str | Path | None = None, history_db: str | Path | None = None,
+    history_retention_days: int = 30, history_max_points: int = 100_000,
+    history_max_db_mib: int = 256,
 ):
     config = _protected_config(clusterx_config)
     os.environ["CLUSTERX_CFG_PATH"] = str(config)
@@ -55,7 +57,11 @@ def build_runtime(
     policy = PolicyManager(
         policy_config, group_config, allow_unconfigured=True, audit_path=audit_log,
     )
-    return MonitorRuntime(ClusterCollector(cluster, str(queue), str(cluster_name)), policy)
+    return MonitorRuntime(
+        ClusterCollector(cluster, str(queue), str(cluster_name)), policy,
+        history_db=history_db, history_retention_days=history_retention_days,
+        history_max_points=history_max_points, history_max_db_mib=history_max_db_mib,
+    )
 
 
 def main() -> int:
@@ -74,6 +80,10 @@ def main() -> int:
     serve.add_argument("--group-config", required=True)
     serve.add_argument("--auth-config", required=True)
     serve.add_argument("--audit-log")
+    serve.add_argument("--history-db", default=os.environ.get("CLUSTERX_MONITOR_HISTORY_DB", "~/.clusterx-monitor/history.sqlite3"), help="SQLite trend database path")
+    serve.add_argument("--history-retention-days", type=int, default=int(os.environ.get("CLUSTERX_MONITOR_HISTORY_RETENTION_DAYS", "30")))
+    serve.add_argument("--history-max-points", type=int, default=int(os.environ.get("CLUSTERX_MONITOR_HISTORY_MAX_POINTS", "100000")))
+    serve.add_argument("--history-max-db-mib", type=int, default=int(os.environ.get("CLUSTERX_MONITOR_HISTORY_MAX_DB_MIB", "256")))
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument(
         "--allowed-host", action="append", default=[],
@@ -117,7 +127,10 @@ def main() -> int:
 
         runtime = build_runtime(
             args.clusterx_config, args.policy_config, args.group_config,
-            audit_log=args.audit_log,
+            audit_log=args.audit_log, history_db=args.history_db,
+            history_retention_days=args.history_retention_days,
+            history_max_points=args.history_max_points,
+            history_max_db_mib=args.history_max_db_mib,
         )
         auth = AdminAuth(args.auth_config, allow_missing=True)
         app = create_app(

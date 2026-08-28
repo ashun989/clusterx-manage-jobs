@@ -94,7 +94,7 @@ class MonitorApiTests(unittest.TestCase):
     def test_status_snapshot_policy_and_read_only_routes(self):
         client = TestClient(self.app)
         status_response = client.get("/api/v1/status")
-        self.assertEqual(status_response.json()["version"], "0.4.1")
+        self.assertEqual(status_response.json()["version"], "1.0.0")
         self.assertTrue(status_response.json()["snapshot"]["ready"])
         self.assertIn("default-src 'self'", status_response.headers["content-security-policy"])
         self.assertEqual(status_response.headers["x-content-type-options"], "nosniff")
@@ -133,6 +133,37 @@ class MonitorApiTests(unittest.TestCase):
         self.assertEqual(
             {path for path, spec in paths.items() if "put" in spec},
             {"/api/v1/admin/config/resource", "/api/v1/admin/config/groups"},
+        )
+
+    def test_snapshot_index_history_and_comparison_are_additive_and_read_only(self):
+        client = TestClient(self.app)
+        second = apply_policy(raw_snapshot(), self.policy.policy)
+        second["snapshot_id"] = "api-snapshot-2"
+        second["generated_at"] = datetime.now(timezone.utc).isoformat()
+        second["capacity"]["allocated_gpu"] += 1
+        second["alerts"].append({
+            "severity": "critical", "kind": "test", "subject": "capacity",
+            "message": "test alert",
+        })
+        self.runtime.snapshots.publish(second)
+
+        index = client.get("/api/v1/snapshots").json()["snapshots"]
+        self.assertEqual([item["snapshot_id"] for item in index], ["api-snapshot-2", "api-snapshot"])
+        history = client.get("/api/v1/history", params={"limit": 10}).json()
+        self.assertEqual(len(history["points"]), 2)
+        self.assertEqual(history["points"][-1]["critical_alert_count"], 1)
+        comparison = client.get(
+            "/api/v1/snapshots/compare",
+            params={"from_snapshot_id": "api-snapshot", "to_snapshot_id": "api-snapshot-2"},
+        ).json()
+        self.assertEqual(comparison["deltas"]["allocated_gpu"], 1)
+        self.assertEqual(comparison["deltas"]["alert_count"], 1)
+        self.assertEqual(
+            client.get(
+                "/api/v1/snapshots/compare",
+                params={"from_snapshot_id": "missing", "to_snapshot_id": "api-snapshot-2"},
+            ).status_code,
+            404,
         )
 
     def test_workload_logs_are_public_validated_and_fetched_only_on_request(self):
@@ -390,6 +421,8 @@ class MonitorApiTests(unittest.TestCase):
         )
         self.assertEqual(updated.status_code, 200, updated.text)
         self.assertEqual(json.loads(updated.json()["resource"]["text"])["refresh_seconds"], 31)
+        self.assertTrue(updated.json()["backups"]["resource"]["available"])
+        self.assertEqual(updated.json()["audit"][0]["action"], "update")
         self.assertEqual(self.policy.path.stat().st_mode & 0o777, 0o600)
         stale = client.put(
             "/api/v1/admin/config/resource",
@@ -397,6 +430,17 @@ class MonitorApiTests(unittest.TestCase):
             headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
         )
         self.assertEqual(stale.status_code, 409)
+        rolled_back = client.post(
+            "/api/v1/admin/config/resource/rollback",
+            json={
+                "revision": updated.json()["resource"]["revision"],
+                "backup_revision": updated.json()["backups"]["resource"]["revision"],
+            },
+            headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+        )
+        self.assertEqual(rolled_back.status_code, 200, rolled_back.text)
+        self.assertEqual(json.loads(rolled_back.json()["resource"]["text"])["refresh_seconds"], 30)
+        self.assertEqual(rolled_back.json()["audit"][0]["action"], "rollback")
         audit = self.policy.audit_path.read_text(encoding="utf-8")
         self.assertIn('"actor": "admin"', audit)
         self.assertNotIn("alice", audit)

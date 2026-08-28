@@ -222,6 +222,7 @@ def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan
     exclusions, excluded_node_ids = _exclusions(snapshot)
     common = {
         "requested_target": requested,
+        "requested_target_nodes": list(request.target_nodes),
         "resolved_target": resolved,
         "defaults_applied": defaults,
         "planning_profile": snapshot.get("planning_profile") or {},
@@ -232,8 +233,13 @@ def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan
         if item.get("state") in SCHEDULABLE_STATES
         and bool(item.get("planning_eligible", True))
     }
+    requested_node_ids = set(request.target_nodes)
+    if requested_node_ids and not requested_node_ids.issubset(nodes):
+        return PreparedPlan(None, common, (), "target-node-unavailable")
+    scoped_node_ids = requested_node_ids or set(nodes)
     already_free = tuple(sorted(
-        node_id for node_id, node in nodes.items() if _node_free(node).covers(target)
+        node_id for node_id, node in nodes.items()
+        if node_id in scoped_node_ids and _node_free(node).covers(target)
     ))
     required_new = max(0, request.target.nodes - len(already_free))
     if required_new == 0:
@@ -241,7 +247,12 @@ def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan
 
     candidate_node_ids = {
         node_id for node_id, node in nodes.items()
-        if node_id not in already_free and _eligible_node(node, request.candidate_scope, target)
+        if node_id in scoped_node_ids
+        and node_id not in already_free
+        and (
+            bool(request.target_nodes)
+            or _eligible_node(node, request.candidate_scope, target)
+        )
     }
     candidate_nodes = tuple(
         CandidateNode(node_id, target.deficit_from(_node_free(nodes[node_id])))

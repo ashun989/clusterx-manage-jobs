@@ -184,7 +184,7 @@ class SmokeProjectTests(unittest.TestCase):
         skill_root = ROOT / "skill" / "clusterx-manage-jobs"
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-        self.assertEqual(version, "0.4.1")
+        self.assertEqual(version, "1.0.0")
         self.assertIn(
             f'version = "{version}"',
             (ROOT / "pyproject.toml").read_text(encoding="utf-8"),

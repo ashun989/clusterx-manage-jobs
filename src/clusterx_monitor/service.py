@@ -27,14 +27,22 @@ from .models import PlanRequest
 from .planner import solve_plan
 from .planning.domain import MODEL_VERSION as PLANNER_MODEL_VERSION
 from .policy import ConfigConflictError, PolicyManager, apply_policy
-from .store import PlanCache, SnapshotStore
+from .store import PlanCache, SnapshotStore, SQLiteHistoryStore
 
 
 class MonitorRuntime:
-    def __init__(self, collector: ClusterCollector, policy: PolicyManager) -> None:
+    def __init__(
+        self, collector: ClusterCollector, policy: PolicyManager, *,
+        history_db: str | Path | None = None, history_retention_days: int = 30,
+        history_max_points: int = 100_000, history_max_db_mib: int = 256,
+    ) -> None:
         self.collector = collector
         self.policy = policy
-        self.snapshots = SnapshotStore(capacity=5)
+        persistent_history = SQLiteHistoryStore(
+            history_db, retention_days=history_retention_days,
+            max_points=history_max_points, max_db_mib=history_max_db_mib,
+        ) if history_db is not None else None
+        self.snapshots = SnapshotStore(capacity=5, persistent_history=persistent_history)
         self.plans = PlanCache(capacity=128)
         self.executor = ProcessPoolExecutor(max_workers=1)
         self.stop_event = asyncio.Event()
@@ -109,7 +117,7 @@ class MonitorRuntime:
                 self.config_changed.set()
                 return
             snapshot = self._apply_policy(raw, policy)
-            self.snapshots.publish(snapshot)
+            await asyncio.to_thread(self.snapshots.publish, snapshot)
             async with self.snapshot_event:
                 self.snapshot_event.notify_all()
         except RuntimeError as error:
@@ -125,7 +133,7 @@ class MonitorRuntime:
                     raw.setdefault("warnings", []).append(
                         "node allocation changed during the first collection; one retry was used"
                     )
-                    self.snapshots.publish(self._apply_policy(raw, policy))
+                    await asyncio.to_thread(self.snapshots.publish, self._apply_policy(raw, policy))
                     async with self.snapshot_event:
                         self.snapshot_event.notify_all()
                     return
@@ -201,6 +209,12 @@ class ConfigUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     revision: str = Field(min_length=1, max_length=128)
     text: str = Field(max_length=1_048_576)
+
+
+class ConfigRollbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: str = Field(min_length=1, max_length=128)
+    backup_revision: str = Field(min_length=1, max_length=128)
 
 
 class RequestBodyLimitMiddleware:
@@ -339,9 +353,38 @@ def create_app(
     async def latest_snapshot() -> dict[str, Any]:
         return snapshot_or_404()
 
+    @app.get("/api/v1/snapshots")
+    async def snapshot_index() -> dict[str, Any]:
+        return {"snapshots": runtime.snapshots.index()}
+
+    @app.get("/api/v1/snapshots/compare")
+    async def compare_snapshots(from_snapshot_id: str, to_snapshot_id: str) -> dict[str, Any]:
+        comparison = runtime.snapshots.compare(from_snapshot_id, to_snapshot_id)
+        if comparison is None:
+            raise HTTPException(status_code=404, detail="one or both snapshots are not retained")
+        return comparison
+
     @app.get("/api/v1/snapshots/{snapshot_id}")
     async def get_snapshot(snapshot_id: str) -> dict[str, Any]:
         return snapshot_or_404(snapshot_id)
+
+    @app.get("/api/v1/history")
+    async def history(
+        limit: int = Query(default=240, ge=2, le=800),
+        since: str | None = Query(default=None), until: str | None = Query(default=None),
+        resolution_seconds: int | None = Query(default=None, ge=1, le=604_800),
+    ) -> dict[str, Any]:
+        try:
+            if since:
+                datetime.fromisoformat(since.replace("Z", "+00:00"))
+            if until:
+                datetime.fromisoformat(until.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="since and until must be ISO-8601 timestamps") from error
+        return await asyncio.to_thread(
+            runtime.snapshots.history, limit, since=since, until=until,
+            resolution_seconds=resolution_seconds,
+        )
 
     @app.get("/api/v1/policy")
     async def policy() -> dict[str, Any]:
@@ -508,6 +551,35 @@ def create_app(
         session: AdminSession = Depends(require_admin_write),
     ) -> dict[str, Any]:
         return await update_config("groups", payload, session)
+
+    async def rollback_config(
+        kind: str, payload: ConfigRollbackRequest, session: AdminSession,
+    ) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(
+                runtime.policy.rollback_config, kind, payload.revision,
+                payload.backup_revision, actor=session.username,
+            )
+        except ConfigConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (OSError, ValueError, ValidationError, yaml.YAMLError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        runtime.request_config_refresh()
+        return result
+
+    @app.post("/api/v1/admin/config/resource/rollback")
+    async def rollback_resource_config(
+        payload: ConfigRollbackRequest,
+        session: AdminSession = Depends(require_admin_write),
+    ) -> dict[str, Any]:
+        return await rollback_config("resource", payload, session)
+
+    @app.post("/api/v1/admin/config/groups/rollback")
+    async def rollback_group_config(
+        payload: ConfigRollbackRequest,
+        session: AdminSession = Depends(require_admin_write),
+    ) -> dict[str, Any]:
+        return await rollback_config("groups", payload, session)
 
     @app.get("/api/v1/events")
     async def events() -> StreamingResponse:

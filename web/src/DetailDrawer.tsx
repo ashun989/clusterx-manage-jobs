@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { statusClass } from "./Table";
+import { useDialogFocus } from "./useDialogFocus";
 import type { Alert, DetailRef, GroupSummary, NodeSummary, PolicyFinding, Snapshot, Telemetry, UserSummary, Workload, WorkloadLogResponse } from "./types";
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
@@ -101,7 +102,7 @@ function NodeDetail({ node, snapshot, open }: { node: NodeSummary; snapshot: Sna
   const workloads = allWorkloads(snapshot).filter((item) => workloadIds.has(item.workload_id) || item.placements.some((placement) => placement.node === node.node));
   return <>
     <span className="eyebrow">Node · {node.state}</span><h2>{node.node}</h2><span className={statusClass(node.classification)}>{node.classification}</span><p className="muted">{node.host_ip || "无 Host IP"}</p>
-    {!node.planning_eligible && <p className="banner">该节点资源归属不一致，仅用于监控，不参与调度模拟。{node.planning_exclusion_reasons.join(", ")}</p>}
+    {!node.planning_eligible && <p className="banner">该节点资源归属不一致，仅用于监控，不参与调度模拟。{(node.planning_exclusion_reasons ?? []).join(", ")}</p>}
     <Metrics>
       <Metric label="GPU" value={`${number(node.allocated_gpu)} / ${number(node.total_gpu)}`} />
       <Metric label="CPU" value={`${number(node.allocated_cpu)} / ${number(node.total_cpu)}`} />
@@ -287,12 +288,22 @@ function resolveDetail(ref: DetailRef, snapshot: Snapshot) {
   return snapshot.alerts.find((item) => alertIdentity(item) === ref.id);
 }
 
-export function DetailDrawer({ stack, snapshot, open, back, close }: { stack: DetailRef[]; snapshot: Snapshot; open: (ref: DetailRef) => void; back: () => void; close: () => void }) {
+function resolvedLabel(ref: DetailRef, value: ReturnType<typeof resolveDetail>) {
+  if (!value) return ref.label;
+  if (ref.kind === "workload") return (value as Workload).workload_name;
+  if (ref.kind === "alert") return (value as Alert).subject;
+  return ref.id;
+}
+
+export function DetailDrawer({ stack, snapshot, open, back, close, planFrom }: { stack: DetailRef[]; snapshot: Snapshot; open: (ref: DetailRef) => void; back: () => void; close: () => void; planFrom: (ref: DetailRef) => void }) {
   const ref = stack.at(-1);
+  const drawer = useRef<HTMLElement>(null);
+  useDialogFocus(drawer, close, Boolean(ref));
   if (!ref) return null;
   const value = resolveDetail(ref, snapshot);
-  return <div className="drawer-backdrop" onClick={close}><aside className="drawer" aria-label={`${ref.label} 详情`} onClick={(event) => event.stopPropagation()}>
-    <div className="drawer-actions">{stack.length > 1 ? <button type="button" onClick={back} aria-label="返回上一详情">← 返回</button> : <span />}<button type="button" className="close" onClick={close} aria-label="关闭详情">×</button></div>
+  const label = resolvedLabel(ref, value);
+  return <div className="drawer-backdrop" onClick={close}><aside ref={drawer} className="drawer" role="dialog" aria-modal="true" aria-label={`${label} 详情`} onClick={(event) => event.stopPropagation()}>
+    <div className="drawer-actions"><div>{stack.length > 1 && <button type="button" onClick={back} aria-label="返回上一详情">← 返回</button>}{value && <button type="button" className="plan-from-detail" onClick={() => planFrom(ref)}>进入调度模拟</button>}</div><button type="button" className="close" onClick={close} aria-label="关闭详情">×</button></div>
     {!value ? <div className="missing-detail"><span className="eyebrow">{ref.kind}</span><h2>{ref.label}</h2><p>该对象已不在最新快照中。</p></div> : ref.kind === "group" ? <GroupDetail group={value as GroupSummary} snapshot={snapshot} open={open} /> : ref.kind === "user" ? <UserDetail user={value as UserSummary} snapshot={snapshot} open={open} /> : ref.kind === "node" ? <NodeDetail node={value as NodeSummary} snapshot={snapshot} open={open} /> : ref.kind === "workload" ? <WorkloadDetail workload={value as Workload} snapshotId={snapshot.snapshot_id} open={open} /> : <AlertDetail alert={value as Alert} snapshot={snapshot} open={open} />}
   </aside></div>;
 }
