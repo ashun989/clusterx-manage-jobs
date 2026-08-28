@@ -38,7 +38,7 @@ const detailKinds: DetailKind[] = ["group", "user", "node", "workload", "alert"]
 const nodeSortKeys: NodeSortKey[] = ["allocated_gpu", "effective_free_gpu", "stranded_gpu", "gpu_util", "gpu_mem", "power"];
 const trendRanges: TrendRange[] = ["1h", "6h", "24h", "7d", "30d", "all"];
 
-export const emptyNavigationState = (tab: MonitorTab = "groups"): NavigationState => ({
+export const emptyNavigationState = (tab: MonitorTab = "overview"): NavigationState => ({
   tab,
   details: [],
   tableStates: {
@@ -116,7 +116,7 @@ function readDetails(params: URLSearchParams): DetailRef[] {
   });
 }
 
-export function readNavigationState(fallbackTab: MonitorTab = "groups", previous?: NavigationState): NavigationState {
+export function readNavigationState(fallbackTab: MonitorTab = "overview", previous?: NavigationState): NavigationState {
   const params = new URLSearchParams(window.location.search);
   const requestedTab = params.get("view") as MonitorTab | null;
   const tab = requestedTab && monitorTabs.includes(requestedTab) ? requestedTab : fallbackTab;

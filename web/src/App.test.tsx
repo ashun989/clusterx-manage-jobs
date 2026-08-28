@@ -216,6 +216,14 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByText(/SQLite/)).toBeInTheDocument();
   });
 
+  it("opens the overview for a first visit without URL state", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+
+    expect(screen.getByRole("button", { name: "overview" })).toHaveClass("active");
+    expect(screen.getByRole("heading", { name: "集群运行总览" })).toBeInTheDocument();
+  });
+
   it("provides an operational overview and global entity search", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
@@ -240,6 +248,7 @@ describe("Clusterx monitor dashboard", () => {
   it("searches table text and lets operators hide columns", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "groups" }));
     fireEvent.change(screen.getByLabelText("搜索当前表格"), { target: { value: "group-b" } });
     expect(screen.getByText("1/2")).toBeInTheDocument();
     expect(screen.queryByRole("row", { name: "查看 group-a 详情" })).not.toBeInTheDocument();
@@ -251,6 +260,7 @@ describe("Clusterx monitor dashboard", () => {
   it("filters enum columns, sorts numeric columns and resets missing filter values", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "groups" }));
     expect(screen.getByText("v1.0.0")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
@@ -476,6 +486,7 @@ describe("Clusterx monitor dashboard", () => {
   it("opens all entity details, follows related objects, supports back and reports removed entities", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "groups" }));
     fireEvent.click(screen.getByRole("row", { name: "查看 group-a 详情" }));
     const groupDrawer = screen.getByRole("dialog", { name: "group-a 详情" });
     expect(groupDrawer).toBeInTheDocument();
@@ -627,6 +638,7 @@ describe("Clusterx monitor dashboard", () => {
   it("filters array-valued finding facets and renders finding details", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "groups" }));
     const categorySummary = screen.getByText("违规分类", { selector: "summary" });
     fireEvent.click(categorySummary);
     fireEvent.click(within(categorySummary.closest("details")!).getByRole("checkbox", { name: "quota" }));

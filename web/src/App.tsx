@@ -397,7 +397,7 @@ function RulesPage({ response, snapshot, error }: { response: PolicyResponse | n
 export default function App() {
   const fallbackTab = (() => {
     const saved = import.meta.env.MODE === "test" ? null : window.localStorage.getItem("clusterx-monitor:tab:v1");
-    return monitorTabs.includes(saved as Tab) ? saved as Tab : "groups";
+    return monitorTabs.includes(saved as Tab) ? saved as Tab : "overview";
   })();
   const [navigation, setNavigation] = useState<NavigationState>(() => readNavigationState(fallbackTab));
   const { snapshot, policy, serviceStatus, history, error, policyError, statusError, connection, refreshing, historyRefreshing, lastSuccessfulAt, refresh } = useMonitorData(navigation.trendRange);
