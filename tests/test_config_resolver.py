@@ -63,7 +63,7 @@ class ConfigResolverTests(unittest.TestCase):
                 cwd=nested, environ={"DEV_ENV": str(temp / "dev")}
             )
             self.assertEqual(selection.source, "project")
-            self.assertEqual(selection.path, local)
+            self.assertEqual(selection.path, local.resolve())
 
             local.unlink()
             selection = resolver.resolve_config(
@@ -150,7 +150,7 @@ class ConfigResolverTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertEqual(
                 output.read_text(encoding="utf-8").splitlines(),
-                [str(config), "log", "job-1"],
+                [str(config.resolve()), "log", "job-1"],
             )
 
     def test_wrapper_redacts_clusterx_output(self):

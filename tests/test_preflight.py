@@ -131,7 +131,7 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             payload = json.loads(run.stdout)
             self.assertEqual(payload["checks"]["config"]["source"], "project")
-            self.assertEqual(payload["checks"]["config"]["path"], str(local))
+            self.assertEqual(payload["checks"]["config"]["path"], str(local.resolve()))
 
 
 if __name__ == "__main__":
