@@ -1176,6 +1176,25 @@ class StoreAndTelemetryTests(unittest.TestCase):
         store.record_failure("failed")
         self.assertEqual(store.status(10)["last_error"], "failed")
 
+    def test_snapshot_store_keeps_lightweight_history_beyond_full_snapshots(self):
+        store = SnapshotStore(capacity=2, history_capacity=4)
+        for index in range(4):
+            store.publish({
+                "snapshot_id": f"history-{index}",
+                "generated_at": (datetime.now(timezone.utc) + timedelta(seconds=index)).isoformat(),
+                "capacity": {"allocated_gpu": index, "bound_gpu": 8, "free_gpu": 8 - index},
+                "pending_workloads": [{}] * index,
+                "pending_pressure": {"eligible_jobs": index},
+                "telemetry": {"gpu_compute_util_avg_pct": index * 10},
+                "alerts": [], "nodes": [], "workloads": [],
+            })
+        self.assertIsNone(store.get("history-0"))
+        self.assertEqual(len(store.history()["points"]), 4)
+        self.assertEqual(store.history()["points"][0]["allocated_gpu"], 0)
+        comparison = store.compare("history-2", "history-3")
+        self.assertEqual(comparison["deltas"]["allocated_gpu"], 1)
+        self.assertEqual(comparison["deltas"]["pending_workloads"], 1)
+
     def test_plan_cache_returns_copy(self):
         cache = PlanCache(capacity=1)
         cache.put("key", {"plans": []})

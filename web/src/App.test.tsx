@@ -138,7 +138,11 @@ describe("Clusterx monitor dashboard", () => {
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "0.4.1", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "0.5.0", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.includes("/history?")) return { ok: true, status: 200, json: async () => ({ retained_snapshots: 2, history_capacity: 2880, window_started_at: "2026-08-14T00:59:30Z", newest_at: "2026-08-14T01:00:00Z", points: [
+        { snapshot_id: "snapshot-0", generated_at: "2026-08-14T00:59:30Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: { fragmented: 1, "gpu-full": 1 } },
+        { snapshot_id: "snapshot-1", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 12, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: { fragmented: 1, "gpu-full": 1 } },
+      ] }) };
       const value = path.endsWith("/plans") && init?.method === "POST" ? planResult : path.endsWith("/policy") ? policyResponse : latestSnapshot;
       return { ok: true, status: 200, json: async () => structuredClone(value) };
     }));
@@ -160,18 +164,45 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
 
-    fireEvent.click(screen.getByLabelText("查看 v0.4.1 更新内容"));
+    fireEvent.click(screen.getByLabelText("查看 v0.5.0 更新内容"));
 
     expect(screen.getByText("本版更新")).toBeInTheDocument();
-    expect(screen.getByText(/资源创建时间和已排队时长/)).toBeInTheDocument();
-    expect(screen.getByText(/展示归一化优先级/)).toBeInTheDocument();
-    expect(screen.getByText(/重新排队不会重置起算点/)).toBeInTheDocument();
+    expect(screen.getByText(/集群运行总览/)).toBeInTheDocument();
+    expect(screen.getByText(/全局搜索/)).toBeInTheDocument();
+    expect(screen.getByText(/明暗主题/)).toBeInTheDocument();
+  });
+
+  it("provides an operational overview and global entity search", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "overview" }));
+    expect(screen.getByRole("heading", { name: "集群运行总览" })).toBeInTheDocument();
+    expect(screen.getByText("较上一快照 +2")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /已分配 GPU趋势/ })).toBeInTheDocument();
+    expect(screen.getByText("节点健康")).toBeInTheDocument();
+
+    const search = screen.getByLabelText("全局搜索");
+    fireEvent.focus(search);
+    fireEvent.change(search, { target: { value: "node-b" } });
+    fireEvent.click(await screen.findByRole("option", { name: /node-b/ }));
+    expect(screen.getByRole("dialog", { name: "node-b 详情" })).toBeInTheDocument();
+  });
+
+  it("searches table text and lets operators hide columns", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.change(screen.getByLabelText("搜索当前表格"), { target: { value: "group-b" } });
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: "查看 group-a 详情" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("列", { selector: "summary" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "CPU quota" }));
+    expect(screen.queryByRole("columnheader", { name: "CPU quota" })).not.toBeInTheDocument();
   });
 
   it("filters enum columns, sorts numeric columns and resets missing filter values", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
-    expect(screen.getByText("v0.4.1")).toBeInTheDocument();
+    expect(screen.getByText("v0.5.0")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);
@@ -221,7 +252,7 @@ describe("Clusterx monitor dashboard", () => {
     expect(pendingRow).toHaveTextContent("—");
 
     fireEvent.click(pendingRow);
-    const drawer = screen.getByRole("complementary", { name: "pending-a 详情" });
+    const drawer = screen.getByRole("dialog", { name: "pending-a 详情" });
     expect(drawer).toHaveTextContent("申请资源");
     expect(drawer).toHaveTextContent("优先级");
     expect(drawer).toHaveTextContent("HIGHEST");
@@ -249,7 +280,7 @@ describe("Clusterx monitor dashboard", () => {
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "workloads" }));
     fireEvent.click(screen.getByRole("row", { name: "查看 train-a 详情" }));
-    const drawer = screen.getByRole("complementary", { name: "train-a 详情" });
+    const drawer = screen.getByRole("dialog", { name: "train-a 详情" });
     const logCalls = () => vi.mocked(fetch).mock.calls.filter(([input]) => String(input).includes("/logs?"));
     expect(logCalls()).toHaveLength(0);
     expect(within(drawer).getByText("打开详情不会抓取日志；手动加载最近 200 行后在浏览器内分页。")).toBeInTheDocument();
@@ -290,7 +321,7 @@ describe("Clusterx monitor dashboard", () => {
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "workloads" }));
     fireEvent.click(screen.getByRole("row", { name: "查看 train-a 详情" }));
-    const drawer = screen.getByRole("complementary", { name: "train-a 详情" });
+    const drawer = screen.getByRole("dialog", { name: "train-a 详情" });
     const logCalls = () => vi.mocked(fetch).mock.calls.filter(([input]) => String(input).includes("/logs?"));
     fireEvent.change(within(drawer).getByLabelText("日志 Worker"), { target: { value: "train-a-1" } });
     fireEvent.click(within(drawer).getByRole("button", { name: "加载日志" }));
@@ -336,7 +367,7 @@ describe("Clusterx monitor dashboard", () => {
     };
     emitSnapshot?.();
     await waitFor(() => expect(within(drawer).getByText("Worker: train-a-0")).toBeInTheDocument());
-    expect(drawer.querySelector("pre.workload-log")).not.toBeInTheDocument();
+    await waitFor(() => expect(drawer.querySelector("pre.workload-log")).not.toBeInTheDocument());
     expect(logCalls()).toHaveLength(4);
   });
 
@@ -357,7 +388,7 @@ describe("Clusterx monitor dashboard", () => {
     expect(within(table).getByRole("row", { name: "查看 train-a 详情" })).toHaveTextContent("2（观测）");
 
     fireEvent.click(within(table).getByRole("row", { name: "查看 train-a 详情" }));
-    const drawer = screen.getByRole("complementary", { name: "train-a 详情" });
+    const drawer = screen.getByRole("dialog", { name: "train-a 详情" });
     expect(drawer).toHaveTextContent("时间可信度观测");
     expect(drawer).toHaveTextContent("时间来源AIR Available 状态");
     expect(drawer).toHaveTextContent("运行开始时间");
@@ -382,7 +413,7 @@ describe("Clusterx monitor dashboard", () => {
 
     for (const [name, url] of [["train-a", urls.trainingJob], ["dev-a", urls.aid], ["infer-a", urls.air]]) {
       fireEvent.click(screen.getByRole("row", { name: `查看 ${name} 详情` }));
-      const link = within(screen.getByRole("complementary", { name: `${name} 详情` })).getByRole("link", { name: "在官方控制台查看" });
+      const link = within(screen.getByRole("dialog", { name: `${name} 详情` })).getByRole("link", { name: "在官方控制台查看" });
       expect(link).toHaveAttribute("href", url);
       expect(link).toHaveAttribute("target", "_blank");
       expect(link).toHaveAttribute("rel", "noopener noreferrer");
@@ -390,14 +421,14 @@ describe("Clusterx monitor dashboard", () => {
     }
 
     fireEvent.click(screen.getByRole("row", { name: "查看 unknown-a 详情" }));
-    expect(within(screen.getByRole("complementary", { name: "unknown-a 详情" })).queryByRole("link", { name: "在官方控制台查看" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("dialog", { name: "unknown-a 详情" })).queryByRole("link", { name: "在官方控制台查看" })).not.toBeInTheDocument();
   });
 
   it("opens all entity details, follows related objects, supports back and reports removed entities", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("row", { name: "查看 group-a 详情" }));
-    const groupDrawer = screen.getByRole("complementary", { name: "group-a 详情" });
+    const groupDrawer = screen.getByRole("dialog", { name: "group-a 详情" });
     expect(groupDrawer).toBeInTheDocument();
     expect(groupDrawer).toHaveTextContent("56 / 不限");
     expect(groupDrawer).toHaveTextContent("960 / 不限");
@@ -410,22 +441,24 @@ describe("Clusterx monitor dashboard", () => {
     emitSnapshot?.();
     await screen.findByText("该对象已不在最新快照中。");
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("complementary", { name: "group-a 详情" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "group-a 详情" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "alerts" }));
     fireEvent.click(screen.getByRole("row", { name: "查看 workload-b 详情" }));
-    expect(within(screen.getByRole("complementary", { name: "workload-b 详情" })).getByText("CPU exceeds policy")).toBeInTheDocument();
+    expect(within(screen.getByRole("dialog", { name: "workload-b 详情" })).getByText("CPU exceeds policy")).toBeInTheDocument();
   });
 
   it("uses a full-width node workspace with filtering, numeric ordering and node details", async () => {
     latestSnapshot.nodes[0].telemetry = telemetry(123456, 99.999, 123456789);
+    latestSnapshot.nodes[0].planning_eligible = false;
+    latestSnapshot.nodes[0].planning_exclusion_reasons = undefined;
     const { container } = render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "nodes" }));
     const workspace = container.querySelector(".workspace")!;
     expect(workspace).not.toHaveClass("nodes-workspace");
     expect(workspace.children[0]).toHaveClass("main-panel");
-    expect(workspace.children[1]).toHaveClass("scheduler-panel");
+    expect(workspace.children).toHaveLength(1);
     const nodeCard = screen.getByRole("button", { name: "查看 node-a 详情" });
     expect(nodeCard).toBeInTheDocument();
     const telemetryCell = nodeCard.querySelector<HTMLElement>(".telemetry-cell")!;
@@ -446,12 +479,14 @@ describe("Clusterx monitor dashboard", () => {
     expect(cards[0]).toHaveTextContent("node-b");
 
     fireEvent.click(screen.getByRole("button", { name: "查看 node-a 详情" }));
-    expect(screen.getByRole("complementary", { name: "node-a 详情" })).toHaveTextContent("有效空闲 GPU");
+    expect(screen.getByRole("dialog", { name: "node-a 详情" })).toHaveTextContent("有效空闲 GPU");
+    expect(screen.getByRole("dialog", { name: "node-a 详情" })).toHaveTextContent("不参与调度模拟");
   });
 
   it("auto-expands the first plan, expands alternatives and opens plan workload details", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "planner" }));
     const nodeInput = screen.getByLabelText("节点数") as HTMLInputElement;
     const gpuInput = screen.getByLabelText("每节点 GPU") as HTMLInputElement;
     const cpuInput = screen.getByLabelText("CPU 总量（可覆盖）") as HTMLInputElement;
@@ -506,7 +541,7 @@ describe("Clusterx monitor dashboard", () => {
     expect(second).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("row", { name: "查看 train-b 详情" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("row", { name: "查看 train-b 详情" }));
-    expect(screen.getByRole("complementary", { name: "train-b 详情" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "train-b 详情" })).toBeInTheDocument();
     const planCall = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).endsWith("/plans") && init?.method === "POST");
     const payload = JSON.parse(String(planCall?.[1]?.body));
     expect(payload.target).toEqual({ nodes: 4, gpus_per_node: 4, cpus_per_node: 56, memory_per_node_gib: 960 });
@@ -527,14 +562,14 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(within(categorySummary.closest("details")!).getByRole("checkbox", { name: "quota" }));
     expect(screen.getByText("1/2")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("row", { name: "查看 group-b 详情" }));
-    expect(screen.getByRole("complementary", { name: "group-b 详情" })).toHaveTextContent("quota.gpu");
-    expect(screen.getByRole("complementary", { name: "group-b 详情" })).toHaveTextContent("观测值");
+    expect(screen.getByRole("dialog", { name: "group-b 详情" })).toHaveTextContent("quota.gpu");
+    expect(screen.getByRole("dialog", { name: "group-b 详情" })).toHaveTextContent("观测值");
   });
 
   it("renders dynamic status, rules, effective values and private group counts", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
-    fireEvent.click(screen.getByRole("button", { name: "规则说明" }));
+    fireEvent.click(screen.getByRole("button", { name: "rules" }));
     expect(screen.getByRole("heading", { name: "规则说明" })).toBeInTheDocument();
     expect(screen.getByText("utilization.low_gpu_activity")).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "CPU quota" })).toBeInTheDocument();

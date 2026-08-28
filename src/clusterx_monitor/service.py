@@ -203,6 +203,12 @@ class ConfigUpdateRequest(BaseModel):
     text: str = Field(max_length=1_048_576)
 
 
+class ConfigRollbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: str = Field(min_length=1, max_length=128)
+    backup_revision: str = Field(min_length=1, max_length=128)
+
+
 class RequestBodyLimitMiddleware:
     def __init__(self, app) -> None:
         self.app = app
@@ -339,9 +345,24 @@ def create_app(
     async def latest_snapshot() -> dict[str, Any]:
         return snapshot_or_404()
 
+    @app.get("/api/v1/snapshots")
+    async def snapshot_index() -> dict[str, Any]:
+        return {"snapshots": runtime.snapshots.index()}
+
+    @app.get("/api/v1/snapshots/compare")
+    async def compare_snapshots(from_snapshot_id: str, to_snapshot_id: str) -> dict[str, Any]:
+        comparison = runtime.snapshots.compare(from_snapshot_id, to_snapshot_id)
+        if comparison is None:
+            raise HTTPException(status_code=404, detail="one or both snapshots are not retained")
+        return comparison
+
     @app.get("/api/v1/snapshots/{snapshot_id}")
     async def get_snapshot(snapshot_id: str) -> dict[str, Any]:
         return snapshot_or_404(snapshot_id)
+
+    @app.get("/api/v1/history")
+    async def history(limit: int = Query(default=240, ge=2, le=2880)) -> dict[str, Any]:
+        return runtime.snapshots.history(limit)
 
     @app.get("/api/v1/policy")
     async def policy() -> dict[str, Any]:
@@ -508,6 +529,35 @@ def create_app(
         session: AdminSession = Depends(require_admin_write),
     ) -> dict[str, Any]:
         return await update_config("groups", payload, session)
+
+    async def rollback_config(
+        kind: str, payload: ConfigRollbackRequest, session: AdminSession,
+    ) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(
+                runtime.policy.rollback_config, kind, payload.revision,
+                payload.backup_revision, actor=session.username,
+            )
+        except ConfigConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (OSError, ValueError, ValidationError, yaml.YAMLError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        runtime.request_config_refresh()
+        return result
+
+    @app.post("/api/v1/admin/config/resource/rollback")
+    async def rollback_resource_config(
+        payload: ConfigRollbackRequest,
+        session: AdminSession = Depends(require_admin_write),
+    ) -> dict[str, Any]:
+        return await rollback_config("resource", payload, session)
+
+    @app.post("/api/v1/admin/config/groups/rollback")
+    async def rollback_group_config(
+        payload: ConfigRollbackRequest,
+        session: AdminSession = Depends(require_admin_write),
+    ) -> dict[str, Any]:
+        return await rollback_config("groups", payload, session)
 
     @app.get("/api/v1/events")
     async def events() -> StreamingResponse:

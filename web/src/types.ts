@@ -157,7 +157,7 @@ export type NodeSummary = {
   classification: string;
   telemetry: Telemetry;
   planning_eligible: boolean;
-  planning_exclusion_reasons: string[];
+  planning_exclusion_reasons?: string[];
 };
 
 export type Alert = {
@@ -225,6 +225,31 @@ export type Snapshot = {
   nodes: NodeSummary[];
   workloads: Workload[];
   pending_workloads?: Workload[];
+};
+
+export type HistoryPoint = {
+  snapshot_id: string;
+  generated_at: string;
+  bound_gpu: number | null;
+  planning_eligible_gpu: number | null;
+  allocated_gpu: number | null;
+  free_gpu: number | null;
+  pending_workloads: number;
+  pending_eligible_jobs: number;
+  alert_count: number;
+  critical_alert_count: number;
+  gpu_compute_util_avg_pct: number | null;
+  gpu_memory_util_avg_pct: number | null;
+  gpu_power_total_w: number | null;
+  node_classifications: Record<string, number>;
+};
+
+export type HistoryResponse = {
+  points: HistoryPoint[];
+  retained_snapshots: number;
+  history_capacity: number;
+  window_started_at: string | null;
+  newest_at: string | null;
 };
 
 export type PlanItem = {

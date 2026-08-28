@@ -304,6 +304,39 @@ class PolicyManager:
             "parse_error": parse_error,
         }
 
+    def _backup_info(self, kind: str) -> dict[str, Any]:
+        destination = self.path if kind == "resource" else self.group_path
+        backup = destination.with_name(destination.name + ".bak")
+        if not backup.is_file() or backup.is_symlink():
+            return {"available": False, "revision": None, "updated_at": None}
+        raw = backup.read_bytes()
+        return {
+            "available": True,
+            "revision": _bytes_revision(raw),
+            "updated_at": datetime.fromtimestamp(backup.stat().st_mtime, timezone.utc).isoformat(),
+        }
+
+    def audit_records(self, limit: int = 50) -> list[dict[str, Any]]:
+        path = self.audit_path
+        if not path.is_file() or path.is_symlink():
+            return []
+        with path.open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            start = max(0, size - 262_144)
+            stream.seek(start)
+            data = stream.read()
+        if start:
+            _, _, data = data.partition(b"\n")
+        records: list[dict[str, Any]] = []
+        for line in data.splitlines():
+            try:
+                value = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict):
+                records.append(value)
+        return records[-max(1, min(limit, 200)):][::-1]
+
     def admin_config(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -313,9 +346,17 @@ class PolicyManager:
                 "groups": self._admin_file("groups", self.group_path),
                 "validation_error": self.error,
                 "audit_error": self.audit_error,
+                "backups": {
+                    "resource": self._backup_info("resource"),
+                    "groups": self._backup_info("groups"),
+                },
+                "audit": self.audit_records(),
             }
 
-    def _audit(self, *, actor: str, kind: str, before: str, after: str) -> None:
+    def _audit(
+        self, *, actor: str, kind: str, before: str, after: str,
+        action: str = "update",
+    ) -> None:
         path = self.audit_path
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if path.is_symlink():
@@ -324,6 +365,7 @@ class PolicyManager:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "actor": actor,
             "kind": kind,
+            "action": action,
             "before_revision": before,
             "after_revision": after,
         }, ensure_ascii=False, sort_keys=True) + "\n"
@@ -356,6 +398,7 @@ class PolicyManager:
 
     def update_config(
         self, kind: str, text: str, expected_revision: str, *, actor: str,
+        action: str = "update",
     ) -> dict[str, Any]:
         if kind not in {"resource", "groups"}:
             raise ValueError("unsupported configuration kind")
@@ -408,11 +451,38 @@ class PolicyManager:
             if self._policy is None:
                 self.error = "setup requires both valid resource and group configurations"
             try:
-                self._audit(actor=actor, kind=kind, before=before, after=after)
+                self._audit(
+                    actor=actor, kind=kind, before=before, after=after,
+                    action=action,
+                )
                 self.audit_error = None
             except (OSError, ValueError) as error:
                 self.audit_error = str(error)
             return self.admin_config()
+
+    def rollback_config(
+        self, kind: str, expected_revision: str, backup_revision: str, *, actor: str,
+    ) -> dict[str, Any]:
+        if kind not in {"resource", "groups"}:
+            raise ValueError("unsupported configuration kind")
+        with self._lock:
+            destination = self.path if kind == "resource" else self.group_path
+            before = _bytes_revision(self._raw_file(destination))
+            if not hmac.compare_digest(str(expected_revision), before):
+                raise ConfigConflictError("configuration changed after it was loaded")
+            backup = destination.with_name(destination.name + ".bak")
+            if not backup.is_file() or backup.is_symlink():
+                raise ValueError("configuration backup is unavailable")
+            raw = backup.read_bytes()
+            if not hmac.compare_digest(str(backup_revision), _bytes_revision(raw)):
+                raise ConfigConflictError("configuration backup changed after it was loaded")
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ValueError("configuration backup is not valid UTF-8") from error
+            return self.update_config(
+                kind, text, expected_revision, actor=actor, action="rollback",
+            )
 
 
 def _sum(values: Iterable[Any]) -> float:

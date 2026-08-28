@@ -1,15 +1,13 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { AdminPanel } from "./AdminPanel";
+import { GlobalSearch } from "./GlobalSearch";
+import { Overview } from "./Overview";
 import { alertIdentity, DetailDrawer } from "./DetailDrawer";
 import { DataTable, emptyTableState, formatPower, statusClass, TelemetryCell } from "./Table";
 import type { ColumnDef, TableState } from "./Table";
-import type { Alert, DetailRef, GroupSummary, NodeSummary, PlanItem, PlanResult, PolicyResponse, ServiceStatus, Snapshot, UserSummary, Workload } from "./types";
-
-const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(`/api/v1${path}`, init);
-  if (!response.ok) throw new Error((await response.json()).detail ?? response.statusText);
-  return response.json() as Promise<T>;
-};
+import { api } from "./api";
+import { useMonitorData } from "./useMonitorData";
+import type { Alert, DetailRef, GroupSummary, NodeSummary, PlanItem, PlanResult, PolicyResponse, Snapshot, UserSummary, Workload } from "./types";
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
 const quota = (value: unknown) => value == null ? "不限" : number(value);
@@ -22,6 +20,12 @@ const dateTime = (value: string | null | undefined) => {
 };
 
 const releaseNotes: Record<string, string[]> = {
+  "0.5.0": [
+    "新增集群运行总览、轻量趋势和快照变化洞察。",
+    "支持全局搜索、表格搜索、列管理、密度切换和 CSV 导出。",
+    "调度模拟独立成页，管理员配置增加常用设置、差异预览、审计和备份回滚。",
+    "补齐明暗主题、移动端卡片表格与对话框焦点管理。",
+  ],
   "0.4.1": [
     "Pending Workload 展示资源创建时间和已排队时长。",
     "Workload 列表、详情和监控 CLI 展示归一化优先级。",
@@ -137,7 +141,7 @@ const alertColumns: ColumnDef<Alert>[] = [
 ];
 
 type TableTab = "groups" | "users" | "workloads" | "alerts";
-type Tab = TableTab | "nodes" | "rules";
+type Tab = TableTab | "overview" | "nodes" | "planner" | "rules";
 type NodeSortKey = "allocated_gpu" | "effective_free_gpu" | "stranded_gpu" | "gpu_util" | "gpu_mem" | "power";
 type NodeViewState = { classifications: string[]; states: string[]; sort: NodeSortKey | null; direction: "asc" | "desc" };
 
@@ -343,7 +347,7 @@ function PlanResults({ plan, currentSnapshotId, onWorkload }: { plan: PlanResult
 }
 
 function SchedulerPanel({ snapshot, plan, onResult, onWorkload }: { snapshot: Snapshot; plan: PlanResult | null; onResult: (result: PlanResult) => void; onWorkload: (workload: Workload) => void }) {
-  return <aside className="scheduler-panel"><div className="planner-column"><h2>调度模拟器</h2><p>固定使用当前缓存快照，不访问集群。</p><Planner snapshot={snapshot} onResult={onResult} /></div><PlanResults plan={plan} currentSnapshotId={snapshot.snapshot_id} onWorkload={onWorkload} /></aside>;
+  return <div className="scheduler-panel"><div className="planner-column"><span className="eyebrow">Read-only simulation</span><h2>调度模拟器</h2><p>固定使用当前缓存快照，不访问集群。</p><Planner snapshot={snapshot} onResult={onResult} /></div><PlanResults plan={plan} currentSnapshotId={snapshot.snapshot_id} onWorkload={onWorkload} /></div>;
 }
 
 const policyLabel = (value: string) => value.replaceAll("_", " ");
@@ -374,61 +378,46 @@ function RulesPage({ response, snapshot, error }: { response: PolicyResponse | n
 }
 
 export default function App() {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [error, setError] = useState("");
-  const [tab, setTab] = useState<Tab>("groups");
+  const { snapshot, policy, serviceStatus, history, error, policyError, statusError, connection, refreshing, lastSuccessfulAt, refresh } = useMonitorData();
+  const [tab, setTab] = useState<Tab>(() => {
+    const saved = import.meta.env.MODE === "test" ? null : window.localStorage.getItem("clusterx-monitor:tab:v1");
+    return (["overview", "groups", "users", "nodes", "workloads", "alerts", "planner", "rules"] as Tab[]).includes(saved as Tab) ? saved as Tab : "groups";
+  });
   const [details, setDetails] = useState<DetailRef[]>([]);
   const [plan, setPlan] = useState<PlanResult | null>(null);
-  const [policy, setPolicy] = useState<PolicyResponse | null>(null);
-  const [policyError, setPolicyError] = useState("");
-  const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
-  const [statusError, setStatusError] = useState("");
   const [adminOpen, setAdminOpen] = useState(false);
   const [tableStates, setTableStates] = useState<Record<TableTab, TableState>>({ groups: emptyTableState(), users: emptyTableState(), workloads: emptyTableState(), alerts: emptyTableState() });
   const [nodeState, setNodeState] = useState<NodeViewState>({ classifications: [], states: [], sort: null, direction: "desc" });
-  const refresh = () => {
-    api<Snapshot>("/snapshots/latest").then((value) => { setSnapshot(value); setError(""); }).catch((value) => setError(value instanceof Error ? value.message : String(value)));
-    api<PolicyResponse>("/policy").then((value) => { setPolicy(value); setPolicyError(""); }).catch((value) => setPolicyError(value instanceof Error ? value.message : String(value)));
-    api<ServiceStatus>("/status").then((value) => { setServiceStatus(value); setStatusError(""); }).catch((value) => setStatusError(value instanceof Error ? value.message : String(value)));
-  };
-  useEffect(() => {
-    refresh();
-    const stream = new EventSource("/api/v1/events");
-    stream.addEventListener("snapshot", refresh);
-    stream.onerror = () => setError("实时连接已断开，正在等待重连");
-    const timer = window.setInterval(refresh, 30_000);
-    return () => { stream.close(); window.clearInterval(timer); };
-  }, []);
-  useEffect(() => {
-    if (!details.length) return;
-    const escape = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") setDetails([]); };
-    window.addEventListener("keydown", escape);
-    return () => window.removeEventListener("keydown", escape);
-  }, [details.length]);
+  const [theme, setTheme] = useState<"dark" | "light">(() => import.meta.env.MODE !== "test" && window.localStorage.getItem("clusterx-monitor:theme:v1") === "light" ? "light" : "dark");
+  useEffect(() => { if (import.meta.env.MODE !== "test") window.localStorage.setItem("clusterx-monitor:tab:v1", tab); }, [tab]);
+  useEffect(() => { document.documentElement.dataset.theme = theme; if (import.meta.env.MODE !== "test") window.localStorage.setItem("clusterx-monitor:theme:v1", theme); }, [theme]);
   const workloads = useMemo(() => snapshot ? [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])] : [], [snapshot]);
   const open = (ref: DetailRef) => setDetails((current) => [...current, ref]);
   const updateTable = (name: TableTab, state: TableState) => setTableStates((current) => ({ ...current, [name]: state }));
   if (!snapshot) {
     const loadingMessages = [error, statusError, policyError, serviceStatus?.setup_required ? "服务处于 setup-required，请由管理员补全本地配置。" : "", serviceStatus?.snapshot.last_error, serviceStatus?.policy.error, serviceStatus?.policy.audit_error].filter(Boolean);
-    return <main className="loading"><Brand compact version={serviceStatus?.version} /><div className="pulse" /><p>{loadingMessages.join(" · ") || "正在等待第一份完整快照…"}</p><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button>{adminOpen && <AdminPanel close={() => setAdminOpen(false)} onConfigured={refresh} />}</main>;
+    return <main className="loading"><Brand compact version={serviceStatus?.version} /><div className="pulse" /><p>{loadingMessages.join(" · ") || "正在等待第一份完整快照…"}</p><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button>{adminOpen && <AdminPanel close={() => setAdminOpen(false)} onConfigured={() => { void refresh(); }} />}</main>;
   }
   const telemetryCoverage = snapshot.telemetry;
   const coverageMessages = [["compute", telemetryCoverage.compute_reported_gpu_count], ["memory", telemetryCoverage.memory_reported_gpu_count], ["power", telemetryCoverage.power_reported_gpu_count]].filter(([, count]) => Number(count) < telemetryCoverage.allocated_gpu_count).map(([metric, count]) => `${metric} 遥测覆盖 ${count}/${telemetryCoverage.allocated_gpu_count}`);
   const bannerMessages = [error, policyError, statusError, policy?.error, policy?.audit_error, serviceStatus?.policy.audit_error, serviceStatus?.snapshot.last_error, serviceStatus?.setup_required ? "服务处于 setup-required" : "", serviceStatus?.skipped_refreshes ? `已跳过 ${serviceStatus.skipped_refreshes} 次刷新` : "", snapshot.policy_config?.error, ...snapshot.warnings, ...coverageMessages, snapshot.historical_telemetry_status === "unavailable" ? "历史 GPU 遥测不可用，低利用率规则本轮未评估" : ""].filter(Boolean);
   const workloadRef = (workload: Workload): DetailRef => ({ kind: "workload", id: workload.workload_id, label: workload.workload_name });
+  const tabLabels: Record<Tab, string> = { overview: "总览", groups: "分组", users: "用户", nodes: "节点", workloads: "Workload", alerts: "告警", planner: "调度模拟", rules: "规则" };
   return <div className="app">
-    <header className="app-header"><div className="brand-block"><Brand version={serviceStatus?.version} /><span className="cluster-context">{snapshot.cluster} / {snapshot.queue}</span></div><div className="header-actions"><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
-    <section className="cards"><article><label>绑定容量</label><strong>{number(snapshot.capacity.bound_gpu)}</strong><small>{number(snapshot.capacity.planning_eligible_gpu)} planning eligible</small></article><article><label>已分配</label><strong>{number(snapshot.capacity.allocated_gpu)}</strong><small>{number(snapshot.capacity.free_gpu)} free</small></article><article><label>Pending pressure</label><strong className={statusClass(snapshot.pending_pressure.state)}>{String(snapshot.pending_pressure.state)}</strong><small>{number(snapshot.pending_pressure.eligible_jobs)} eligible jobs</small></article><article><label>GPU Power</label><strong>{power(snapshot.telemetry.gpu_power_total_w)}</strong><small>{snapshot.telemetry.power_reported_gpu_count}/{snapshot.telemetry.allocated_gpu_count} power covered · {snapshot.telemetry_status ?? "unknown"}</small></article></section>
+    <header className="app-header"><div className="brand-block"><Brand version={serviceStatus?.version} /><span className="cluster-context">{snapshot.cluster} / {snapshot.queue}</span></div><GlobalSearch snapshot={snapshot} open={open} /><div className="header-actions"><div className={`connection connection-${connection}`}><span />{{ connecting: "正在连接", live: "实时", reconnecting: "重连中", polling: "轮询" }[connection]}</div><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="icon-button" disabled={refreshing} onClick={() => { void refresh(); }} aria-label="立即刷新" title={lastSuccessfulAt ? `上次成功：${new Date(lastSuccessfulAt).toLocaleTimeString()}` : "立即刷新"}>{refreshing ? "…" : "↻"}</button><button type="button" className="icon-button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="切换明暗主题">{theme === "dark" ? "☼" : "☾"}</button><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
+    {tab !== "overview" && <section className="cards"><article><span>绑定容量</span><strong>{number(snapshot.capacity.bound_gpu)}</strong><small>{number(snapshot.capacity.planning_eligible_gpu)} 可参与调度</small></article><article><span>已分配</span><strong>{number(snapshot.capacity.allocated_gpu)}</strong><small>{number(snapshot.capacity.free_gpu)} 空闲</small></article><article><span>Pending 压力</span><strong className={statusClass(snapshot.pending_pressure.state)}>{String(snapshot.pending_pressure.state)}</strong><small>{number(snapshot.pending_pressure.eligible_jobs)} 个有效排队任务</small></article><article><span>GPU 功率</span><strong>{power(snapshot.telemetry.gpu_power_total_w)}</strong><small>{snapshot.telemetry.power_reported_gpu_count}/{snapshot.telemetry.allocated_gpu_count} 已覆盖 · {snapshot.telemetry_status ?? "unknown"}</small></article></section>}
     {bannerMessages.length > 0 && <div className="banner">{bannerMessages.join(" · ")}</div>}
-    <section className="workspace"><div className="main-panel"><nav>{(["groups", "users", "nodes", "workloads", "alerts", "rules"] as Tab[]).map((name) => <button className={tab === name ? "active" : ""} key={name} onClick={() => setTab(name)}>{name === "rules" ? "规则说明" : name}</button>)}</nav>
+    <section className="workspace"><div className="main-panel"><nav aria-label="Monitor 主导航">{(["overview", "groups", "users", "nodes", "workloads", "alerts", "planner", "rules"] as Tab[]).map((name) => <button aria-label={name} className={tab === name ? "active" : ""} key={name} onClick={() => setTab(name)}>{tabLabels[name]}{name === "alerts" && snapshot.alerts.length > 0 && <span className="nav-count">{snapshot.alerts.length}</span>}</button>)}</nav>
+      {tab === "overview" && <Overview snapshot={snapshot} history={history} open={open} navigate={setTab} />}
       {tab === "groups" && <DataTable rows={snapshot.groups} columns={groupColumns} state={tableStates.groups} onState={(state) => updateTable("groups", state)} rowKey={(row) => row.group} rowLabel={(row) => row.group} onRow={(row) => open({ kind: "group", id: row.group, label: row.group })} />}
       {tab === "users" && <DataTable rows={snapshot.users} columns={userColumns} state={tableStates.users} onState={(state) => updateTable("users", state)} rowKey={(row) => row.user} rowLabel={(row) => row.user} onRow={(row) => open({ kind: "user", id: row.user, label: row.user })} />}
       {tab === "nodes" && <NodeHeatmap nodes={snapshot.nodes} state={nodeState} onState={setNodeState} onNode={(row) => open({ kind: "node", id: row.node, label: row.node })} />}
       {tab === "workloads" && <DataTable rows={workloads} columns={workloadColumns} state={tableStates.workloads} onState={(state) => updateTable("workloads", state)} rowKey={(row) => row.workload_id} rowLabel={(row) => row.workload_name} onRow={(row) => open(workloadRef(row))} />}
       {tab === "alerts" && <DataTable rows={snapshot.alerts} columns={alertColumns} state={tableStates.alerts} onState={(state) => updateTable("alerts", state)} rowKey={(row, index) => `${alertIdentity(row)}:${index}`} rowLabel={(row) => row.subject} onRow={(row) => open({ kind: "alert", id: alertIdentity(row), label: row.subject })} />}
+      {tab === "planner" && <SchedulerPanel snapshot={snapshot} plan={plan} onResult={setPlan} onWorkload={(workload) => open(workloadRef(workload))} />}
       {tab === "rules" && <RulesPage response={policy} snapshot={snapshot} error={policyError} />}
-    </div><SchedulerPanel snapshot={snapshot} plan={plan} onResult={setPlan} onWorkload={(workload) => open(workloadRef(workload))} /></section>
+    </div></section>
     <DetailDrawer stack={details} snapshot={snapshot} open={open} back={() => setDetails((current) => current.slice(0, -1))} close={() => setDetails([])} />
-    {adminOpen && <AdminPanel close={() => setAdminOpen(false)} onConfigured={refresh} />}
+    {adminOpen && <AdminPanel close={() => setAdminOpen(false)} onConfigured={() => { void refresh(); }} />}
   </div>;
 }
