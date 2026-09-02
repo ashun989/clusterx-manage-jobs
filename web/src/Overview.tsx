@@ -1,8 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { alertIdentity } from "./DetailDrawer";
 import { statusClass } from "./Table";
 import type { DetailRef, HistoryPoint, HistoryResponse, Snapshot, Workload } from "./types";
-import type { TrendRange } from "./navigation";
+import {
+  DEFAULT_TREND_RANGE_SECONDS,
+  TREND_RANGE_MARKS,
+  TREND_SLIDER_STEPS,
+  formatTrendRange,
+  snapTrendSliderPosition,
+  sliderPositionFromTrendRange,
+  trendRangeFromSlider,
+  type TrendRange,
+} from "./navigation";
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
 const percent = (part: unknown, total: unknown) => Number(total) > 0 ? Math.round(Number(part) / Number(total) * 100) : 0;
@@ -46,6 +55,8 @@ function Sparkline({ points, field, label, activeSnapshotId, onActivate }: {
   activeSnapshotId: string | null;
   onActivate: (snapshotId: string) => void;
 }) {
+  // Keep missing values in the original point positions so every metric
+  // remains aligned to the same history timestamp.
   const samples = points.flatMap((point, pointIndex) => typeof point[field] === "number" ? [{ value: point[field] as number, pointIndex }] : []);
   const hasTrend = samples.length >= 2;
   const values = samples.map((sample) => sample.value);
@@ -108,6 +119,59 @@ function InsightList({ title, action, children }: { title: string; action?: Reac
   return <section className="overview-panel"><header><h3>{title}</h3>{action}</header><div className="insight-list" role="region" aria-label={`${title}列表`} tabIndex={0}>{children}</div></section>;
 }
 
+function TrendRangeSlider({ range, onRange }: { range: TrendRange; onRange: (range: TrendRange) => void }) {
+  const [position, setPosition] = useState(() => sliderPositionFromTrendRange(range));
+  const positionRef = useRef(position);
+  const timerRef = useRef<number | null>(null);
+  const pointerActiveRef = useRef(false);
+
+  useEffect(() => {
+    const next = sliderPositionFromTrendRange(range);
+    positionRef.current = next;
+    setPosition(next);
+  }, [range]);
+
+  useEffect(() => () => {
+    if (timerRef.current != null) window.clearTimeout(timerRef.current);
+  }, []);
+
+  const commit = (next: number, immediate = false, snap = false) => {
+    const bounded = snap ? snapTrendSliderPosition(next) : Math.min(TREND_SLIDER_STEPS, Math.max(0, Math.round(next)));
+    positionRef.current = bounded;
+    setPosition(bounded);
+    if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    const submit = () => onRange(trendRangeFromSlider(positionRef.current, snap));
+    if (immediate) submit();
+    else timerRef.current = window.setTimeout(() => { timerRef.current = null; submit(); }, 220);
+  };
+
+  const commitCurrent = (snap = false) => commit(positionRef.current, true, snap);
+  const previewRange = trendRangeFromSlider(position, pointerActiveRef.current);
+
+  return <div className="trend-range-control">
+    <div className="trend-range-heading"><label htmlFor="trend-range">趋势范围</label><output htmlFor="trend-range">{formatTrendRange(previewRange)}</output></div>
+    <input
+      id="trend-range"
+      type="range"
+      min={0}
+      max={TREND_SLIDER_STEPS}
+      step={1}
+      value={position}
+      aria-label="趋势时间范围"
+      aria-valuetext={formatTrendRange(previewRange)}
+      onChange={(event) => commit(Number(event.target.value), false, pointerActiveRef.current)}
+      onPointerDown={() => { pointerActiveRef.current = true; }}
+      onPointerUp={() => { pointerActiveRef.current = false; commitCurrent(true); }}
+      onBlur={() => { pointerActiveRef.current = false; commitCurrent(true); }}
+      onKeyDown={() => { pointerActiveRef.current = false; }}
+      onKeyUp={() => commitCurrent(false)}
+    />
+    <div className="trend-range-marks" aria-hidden="true">
+      {TREND_RANGE_MARKS.map((mark) => <span key={mark.seconds} style={{ left: `${sliderPositionFromTrendRange(mark.seconds) / TREND_SLIDER_STEPS * 100}%` }}>{mark.label}</span>)}
+    </div>
+  </div>;
+}
+
 export function Overview({ snapshot, history, open, navigate, range, onRange, historyRefreshing }: {
   snapshot: Snapshot;
   history: HistoryResponse | null;
@@ -126,7 +190,6 @@ export function Overview({ snapshot, history, open, navigate, range, onRange, hi
   const attentionNodes = snapshot.nodes.filter((node) => ["fragmented", "cpu-memory-blocked", "unavailable"].includes(node.classification));
   const severeAlerts = snapshot.alerts.filter((alert) => ["critical", "error", "warning"].includes(alert.severity));
   const openWorkload = (workload: Workload) => open({ kind: "workload", id: workload.workload_id, label: workload.workload_name });
-  const ranges: Array<[TrendRange, string]> = [["1h", "1 小时"], ["6h", "6 小时"], ["24h", "24 小时"], ["7d", "7 天"], ["30d", "30 天"], ["all", "全部"]];
   const resolution = history?.resolution_seconds ?? 1;
   const resolutionLabel = resolution < 60 ? "原始点" : resolution < 3600 ? `${Math.round(resolution / 60)} 分钟聚合` : resolution < 86_400 ? `${Math.round(resolution / 3600)} 小时聚合` : `${Math.round(resolution / 86_400)} 天聚合`;
   const activePoint = activeSnapshotId == null ? null : points.find((point) => point.snapshot_id === activeSnapshotId) ?? null;
@@ -146,7 +209,7 @@ export function Overview({ snapshot, history, open, navigate, range, onRange, hi
     </section>
 
     <section className="trend-toolbar" aria-label="趋势时间范围">
-      <div>{ranges.map(([value, label]) => <button type="button" className={range === value ? "active" : ""} key={value} onClick={() => { setActiveSnapshotId(null); onRange(value); }}>{label}</button>)}</div>
+      <TrendRangeSlider range={range || DEFAULT_TREND_RANGE_SECONDS} onRange={onRange} />
       <small>{activePoint ? <><b>{resolution > 1 ? "聚合点截至" : "快照时间"} {activeTime}</b><span> · {historySummary}</span></> : historyRefreshing ? "正在加载历史…" : historySummary}</small>
     </section>
 

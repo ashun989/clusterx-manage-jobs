@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 import type { Telemetry } from "./types";
+import { DismissibleDetails } from "./useDismissibleMenu";
 
 export type ColumnKind = "text" | "enum" | "number" | "status" | "telemetry";
 
@@ -64,15 +65,14 @@ function FilterMenu<T>({ column, options, selected, onChange }: {
   selected: string[];
   onChange: (values: string[]) => void;
 }) {
-  return <details className="filter-menu">
-    <summary>{column.label}{selected.length > 0 && <span>{selected.length}</span>}</summary>
+  return <DismissibleDetails className="filter-menu" summary={<>{column.label}{selected.length > 0 && <span>{selected.length}</span>}</>}>
     <div className="filter-popover">
       {options.length === 0 ? <small>暂无选项</small> : options.map((option) => <label key={option}>
         <input type="checkbox" checked={selected.includes(option)} onChange={(event) => onChange(event.target.checked ? [...selected, option] : selected.filter((value) => value !== option))} />
         <span>{option || "(empty)"}</span>
       </label>)}
     </div>
-  </details>;
+  </DismissibleDetails>;
 }
 
 export function DataTable<T>({ rows, columns, state, onState, rowKey, rowLabel, onRow, emptyMessage = "没有匹配的数据" }: {
@@ -132,7 +132,7 @@ export function DataTable<T>({ rows, columns, state, onState, rowKey, rowLabel, 
       <div className="table-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="搜索当前表格" placeholder="搜索当前列表" value={state.query ?? ""} onChange={(event) => onState({ ...state, query: event.target.value })} /></div>
       <div className="filter-list">{enumColumns.map((column) => <FilterMenu key={column.key} column={column} options={optionMap[column.key] ?? []} selected={state.filters[column.key] ?? []} onChange={(values) => onState({ ...state, filters: { ...state.filters, [column.key]: values } })} />)}</div>
       <div className="table-view-actions">
-        <details className="filter-menu column-menu"><summary>列</summary><div className="filter-popover">{configurableColumns.map((column) => <label key={column.key}><input type="checkbox" checked={!(state.hiddenColumns ?? []).includes(column.key)} onChange={(event) => onState({ ...state, hiddenColumns: event.target.checked ? (state.hiddenColumns ?? []).filter((key) => key !== column.key) : [...(state.hiddenColumns ?? []), column.key] })} /><span>{column.label}</span></label>)}</div></details>
+        <DismissibleDetails className="filter-menu column-menu" summary="列"><div className="filter-popover">{configurableColumns.map((column) => <label key={column.key}><input type="checkbox" checked={!(state.hiddenColumns ?? []).includes(column.key)} onChange={(event) => onState({ ...state, hiddenColumns: event.target.checked ? (state.hiddenColumns ?? []).filter((key) => key !== column.key) : [...(state.hiddenColumns ?? []), column.key] })} /><span>{column.label}</span></label>)}</div></DismissibleDetails>
         <button type="button" aria-label="切换表格密度" onClick={() => onState({ ...state, density: state.density === "compact" ? "comfortable" : "compact" })}>{state.density === "compact" ? "舒适" : "紧凑"}</button>
         <button type="button" onClick={exportCsv}>导出</button>
       </div>

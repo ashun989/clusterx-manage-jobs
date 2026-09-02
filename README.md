@@ -1,7 +1,7 @@
 # Clusterx Manage Jobs Skill with Monitor
 
 用于安全管理 PT/SSP 集群 Clusterx 训练任务，并提供新增的只读队列监控、
-资源策略检查和调度模拟。当前版本为 `1.0.0`，已验证 Clusterx `2026.8.19`；
+资源策略检查和调度模拟。当前版本为 `1.0.1`，已验证 Clusterx `2026.8.19`；
 其他版本以安装后的动态帮助为准。
 
 原有任务生命周期能力保持不变：配置检查、提交预览与创建、任务/节点查询、
@@ -168,7 +168,7 @@ Web 控制台提供运行总览、全局实体搜索、明暗主题、表格文�
 日志正文。`--history-retention-days`、`--history-max-points` 和
 `--history-max-db-mib` 分别限制时间、记录数和数据库空间；默认值为 30 天、100000 点
 和 256 MiB，也可使用同名 `CLUSTERX_MONITOR_HISTORY_*` 环境变量。查询会按区间自动
-降采样，Web 支持 1 小时、6 小时、24 小时、7 天、30 天和全部历史。SQLite 失败只会
+降采样，Web 支持 1 分钟至 30 天的连续范围，并在 1 小时、6 小时、24 小时、7 天和 30 天处提供参考刻度。SQLite 失败只会
 使趋势降级到内存，不阻止实时快照发布。`/api/v1/history`、`/api/v1/snapshots` 和
 `/api/v1/snapshots/compare` 都是只读接口。
 
