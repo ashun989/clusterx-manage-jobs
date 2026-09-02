@@ -3,7 +3,8 @@ import type { DetailKind, DetailRef } from "./types";
 
 export type TableTab = "groups" | "users" | "workloads" | "alerts";
 export type MonitorTab = TableTab | "overview" | "nodes" | "planner" | "rules";
-export type TrendRange = "1h" | "6h" | "24h" | "7d" | "30d" | "all";
+/** Trend range is stored as an integer number of seconds. */
+export type TrendRange = number;
 export type NodeSortKey = "allocated_gpu" | "effective_free_gpu" | "stranded_gpu" | "gpu_util" | "gpu_mem" | "power";
 export type NodeViewState = { classifications: string[]; states: string[]; sort: NodeSortKey | null; direction: "asc" | "desc" };
 export type PlannerIntent = {
@@ -36,7 +37,97 @@ export const monitorTabs: MonitorTab[] = ["overview", "groups", "users", "nodes"
 export const tableTabs: TableTab[] = ["groups", "users", "workloads", "alerts"];
 const detailKinds: DetailKind[] = ["group", "user", "node", "workload", "alert"];
 const nodeSortKeys: NodeSortKey[] = ["allocated_gpu", "effective_free_gpu", "stranded_gpu", "gpu_util", "gpu_mem", "power"];
-const trendRanges: TrendRange[] = ["1h", "6h", "24h", "7d", "30d", "all"];
+
+// Keep the lower bound at one minute so the overview can inspect the most
+// recent snapshots without pretending that the selected range is one hour.
+// The slider still uses a logarithmic scale, which gives this short interval
+// considerably more adjustment precision than the long end of the range.
+export const MIN_TREND_RANGE_SECONDS = 60;
+export const MAX_TREND_RANGE_SECONDS = 2_592_000;
+export const DEFAULT_TREND_RANGE_SECONDS = 86_400;
+export const TREND_SLIDER_STEPS = 1_000;
+/** Number of slider positions around a reference mark that should snap. */
+export const TREND_SLIDER_SNAP_STEPS = 18;
+
+export const TREND_RANGE_MARKS = [
+  { seconds: MIN_TREND_RANGE_SECONDS, label: "1 分钟" },
+  { seconds: 3_600, label: "1 小时" },
+  { seconds: 21_600, label: "6 小时" },
+  { seconds: DEFAULT_TREND_RANGE_SECONDS, label: "24 小时" },
+  { seconds: 604_800, label: "7 天" },
+  { seconds: MAX_TREND_RANGE_SECONDS, label: "30 天" },
+] as const;
+
+const legacyTrendRanges: Record<string, number> = {
+  "1m": MIN_TREND_RANGE_SECONDS,
+  "1h": 3_600,
+  "6h": 21_600,
+  "24h": DEFAULT_TREND_RANGE_SECONDS,
+  "7d": 604_800,
+  "30d": MAX_TREND_RANGE_SECONDS,
+  all: MAX_TREND_RANGE_SECONDS,
+};
+
+export function clampTrendRange(seconds: number): TrendRange {
+  if (!Number.isFinite(seconds)) return DEFAULT_TREND_RANGE_SECONDS;
+  return Math.min(MAX_TREND_RANGE_SECONDS, Math.max(MIN_TREND_RANGE_SECONDS, Math.round(seconds)));
+}
+
+function boundedSliderPosition(position: number): number {
+  return Math.min(TREND_SLIDER_STEPS, Math.max(0, Math.round(Number(position))));
+}
+
+export function snapTrendSliderPosition(position: number): number {
+  const boundedPosition = boundedSliderPosition(position);
+  const nearest = TREND_RANGE_MARKS.reduce((best, mark) => {
+    const markPosition = sliderPositionFromTrendRange(mark.seconds);
+    return Math.abs(markPosition - boundedPosition) < Math.abs(best - boundedPosition) ? markPosition : best;
+  }, sliderPositionFromTrendRange(TREND_RANGE_MARKS[0].seconds));
+  return Math.abs(nearest - boundedPosition) <= TREND_SLIDER_SNAP_STEPS ? nearest : boundedPosition;
+}
+
+export function trendRangeFromSlider(position: number, snap = true): TrendRange {
+  const boundedPosition = boundedSliderPosition(position);
+  const resolvedPosition = snap ? snapTrendSliderPosition(boundedPosition) : boundedPosition;
+  // Keep the visible reference marks exact even though the slider itself has
+  // a finite number of positions.
+  const mark = TREND_RANGE_MARKS.find((item) => sliderPositionFromTrendRange(item.seconds) === resolvedPosition);
+  if (mark) return mark.seconds;
+  const normalized = resolvedPosition / TREND_SLIDER_STEPS;
+  const ratio = MAX_TREND_RANGE_SECONDS / MIN_TREND_RANGE_SECONDS;
+  return clampTrendRange(MIN_TREND_RANGE_SECONDS * Math.pow(ratio, normalized));
+}
+
+export function sliderPositionFromTrendRange(seconds: TrendRange): number {
+  const normalized = Math.log(clampTrendRange(seconds) / MIN_TREND_RANGE_SECONDS) / Math.log(MAX_TREND_RANGE_SECONDS / MIN_TREND_RANGE_SECONDS);
+  return Math.round(Math.min(1, Math.max(0, normalized)) * TREND_SLIDER_STEPS);
+}
+
+export function formatTrendRange(seconds: TrendRange): string {
+  // The slider position is quantized, so round display values to the nearest
+  // minute to avoid showing 23h 59m for the exact 24-hour default/mark.
+  const value = clampTrendRange(Math.round(clampTrendRange(seconds) / 60) * 60);
+  const days = Math.floor(value / 86_400);
+  const hours = Math.floor(value % 86_400 / 3_600);
+  const minutes = Math.floor(value % 3_600 / 60);
+  if (days >= 2) return `${days} 天${hours ? ` ${hours} 小时` : ""}${minutes ? ` ${minutes} 分钟` : ""}`;
+  const totalHours = days * 24 + hours;
+  if (totalHours > 0) return `${totalHours} 小时${minutes ? ` ${minutes} 分钟` : ""}`;
+  return `${Math.max(1, minutes)} 分钟`;
+}
+
+function trendRangeUrlValue(seconds: TrendRange): string {
+  const value = clampTrendRange(seconds);
+  const known = Object.entries(legacyTrendRanges).find(([label, range]) => label !== "all" && range === value);
+  return known?.[0] ?? String(value);
+}
+
+function readTrendRange(raw: string | null): TrendRange {
+  if (!raw) return DEFAULT_TREND_RANGE_SECONDS;
+  if (raw in legacyTrendRanges) return legacyTrendRanges[raw];
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? clampTrendRange(parsed) : DEFAULT_TREND_RANGE_SECONDS;
+}
 
 export const emptyNavigationState = (tab: MonitorTab = "groups"): NavigationState => ({
   tab,
@@ -49,7 +140,7 @@ export const emptyNavigationState = (tab: MonitorTab = "groups"): NavigationStat
   },
   nodeState: { classifications: [], states: [], sort: null, direction: "desc" },
   plannerIntent: null,
-  trendRange: "24h",
+  trendRange: DEFAULT_TREND_RANGE_SECONDS,
 });
 
 function positiveNumber(params: URLSearchParams, key: string): number | null {
@@ -135,7 +226,7 @@ export function readNavigationState(fallbackTab: MonitorTab = "groups", previous
       direction,
     },
     plannerIntent: readPlannerIntent(params),
-    trendRange: trendRanges.includes(params.get("range") as TrendRange) ? params.get("range") as TrendRange : "24h",
+    trendRange: readTrendRange(params.get("range")),
   };
 }
 
@@ -143,7 +234,7 @@ export function navigationUrl(state: NavigationState): string {
   const url = new URL(window.location.href);
   const params = new URLSearchParams();
   params.set("view", state.tab);
-  if (state.trendRange !== "24h") params.set("range", state.trendRange);
+  if (state.trendRange !== DEFAULT_TREND_RANGE_SECONDS) params.set("range", trendRangeUrlValue(state.trendRange));
   for (const tab of tableTabs) {
     const table = state.tableStates[tab];
     if (table.query?.trim()) params.set(`q.${tab}`, table.query.trim());

@@ -8,6 +8,7 @@ import type { ColumnDef, TableState } from "./Table";
 import { api } from "./api";
 import { emptyNavigationState, monitorTabs, navigationUrl, readNavigationState, type MonitorTab as Tab, type NodeSortKey, type NodeViewState, type PlannerIntent, type TableTab, type NavigationState, type TrendRange } from "./navigation";
 import { useMonitorData } from "./useMonitorData";
+import { DismissibleDetails, useDismissibleMenu } from "./useDismissibleMenu";
 import type { Alert, DetailRef, GroupSummary, NodeSummary, PlanItem, PlanResult, PolicyResponse, Snapshot, UserSummary, Workload } from "./types";
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
@@ -21,10 +22,16 @@ const dateTime = (value: string | null | undefined) => {
 };
 
 const releaseNotes: Record<string, string[]> = {
+  "1.0.1": [
+    "趋势范围支持 1 分钟至 30 天的连续对数滑块，并在关键时长处自动吸附；悬停任一趋势图会同步显示四项指标。",
+    "筛选、列管理、节点和调度模拟等自定义菜单支持点击外部或按 Escape 自动收起，弹层不再被面板裁切。",
+    "Workload 详情将进入调度模拟与官方控制台查看并列展示，其他详情页保持一致的操作布局。",
+    "刷新按钮明确区分读取最新快照与后端定时采集，复制当前视图使用标准复制图标。",
+  ],
   "1.0.0": [
     "视图、筛选、排序、趋势区间与多层详情支持可分享深链接和浏览器历史。",
     "可从节点、Workload、用户、分组和告警上下文直接进入可编辑的调度模拟。",
-    "趋势数据采用有界 SQLite 聚合存储，支持 1 小时至 30 天及全部历史区间。",
+    "趋势数据采用有界 SQLite 聚合存储，支持 1 分钟至 30 天的连续范围。",
   ],
   "0.5.0": [
     "新增集群运行总览、轻量趋势和快照变化洞察。",
@@ -48,13 +55,12 @@ const releaseNotes: Record<string, string[]> = {
 function VersionBadge({ version }: { version: string }) {
   const notes = releaseNotes[version];
   if (!notes) return <span className="app-version">v{version}</span>;
-  return <details className="version-menu">
-    <summary aria-label={`查看 v${version} 更新内容`}>v{version}</summary>
+  return <DismissibleDetails className="version-menu" summary={`v${version}`} summaryProps={{ "aria-label": `查看 v${version} 更新内容` }}>
     <div className="version-popover">
       <strong>本版更新</strong>
       <ul>{notes.map((note) => <li key={note}>{note}</li>)}</ul>
     </div>
-  </details>;
+  </DismissibleDetails>;
 }
 
 function Brand({ compact = false, version, onHome }: { compact?: boolean; version?: string; onHome?: () => void }) {
@@ -62,6 +68,10 @@ function Brand({ compact = false, version, onHome }: { compact?: boolean; versio
     {onHome ? <button type="button" className="brand-home" onClick={onHome} aria-label="清除上下文并返回总览" title="清除上下文并返回总览"><img className="brand-icon" src="/clusterx-icon.svg" alt="" /></button> : <img className="brand-icon" src="/clusterx-icon.svg" alt="" />}
     <div>{!compact && <span className="eyebrow">Clusterx</span>}<div className="brand-title"><h1>{compact ? "Clusterx Monitor" : "Queue Observatory"}</h1>{version && <VersionBadge version={version} />}</div></div>
   </div>;
+}
+
+function CopyLinkIcon() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M15 9V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>;
 }
 
 export function FreshnessBadge({ snapshotId, freshness }: { snapshotId: string; freshness: Snapshot["freshness"] }) {
@@ -147,7 +157,7 @@ const alertColumns: ColumnDef<Alert>[] = [
 ];
 
 function MultiFilter({ label, options, selected, onChange }: { label: string; options: string[]; selected: string[]; onChange: (values: string[]) => void }) {
-  return <details className="filter-menu"><summary>{label}{selected.length > 0 && <span>{selected.length}</span>}</summary><div className="filter-popover">{options.map((option) => <label key={`${label}:${option}`}><input type="checkbox" checked={selected.includes(option)} onChange={(event) => onChange(event.target.checked ? [...selected, option] : selected.filter((item) => item !== option))} /><span>{option}</span></label>)}</div></details>;
+  return <DismissibleDetails className="filter-menu" summary={<>{label}{selected.length > 0 && <span>{selected.length}</span>}</>}><div className="filter-popover">{options.map((option) => <label key={`${label}:${option}`}><input type="checkbox" checked={selected.includes(option)} onChange={(event) => onChange(event.target.checked ? [...selected, option] : selected.filter((item) => item !== option))} /><span>{option}</span></label>)}</div></DismissibleDetails>;
 }
 
 function nodeSortValue(node: NodeSummary, key: NodeSortKey) {
@@ -210,11 +220,12 @@ const simpleOptions = (values: string[]): PlannerOption[] => [...new Set(values.
 function PlannerMultiSelect({ label, options, selected, onChange, emptyLabel = "不限" }: { label: string; options: PlannerOption[]; selected: string[]; onChange: (values: string[]) => void; emptyLabel?: string }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const ref = useDismissibleMenu<HTMLDetailsElement>(open, () => setOpen(false));
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visible = options.filter((option) => !normalizedQuery || `${option.label} ${option.value} ${option.detail ?? ""}`.toLocaleLowerCase().includes(normalizedQuery));
   const selectedLabels = selected.map((value) => options.find((option) => option.value === value)?.label ?? value);
   const selectionLabel = selectedLabels.length === 0 ? emptyLabel : selectedLabels.length <= 2 ? selectedLabels.join("、") : `${selectedLabels[0]} 等 ${selectedLabels.length} 项`;
-  return <details className="planner-multi" open={open}>
+  return <details ref={ref} className="planner-multi" open={open}>
     <summary onClick={(event) => { event.preventDefault(); setOpen((value) => !value); }}><span>{label}</span><em title={selectedLabels.join("、")}>{selectionLabel}</em></summary>
     {open && <div className="planner-multi-popover">
       {options.length > 5 && <input aria-label={`搜索${label}`} type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${label}候选`} />}
@@ -514,7 +525,7 @@ export default function App() {
   const clearPlannerIntent = () => commitNavigation({ ...navigation, plannerIntent: null }, "replace");
   const tabLabels: Record<Tab, string> = { overview: "总览", groups: "分组", users: "用户", nodes: "节点", workloads: "Workload", alerts: "告警", planner: "调度模拟", rules: "规则" };
   return <div className="app">
-    <header className="app-header"><div className="brand-block"><Brand version={serviceStatus?.version} onHome={resetNavigation} /><span className="cluster-context">{snapshot.cluster} / {snapshot.queue}</span></div><GlobalSearch snapshot={snapshot} open={open} /><div className="header-actions"><div className={`connection connection-${connection}`}><span />{{ connecting: "正在连接", live: "实时", reconnecting: "重连中", polling: "轮询" }[connection]}</div><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="icon-button" disabled={refreshing} onClick={() => { void refresh(); }} aria-label="立即刷新" title={lastSuccessfulAt ? `上次成功：${new Date(lastSuccessfulAt).toLocaleTimeString()}` : "立即刷新"}>{refreshing ? "…" : "↻"}</button><button type="button" className="icon-button" onClick={() => { void copyCurrentView(); }} aria-label="复制当前视图链接" title="复制当前视图链接">{linkCopied ? "✓" : "⌁"}</button><button type="button" className="icon-button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="切换明暗主题">{theme === "dark" ? "☼" : "☾"}</button><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
+    <header className="app-header"><div className="brand-block"><Brand version={serviceStatus?.version} onHome={resetNavigation} /><span className="cluster-context">{snapshot.cluster} / {snapshot.queue}</span></div><GlobalSearch snapshot={snapshot} open={open} /><div className="header-actions"><div className={`connection connection-${connection}`}><span />{{ connecting: "正在连接", live: "实时", reconnecting: "重连中", polling: "轮询" }[connection]}</div><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="icon-button" disabled={refreshing} onClick={() => { void refresh(); }} aria-label="获取最新快照" title={lastSuccessfulAt ? `只获取后端已发布的最新快照；上次成功：${new Date(lastSuccessfulAt).toLocaleTimeString()}` : "只获取后端已发布的最新快照，不会触发后端立即采集"}>{refreshing ? "…" : "↻"}</button><button type="button" className="icon-button" onClick={() => { void copyCurrentView(); }} aria-label={linkCopied ? "已复制当前视图链接" : "复制当前视图链接"} title={linkCopied ? "已复制当前视图链接" : "复制当前视图链接"}>{linkCopied ? "✓" : <CopyLinkIcon />}</button><button type="button" className="icon-button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="切换明暗主题">{theme === "dark" ? "☼" : "☾"}</button><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
     {tab !== "overview" && <section className="cards"><article><span>绑定容量</span><strong>{number(snapshot.capacity.bound_gpu)}</strong><small>{number(snapshot.capacity.planning_eligible_gpu)} 可参与调度</small></article><article><span>已分配</span><strong>{number(snapshot.capacity.allocated_gpu)}</strong><small>{number(snapshot.capacity.free_gpu)} 空闲</small></article><article><span>Pending 压力</span><strong className={statusClass(snapshot.pending_pressure.state)}>{String(snapshot.pending_pressure.state)}</strong><small>{number(snapshot.pending_pressure.eligible_jobs)} 个有效排队任务</small></article><article><span>GPU 功率</span><strong>{power(snapshot.telemetry.gpu_power_total_w)}</strong><small>{snapshot.telemetry.power_reported_gpu_count}/{snapshot.telemetry.allocated_gpu_count} 已覆盖 · {snapshot.telemetry_status ?? "unknown"}</small></article></section>}
     {bannerMessages.length > 0 && <div className="banner">{bannerMessages.join(" · ")}</div>}
     <section className="workspace"><div className="main-panel"><nav aria-label="Monitor 主导航">{monitorTabs.map((name) => <button aria-label={name} className={tab === name ? "active" : ""} key={name} onClick={() => navigateTab(name)}>{tabLabels[name]}{name === "alerts" && snapshot.alerts.length > 0 && <span className="nav-count">{snapshot.alerts.length}</span>}</button>)}</nav>

@@ -6,9 +6,7 @@ import type { TrendRange } from "./navigation";
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "polling";
 
 const historyPath = (range: TrendRange) => {
-  const durations: Partial<Record<TrendRange, number>> = { "1h": 3_600, "6h": 21_600, "24h": 86_400, "7d": 604_800, "30d": 2_592_000 };
-  const seconds = durations[range];
-  const since = new Date(seconds ? Date.now() - seconds * 1_000 : 0).toISOString();
+  const since = new Date(Date.now() - range * 1_000).toISOString();
   return `/history?limit=800&since=${encodeURIComponent(since)}`;
 };
 

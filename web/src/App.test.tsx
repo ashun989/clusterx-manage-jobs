@@ -3,7 +3,21 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { FreshnessBadge } from "./App";
-import type { PlanResult, PolicyFinding, PolicyResponse, Snapshot, Telemetry, Workload } from "./types";
+import { Overview } from "./Overview";
+import {
+  DEFAULT_TREND_RANGE_SECONDS,
+  MAX_TREND_RANGE_SECONDS,
+  MIN_TREND_RANGE_SECONDS,
+  TREND_SLIDER_STEPS,
+  emptyNavigationState,
+  formatTrendRange,
+  navigationUrl,
+  readNavigationState,
+  snapTrendSliderPosition,
+  sliderPositionFromTrendRange,
+  trendRangeFromSlider,
+} from "./navigation";
+import type { HistoryPoint, HistoryResponse, PlanResult, PolicyFinding, PolicyResponse, Snapshot, Telemetry, Workload } from "./types";
 
 const quotaFinding: PolicyFinding = {
   code: "quota.gpu", category: "quota", status: "violation", message: "group GPU usage exceeds quota",
@@ -139,7 +153,7 @@ describe("Clusterx monitor dashboard", () => {
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "1.0.0", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "1.0.1", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       if (path.includes("/history?")) return { ok: true, status: 200, json: async () => ({ retained_snapshots: 2, history_capacity: 2880, window_started_at: "2026-08-14T00:59:30Z", newest_at: "2026-08-14T01:00:00Z", points: [
         { snapshot_id: "snapshot-0", generated_at: "2026-08-14T00:59:30Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: { fragmented: 1, "gpu-full": 1 } },
         { snapshot_id: "snapshot-1", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 12, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: { fragmented: 1, "gpu-full": 1 } },
@@ -189,7 +203,7 @@ describe("Clusterx monitor dashboard", () => {
     expect(window.location.hash).toBe("");
     expect(screen.getByRole("button", { name: "overview" })).toHaveClass("active");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "24 小时" })).toHaveClass("active");
+    expect(screen.getByRole("slider", { name: "趋势时间范围" })).toHaveAttribute("aria-valuetext", "24 小时");
   });
   afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -208,12 +222,12 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
 
-    fireEvent.click(screen.getByLabelText("查看 v1.0.0 更新内容"));
+    fireEvent.click(screen.getByLabelText("查看 v1.0.1 更新内容"));
 
     expect(screen.getByText("本版更新")).toBeInTheDocument();
-    expect(screen.getByText(/可分享深链接/)).toBeInTheDocument();
-    expect(screen.getByText(/可从节点.*调度模拟/)).toBeInTheDocument();
-    expect(screen.getByText(/SQLite/)).toBeInTheDocument();
+    expect(screen.getByText(/趋势范围支持 1 分钟/)).toBeInTheDocument();
+    expect(screen.getByText(/Workload 详情.*官方控制台/)).toBeInTheDocument();
+    expect(screen.getByText(/刷新按钮明确区分/)).toBeInTheDocument();
   });
 
   it("provides an operational overview and global entity search", async () => {
@@ -225,9 +239,15 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByRole("img", { name: /已分配 GPU趋势/ })).toBeInTheDocument();
     expect(screen.getByLabelText("已分配 GPU时间轴").querySelectorAll("time")).toHaveLength(2);
     expect(screen.getByText("节点健康")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "7 天" }));
+    const trendRange = screen.getByRole("slider", { name: "趋势时间范围" });
+    fireEvent.change(trendRange, { target: { value: "0" } });
+    fireEvent.pointerUp(trendRange);
+    expect(screen.getByText("1 分钟", { selector: "output" })).toBeInTheDocument();
+    expect(new URLSearchParams(window.location.search).get("range")).toBe("1m");
+    fireEvent.change(trendRange, { target: { value: String(sliderPositionFromTrendRange(604_800)) } });
+    fireEvent.pointerUp(trendRange);
     expect(new URLSearchParams(window.location.search).get("range")).toBe("7d");
-    expect(screen.getByRole("button", { name: "7 天" })).toHaveClass("active");
+    expect(screen.getByText("7 天", { selector: "output" })).toBeInTheDocument();
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes("/history?limit=800&since="))).toBe(true));
 
     const search = screen.getByLabelText("全局搜索");
@@ -235,6 +255,96 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.change(search, { target: { value: "node-b" } });
     fireEvent.click(await screen.findByRole("option", { name: /node-b/ }));
     expect(screen.getByRole("dialog", { name: "node-b 详情" })).toBeInTheDocument();
+  });
+
+  it("links all four overview trends to the nearest hovered history point", () => {
+    const points: HistoryPoint[] = [
+      { snapshot_id: "trend-0", generated_at: "2026-08-14T00:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 60, gpu_memory_util_avg_pct: 55, gpu_power_total_w: 3000, node_classifications: {} },
+      { snapshot_id: "trend-1", generated_at: "2026-08-14T00:30:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 11.25, free_gpu: null, pending_workloads: 1.25, pending_eligible_jobs: 0, alert_count: 1.75, critical_alert_count: 0.5, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: {} },
+      { snapshot_id: "trend-2", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: {} },
+    ];
+    const history: HistoryResponse = { points, retained_snapshots: 3, history_capacity: 2880, window_started_at: points[0].generated_at, newest_at: points[2].generated_at, storage: "sqlite", resolution_seconds: 300 };
+    const view = render(<Overview snapshot={structuredClone(baseSnapshot)} history={history} open={() => {}} navigate={() => {}} range={DEFAULT_TREND_RANGE_SECONDS} onRange={() => {}} historyRefreshing={false} />);
+    const chart = screen.getByLabelText("已分配 GPU趋势交互");
+    vi.spyOn(chart, "getBoundingClientRect").mockReturnValue({ left: 0, right: 100, width: 100, top: 0, bottom: 76, height: 76, x: 0, y: 0, toJSON: () => ({}) });
+
+    fireEvent.pointerMove(chart, { clientX: 50 });
+
+    expect(screen.getByLabelText("已分配 GPU选中值")).toHaveTextContent("11.3");
+    expect(screen.getByLabelText("空闲 GPU选中值")).toHaveTextContent("—");
+    expect(screen.getByLabelText("Pending Workload选中值")).toHaveTextContent("1.3");
+    expect(screen.getByLabelText("告警数选中值")).toHaveTextContent("1.8");
+    expect(view.container.querySelectorAll(".sparkline-guide")).toHaveLength(4);
+    expect(view.container.querySelectorAll(".sparkline-point")).toHaveLength(3);
+    expect(screen.getByText(/聚合点截至/)).toBeInTheDocument();
+    expect([...view.container.querySelectorAll(".sparkline-line")].every((path) => !path.getAttribute("d")?.includes("NaN"))).toBe(true);
+
+    fireEvent.pointerLeave(chart.closest(".overview-metrics")!);
+    expect(screen.queryByLabelText("已分配 GPU选中值")).not.toBeInTheDocument();
+
+    fireEvent.focus(chart);
+    expect(screen.getByLabelText("已分配 GPU选中值")).toHaveTextContent("10");
+    fireEvent.keyDown(chart, { key: "ArrowLeft" });
+    expect(screen.getByLabelText("已分配 GPU选中值")).toHaveTextContent("11.3");
+    fireEvent.keyDown(chart, { key: "Home" });
+    expect(screen.getByLabelText("已分配 GPU选中值")).toHaveTextContent("10");
+  });
+
+  it("uses a nonlinear trend slider and keeps legacy range links readable", () => {
+    expect(trendRangeFromSlider(0)).toBe(MIN_TREND_RANGE_SECONDS);
+    expect(trendRangeFromSlider(TREND_SLIDER_STEPS)).toBe(MAX_TREND_RANGE_SECONDS);
+    expect(MIN_TREND_RANGE_SECONDS).toBe(60);
+    expect(formatTrendRange(MIN_TREND_RANGE_SECONDS)).toBe("1 分钟");
+    expect(trendRangeFromSlider(TREND_SLIDER_STEPS / 2)).toBeLessThan((MIN_TREND_RANGE_SECONDS + MAX_TREND_RANGE_SECONDS) / 2);
+    expect(formatTrendRange(DEFAULT_TREND_RANGE_SECONDS)).toBe("24 小时");
+    const sixHourPosition = sliderPositionFromTrendRange(21_600);
+    expect(snapTrendSliderPosition(sixHourPosition + 10)).toBe(sixHourPosition);
+    expect(trendRangeFromSlider(sixHourPosition + 10)).toBe(21_600);
+    expect(snapTrendSliderPosition(sixHourPosition + 25)).not.toBe(sixHourPosition);
+
+    window.history.replaceState({}, "", "/?view=overview&range=7d");
+    expect(readNavigationState().trendRange).toBe(604_800);
+    window.history.replaceState({}, "", "/?view=overview&range=all");
+    expect(readNavigationState().trendRange).toBe(MAX_TREND_RANGE_SECONDS);
+    window.history.replaceState({}, "", "/?view=overview&range=1m");
+    expect(readNavigationState().trendRange).toBe(MIN_TREND_RANGE_SECONDS);
+    window.history.replaceState({}, "", "/?view=overview&range=1h");
+    expect(readNavigationState().trendRange).toBe(3_600);
+
+    const state = emptyNavigationState("overview");
+    state.trendRange = 123_456;
+    expect(new URL(navigationUrl(state), window.location.origin).searchParams.get("range")).toBe("123456");
+    expect(sliderPositionFromTrendRange(604_800)).toBeGreaterThan(sliderPositionFromTrendRange(86_400));
+  });
+
+  it("closes custom menus on outside interaction and Escape but not inside interaction", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+
+    const summary = screen.getByText("状态", { selector: "summary" });
+    const menu = summary.closest("details")!;
+    fireEvent.click(summary);
+    expect(menu).toHaveProperty("open", true);
+    fireEvent.click(within(menu).getByRole("checkbox", { name: "violation" }));
+    expect(menu).toHaveProperty("open", true);
+    fireEvent.click(document.body);
+    expect(menu).toHaveProperty("open", false);
+
+    const versionSummary = screen.getByLabelText("查看 v1.0.1 更新内容");
+    const versionMenu = versionSummary.closest("details")!;
+    fireEvent.click(versionSummary);
+    expect(versionMenu).toHaveProperty("open", true);
+    versionSummary.focus();
+    fireEvent.keyDown(versionSummary, { key: "Escape" });
+    expect(versionMenu).toHaveProperty("open", false);
+
+    fireEvent.click(screen.getByRole("button", { name: "planner" }));
+    const plannerSummary = screen.getByText("类型", { selector: ".planner-multi > summary > span" });
+    const plannerMenu = plannerSummary.closest("details")!;
+    fireEvent.click(plannerSummary);
+    expect(plannerMenu).toHaveProperty("open", true);
+    fireEvent.pointerDown(document.body);
+    expect(plannerMenu).toHaveProperty("open", false);
   });
 
   it("searches table text and lets operators hide columns", async () => {
@@ -251,7 +361,7 @@ describe("Clusterx monitor dashboard", () => {
   it("filters enum columns, sorts numeric columns and resets missing filter values", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
-    expect(screen.getByText("v1.0.0")).toBeInTheDocument();
+    expect(screen.getByText("v1.0.1")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);
@@ -462,15 +572,24 @@ describe("Clusterx monitor dashboard", () => {
 
     for (const [name, url] of [["train-a", urls.trainingJob], ["dev-a", urls.aid], ["infer-a", urls.air]]) {
       fireEvent.click(screen.getByRole("row", { name: `查看 ${name} 详情` }));
-      const link = within(screen.getByRole("dialog", { name: `${name} 详情` })).getByRole("link", { name: "在官方控制台查看" });
+      const drawer = screen.getByRole("dialog", { name: `${name} 详情` });
+      const actions = drawer.querySelector(".workload-actions");
+      expect(actions).toBeInTheDocument();
+      const link = within(drawer).getByRole("link", { name: "在官方控制台查看" });
       expect(link).toHaveAttribute("href", url);
       expect(link).toHaveAttribute("target", "_blank");
       expect(link).toHaveAttribute("rel", "noopener noreferrer");
+      expect(within(actions as HTMLElement).getByRole("button", { name: "进入调度模拟" })).toBeInTheDocument();
+      expect(drawer.querySelector(".drawer-actions .plan-from-detail")).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "关闭详情" }));
     }
 
     fireEvent.click(screen.getByRole("row", { name: "查看 unknown-a 详情" }));
-    expect(within(screen.getByRole("dialog", { name: "unknown-a 详情" })).queryByRole("link", { name: "在官方控制台查看" })).not.toBeInTheDocument();
+    const unknownDrawer = screen.getByRole("dialog", { name: "unknown-a 详情" });
+    expect(within(unknownDrawer).queryByRole("link", { name: "在官方控制台查看" })).not.toBeInTheDocument();
+    const unknownActions = unknownDrawer.querySelector(".workload-actions");
+    expect(unknownActions).toBeInTheDocument();
+    expect(within(unknownActions as HTMLElement).getByRole("button", { name: "进入调度模拟" })).toBeInTheDocument();
   });
 
   it("opens all entity details, follows related objects, supports back and reports removed entities", async () => {
@@ -608,7 +727,10 @@ describe("Clusterx monitor dashboard", () => {
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "nodes" }));
     fireEvent.click(screen.getByRole("button", { name: "查看 node-a 详情" }));
-    fireEvent.click(screen.getByRole("button", { name: "进入调度模拟" }));
+    const nodeDrawer = screen.getByRole("dialog", { name: "node-a 详情" });
+    expect(nodeDrawer.querySelector(".detail-actions .plan-from-detail")).toBeInTheDocument();
+    expect(nodeDrawer.querySelector(".drawer-actions .plan-from-detail")).not.toBeInTheDocument();
+    fireEvent.click(within(nodeDrawer).getByRole("button", { name: "进入调度模拟" }));
 
     expect(screen.getByRole("button", { name: "planner" })).toHaveClass("active");
     expect(screen.getByText("问题上下文").closest(".planner-context")).toHaveTextContent("指定目标节点：node-a");

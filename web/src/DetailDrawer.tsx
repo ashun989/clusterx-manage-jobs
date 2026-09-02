@@ -37,6 +37,13 @@ function Metric({ label, value }: { label: string; value: ReactNode }) {
   return <div><small>{label}</small><strong>{value}</strong></div>;
 }
 
+function DetailActions({ detailRef, planFrom, consoleUrl, workload = false }: { detailRef: DetailRef; planFrom: (ref: DetailRef) => void; consoleUrl?: string; workload?: boolean }) {
+  return <div className={workload ? "detail-actions workload-actions" : "detail-actions"}>
+    {consoleUrl && <a className="console-link" href={consoleUrl} target="_blank" rel="noopener noreferrer">在官方控制台查看 <span aria-hidden="true">↗</span></a>}
+    <button type="button" className="plan-from-detail" onClick={() => planFrom(detailRef)}>进入调度模拟</button>
+  </div>;
+}
+
 function TelemetryPanel({ telemetry }: { telemetry: Telemetry }) {
   return <section className="detail-section"><h3>最近 5 分钟遥测</h3><Metrics>
     <Metric label="GPU Util" value={number(telemetry.gpu_compute_util_avg_pct, "%")} />
@@ -64,10 +71,10 @@ function RelatedList({ title, items, kind, open }: { title: string; items: Array
   </section>;
 }
 
-function GroupDetail({ group, snapshot, open }: { group: GroupSummary; snapshot: Snapshot; open: (ref: DetailRef) => void }) {
+function GroupDetail({ group, snapshot, open, planFrom }: { group: GroupSummary; snapshot: Snapshot; open: (ref: DetailRef) => void; planFrom: (ref: DetailRef) => void }) {
   const workloads = allWorkloads(snapshot).filter((item) => item.group === group.group);
   return <>
-    <span className="eyebrow">Group</span><h2>{group.group}</h2><span className={statusClass(group.status)}>{group.status}</span>
+    <span className="eyebrow">Group</span><h2>{group.group}</h2><DetailActions detailRef={{ kind: "group", id: group.group, label: group.group }} planFrom={planFrom} /><span className={statusClass(group.status)}>{group.status}</span>
     <Metrics>
       <Metric label="GPU" value={`${number(group.allocated_gpu)} / ${quota(group.gpu_quota)}`} />
       <Metric label="CPU" value={`${number(group.allocated_cpu)} / ${quota(group.cpu_quota)}`} />
@@ -81,10 +88,10 @@ function GroupDetail({ group, snapshot, open }: { group: GroupSummary; snapshot:
   </>;
 }
 
-function UserDetail({ user, snapshot, open }: { user: UserSummary; snapshot: Snapshot; open: (ref: DetailRef) => void }) {
+function UserDetail({ user, snapshot, open, planFrom }: { user: UserSummary; snapshot: Snapshot; open: (ref: DetailRef) => void; planFrom: (ref: DetailRef) => void }) {
   const workloads = allWorkloads(snapshot).filter((item) => item.user === user.user);
   return <>
-    <span className="eyebrow">User</span><h2>{user.user}</h2><p><button className="inline-link" type="button" onClick={() => open({ kind: "group", id: user.group, label: user.group })}>{user.group}</button></p><span className={statusClass(user.status)}>{user.status}</span>
+    <span className="eyebrow">User</span><h2>{user.user}</h2><DetailActions detailRef={{ kind: "user", id: user.user, label: user.user }} planFrom={planFrom} /><p><button className="inline-link" type="button" onClick={() => open({ kind: "group", id: user.group, label: user.group })}>{user.group}</button></p><span className={statusClass(user.status)}>{user.status}</span>
     <Metrics>
       <Metric label="Workloads" value={number(user.workload_count)} />
       <Metric label="GPU" value={number(user.allocated_gpu)} />
@@ -97,11 +104,11 @@ function UserDetail({ user, snapshot, open }: { user: UserSummary; snapshot: Sna
   </>;
 }
 
-function NodeDetail({ node, snapshot, open }: { node: NodeSummary; snapshot: Snapshot; open: (ref: DetailRef) => void }) {
+function NodeDetail({ node, snapshot, open, planFrom }: { node: NodeSummary; snapshot: Snapshot; open: (ref: DetailRef) => void; planFrom: (ref: DetailRef) => void }) {
   const workloadIds = new Set(Object.keys(node.workloads));
   const workloads = allWorkloads(snapshot).filter((item) => workloadIds.has(item.workload_id) || item.placements.some((placement) => placement.node === node.node));
   return <>
-    <span className="eyebrow">Node · {node.state}</span><h2>{node.node}</h2><span className={statusClass(node.classification)}>{node.classification}</span><p className="muted">{node.host_ip || "无 Host IP"}</p>
+    <span className="eyebrow">Node · {node.state}</span><h2>{node.node}</h2><DetailActions detailRef={{ kind: "node", id: node.node, label: node.node }} planFrom={planFrom} /><span className={statusClass(node.classification)}>{node.classification}</span><p className="muted">{node.host_ip || "无 Host IP"}</p>
     {!node.planning_eligible && <p className="banner">该节点资源归属不一致，仅用于监控，不参与调度模拟。{(node.planning_exclusion_reasons ?? []).join(", ")}</p>}
     <Metrics>
       <Metric label="GPU" value={`${number(node.allocated_gpu)} / ${number(node.total_gpu)}`} />
@@ -221,10 +228,10 @@ function WorkloadLogPanel({ workload, snapshotId }: { workload: Workload; snapsh
   </section>;
 }
 
-function WorkloadDetail({ workload, snapshotId, open }: { workload: Workload; snapshotId: string; open: (ref: DetailRef) => void }) {
+function WorkloadDetail({ workload, snapshotId, open, planFrom }: { workload: Workload; snapshotId: string; open: (ref: DetailRef) => void; planFrom: (ref: DetailRef) => void }) {
   const pending = workload.policy_status === "pending";
   return <>
-    <span className="eyebrow">{workload.type}</span><h2>{workload.workload_name}</h2>{workload.console_url && <a className="console-link" href={workload.console_url} target="_blank" rel="noopener noreferrer">在官方控制台查看 <span aria-hidden="true">↗</span></a>}<p><button className="inline-link" type="button" onClick={() => open({ kind: "user", id: workload.user, label: workload.user })}>{workload.user}</button> · <button className="inline-link" type="button" onClick={() => open({ kind: "group", id: workload.group, label: workload.group })}>{workload.group}</button></p><span className={statusClass(workload.policy_status)}>{workload.policy_status}</span>
+    <span className="eyebrow">{workload.type}</span><h2>{workload.workload_name}</h2><DetailActions detailRef={{ kind: "workload", id: workload.workload_id, label: workload.workload_name }} planFrom={planFrom} consoleUrl={workload.console_url} workload /><p><button className="inline-link" type="button" onClick={() => open({ kind: "user", id: workload.user, label: workload.user })}>{workload.user}</button> · <button className="inline-link" type="button" onClick={() => open({ kind: "group", id: workload.group, label: workload.group })}>{workload.group}</button></p><span className={statusClass(workload.policy_status)}>{workload.policy_status}</span>
     {workload.planning_eligible === false && <p className="banner">该 Workload 接触归属异常节点，不作为调度释放候选。</p>}
     {(workload.policy_reasons ?? []).map((reason) => <p className="error" key={reason}>{reason}</p>)}
     <Metrics>
@@ -270,10 +277,10 @@ function relatedAlertRef(alert: Alert, snapshot: Snapshot): DetailRef | null {
   return null;
 }
 
-function AlertDetail({ alert, snapshot, open }: { alert: Alert; snapshot: Snapshot; open: (ref: DetailRef) => void }) {
+function AlertDetail({ alert, snapshot, open, planFrom }: { alert: Alert; snapshot: Snapshot; open: (ref: DetailRef) => void; planFrom: (ref: DetailRef) => void }) {
   const related = relatedAlertRef(alert, snapshot);
   return <>
-    <span className="eyebrow">Alert · {alert.kind}</span><h2>{alert.subject}</h2><span className={statusClass(alert.severity)}>{alert.severity}</span>
+    <span className="eyebrow">Alert · {alert.kind}</span><h2>{alert.subject}</h2><DetailActions detailRef={{ kind: "alert", id: alertIdentity(alert), label: alert.subject }} planFrom={planFrom} /><span className={statusClass(alert.severity)}>{alert.severity}</span>
     <section className="detail-section"><h3>说明</h3><p className="alert-message">{alert.message}</p></section>
     <Metrics><Metric label="规则代码" value={alert.code || "—"} /><Metric label="分类" value={alert.category || "—"} /><Metric label="对象类型" value={alert.subject_type || "—"} /><Metric label="标签" value={(alert.tags ?? []).join(", ") || "—"} /></Metrics>
     {related && <RelatedList title="关联对象" kind={related.kind} open={open} items={[{ id: related.id, label: related.label, meta: related.kind }]} />}
@@ -303,7 +310,7 @@ export function DetailDrawer({ stack, snapshot, open, back, close, planFrom }: {
   const value = resolveDetail(ref, snapshot);
   const label = resolvedLabel(ref, value);
   return <div className="drawer-backdrop" onClick={close}><aside ref={drawer} className="drawer" role="dialog" aria-modal="true" aria-label={`${label} 详情`} onClick={(event) => event.stopPropagation()}>
-    <div className="drawer-actions"><div>{stack.length > 1 && <button type="button" onClick={back} aria-label="返回上一详情">← 返回</button>}{value && <button type="button" className="plan-from-detail" onClick={() => planFrom(ref)}>进入调度模拟</button>}</div><button type="button" className="close" onClick={close} aria-label="关闭详情">×</button></div>
-    {!value ? <div className="missing-detail"><span className="eyebrow">{ref.kind}</span><h2>{ref.label}</h2><p>该对象已不在最新快照中。</p></div> : ref.kind === "group" ? <GroupDetail group={value as GroupSummary} snapshot={snapshot} open={open} /> : ref.kind === "user" ? <UserDetail user={value as UserSummary} snapshot={snapshot} open={open} /> : ref.kind === "node" ? <NodeDetail node={value as NodeSummary} snapshot={snapshot} open={open} /> : ref.kind === "workload" ? <WorkloadDetail workload={value as Workload} snapshotId={snapshot.snapshot_id} open={open} /> : <AlertDetail alert={value as Alert} snapshot={snapshot} open={open} />}
+    <div className="drawer-actions"><div>{stack.length > 1 && <button type="button" onClick={back} aria-label="返回上一详情">← 返回</button>}</div><button type="button" className="close" onClick={close} aria-label="关闭详情">×</button></div>
+    {!value ? <div className="missing-detail"><span className="eyebrow">{ref.kind}</span><h2>{ref.label}</h2><p>该对象已不在最新快照中。</p></div> : ref.kind === "group" ? <GroupDetail group={value as GroupSummary} snapshot={snapshot} open={open} planFrom={planFrom} /> : ref.kind === "user" ? <UserDetail user={value as UserSummary} snapshot={snapshot} open={open} planFrom={planFrom} /> : ref.kind === "node" ? <NodeDetail node={value as NodeSummary} snapshot={snapshot} open={open} planFrom={planFrom} /> : ref.kind === "workload" ? <WorkloadDetail workload={value as Workload} snapshotId={snapshot.snapshot_id} open={open} planFrom={planFrom} /> : <AlertDetail alert={value as Alert} snapshot={snapshot} open={open} planFrom={planFrom} />}
   </aside></div>;
 }
