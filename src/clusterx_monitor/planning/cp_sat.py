@@ -12,6 +12,17 @@ class InvalidSolverModelError(RuntimeError):
     pass
 
 
+def configured_solver_workers() -> int:
+    raw = os.environ.get("CLUSTERX_PLANNER_WORKERS", "1")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as error:
+        raise InvalidSolverModelError("CLUSTERX_PLANNER_WORKERS must be an integer from 1 to 4") from error
+    if not 1 <= value <= 4:
+        raise InvalidSolverModelError("CLUSTERX_PLANNER_WORKERS must be between 1 and 4")
+    return value
+
+
 def _objective(
     problem: PlanningProblem,
     strategy: str,
@@ -116,8 +127,7 @@ def solve_once(
     model, x = _build_model(problem, strategy, excluded, hint)
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = max(0.01, time_limit_seconds)
-    configured_workers = int(os.environ.get("CLUSTERX_PLANNER_WORKERS", "1"))
-    solver.parameters.num_search_workers = max(1, min(4, configured_workers))
+    solver.parameters.num_search_workers = configured_solver_workers()
     solver.parameters.random_seed = 0
     status = solver.solve(model)
     name = solver.status_name(status).upper()

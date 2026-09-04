@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
+import json
 import math
 import re
+import time
 from typing import Any, Iterable
 from urllib.parse import quote, urlencode
 from uuid import uuid4
@@ -26,10 +28,72 @@ CONSOLE_ROUTES = {
 }
 NODE_PAGE_SIZE = 100
 MAX_NODE_PAGES = 1000
+MAX_PAGE_ITEMS = 100_000
 RESOURCE_ID_PATTERN = re.compile(
     r"^/subscriptions/([^/]+)/resourceGroups/([^/]+)/regions/([^/]+)/"
     r"workspaces/([^/]+)/(trainingJobs|aids|airs)/([^/]+)$"
 )
+
+
+def _response_total(response: dict[str, Any], context: str, *, default: int | None = None) -> int | None:
+    """Parse the current Clusterx pagination field.
+
+    Clusterx 2026.8.19 consistently names the field ``total_size``.  Older
+    monitor code accepted the undocumented ``total`` alias, which made a
+    response from a stale endpoint look valid and could silently publish an
+    incomplete inventory.  Keep the parser strict so an API migration fails
+    loudly instead of changing completeness semantics.
+    """
+    if "total" in response:
+        raise RuntimeError(f"{context} response uses unsupported total field")
+    if "total_size" not in response:
+        return default
+    raw_total = response["total_size"]
+    if isinstance(raw_total, bool):
+        raise RuntimeError(f"{context} total_size must be an integer")
+    try:
+        total = int(raw_total)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f"{context} total_size must be an integer") from error
+    if isinstance(raw_total, float) and not raw_total.is_integer():
+        raise RuntimeError(f"{context} total_size must be an integer")
+    if total < 0:
+        raise RuntimeError(f"{context} total_size must be non-negative")
+    return total
+
+
+def _training_job_page(response: dict[str, Any], context: str) -> list[dict[str, Any]]:
+    """Return a typed TrainingJob page using the current snake-case key."""
+    if "trainingJobs" in response:
+        raise RuntimeError(f"{context} response uses unsupported trainingJobs field")
+    if "training_jobs" not in response:
+        return []
+    page = response["training_jobs"]
+    if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+        raise RuntimeError(f"{context} jobs must be a list of objects")
+    return page
+
+
+def _list_training_jobs_page(
+    cluster: Any, queue_id: str, state: str, page_token: str | None,
+) -> dict[str, Any]:
+    """Fetch one TrainingJob page using the 2026.8.19 token contract.
+
+    The installed SDK exposes ``page_token`` in the public API documentation
+    but its convenience method has not yet added the keyword.  Use that
+    method for the first request (preserving its authentication setup) and
+    the same client's signed request primitive for subsequent pages.
+    """
+    filter_str = f'queue_id="{queue_id}" AND state="{state}"'
+    client = cluster.client
+    if page_token is None:
+        return client.list_training_jobs(filter_str=filter_str, page_size=1000)
+    path = f"{client._get_base_path()}trainingJobs"
+    return client._make_request(
+        "GET",
+        path,
+        params={"filter": filter_str, "page_size": 1000, "page_token": page_token},
+    )
 
 
 def _config_segment(cluster: Any, key: str) -> str | None:
@@ -132,13 +196,28 @@ def _resource_total(rows: Iterable[dict[str, Any]], key: str) -> int | float | N
 
 def _resource_map(node: dict[str, Any]) -> dict[str, tuple[float, float]]:
     result: dict[str, tuple[float, float]] = {}
-    for item in node.get("summary_data") or []:
+    summary = node.get("summary_data") or []
+    if not isinstance(summary, list):
+        raise RuntimeError("node summary_data must be a list")
+    for item in summary:
+        if not isinstance(item, dict):
+            raise RuntimeError("node summary entry must be an object")
         kind = str(item.get("resource_type") or "").upper()
-        allocated = float(item.get("allocated") or 0)
-        total = float(item.get("total") or 0)
-        if kind == "MEMORY" and str(item.get("unit")) != "GiB":
-            allocated /= 1024**3
-            total /= 1024**3
+        unit = str(item.get("unit") or "").strip()
+        try:
+            if kind == "MEMORY" and unit and unit.lower() not in {"gib", "gi"}:
+                allocated = resource_number(f"{item.get('allocated')}{unit}", memory=True)
+                total = resource_number(f"{item.get('total')}{unit}", memory=True)
+            else:
+                allocated = float(item.get("allocated") or 0)
+                total = float(item.get("total") or 0)
+                if kind == "CPU" and unit.lower() in {"m", "mcpu", "millicpu"}:
+                    allocated /= 1000
+                    total /= 1000
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("node resource values must be numeric") from error
+        if not math.isfinite(allocated) or not math.isfinite(total) or allocated < 0 or total < 0:
+            raise RuntimeError("node resource values must be finite and non-negative")
         result[kind] = (allocated, total)
     return result
 
@@ -195,20 +274,8 @@ def _list_queue_nodes(cluster: Any, cluster_name: str, queue: str) -> list[dict[
         if not isinstance(page, list):
             raise RuntimeError("queue node response nodes must be a list")
 
-        raw_total = response.get("total_size")
-        if raw_total is None:
-            raw_total = response.get("total")
-        if raw_total is not None:
-            if isinstance(raw_total, bool):
-                raise RuntimeError("queue node total_size must be an integer")
-            try:
-                page_total = int(raw_total)
-            except (TypeError, ValueError) as error:
-                raise RuntimeError("queue node total_size must be an integer") from error
-            if isinstance(raw_total, float) and not raw_total.is_integer():
-                raise RuntimeError("queue node total_size must be an integer")
-            if page_total < 0:
-                raise RuntimeError("queue node total_size must be non-negative")
+        page_total = _response_total(response, "queue node")
+        if page_total is not None:
             if expected_total is None:
                 expected_total = page_total
             elif page_total != expected_total:
@@ -230,6 +297,9 @@ def _list_queue_nodes(cluster: Any, cluster_name: str, queue: str) -> list[dict[
             if node_name:
                 seen_names.add(node_name)
             nodes.append(raw)
+
+        if len(nodes) > MAX_PAGE_ITEMS:
+            raise RuntimeError("queue node pagination exceeded the record limit")
 
         if expected_total is not None and len(nodes) > expected_total:
             raise RuntimeError("queue node pagination exceeded total_size")
@@ -266,6 +336,7 @@ def _node_signature(rows: Iterable[dict[str, Any]]) -> tuple[Any, ...]:
 
 
 def _list_node_pods(cluster: Any, cluster_name: str, queue: str, node_id: str) -> list[dict[str, Any]]:
+    """List pods through the management endpoint's established offset API."""
     client = cluster.client
     path = (
         f"/subscriptions/{client.subscription}/resourceGroups/{client.resource_group}/"
@@ -273,17 +344,48 @@ def _list_node_pods(cluster: Any, cluster_name: str, queue: str, node_id: str) -
     )
     result: list[dict[str, Any]] = []
     skip = 0
-    while True:
-        response = client._make_management_request(
-            "GET", path,
-            params={"node_id": node_id, "queue_name": queue, "page_size": 100, "skip": skip},
-        )
+    seen_offsets: set[int] = set()
+    seen_pods: set[str] = set()
+    expected_total: int | None = None
+    for _ in range(MAX_NODE_PAGES):
+        params: dict[str, Any] = {"node_id": node_id, "queue_name": queue, "page_size": 100}
+        params["skip"] = skip
+        response = client._make_management_request("GET", path, params=params)
+        if not isinstance(response, dict):
+            raise RuntimeError("pod response must be an object")
         page = response.get("pods") or []
+        if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+            raise RuntimeError("pod response pods must be a list of objects")
+        for item in page:
+            identity = str(item.get("uid") or item.get("id") or item.get("name") or "")
+            if identity and identity in seen_pods:
+                raise RuntimeError("pod pagination returned a duplicate pod")
+            if identity:
+                seen_pods.add(identity)
         result.extend(page)
-        total = int(response.get("total_size") or len(result))
-        if not page or len(result) >= total:
+        if len(result) > MAX_PAGE_ITEMS:
+            raise RuntimeError("pod pagination exceeded the record limit")
+        page_total = _response_total(response, "pod", default=expected_total)
+        if page_total is not None:
+            if expected_total is not None and page_total != expected_total:
+                raise RuntimeError("pod total_size changed during pagination")
+            expected_total = page_total
+        total = expected_total if expected_total is not None else len(result)
+        next_token = response.get("next_page_token")
+        if not page:
+            if next_token not in (None, ""):
+                raise RuntimeError("pod pagination continued after final page")
             return result
-        skip += len(page)
+        if len(result) >= total:
+            if next_token not in (None, ""):
+                raise RuntimeError("pod pagination continued after total_size")
+            return result
+        next_skip = skip + len(page)
+        if next_skip <= skip or next_skip in seen_offsets:
+            raise RuntimeError("pod pagination made no progress")
+        seen_offsets.add(next_skip)
+        skip = next_skip
+    raise RuntimeError("pod pagination exceeded the page limit")
 
 
 def _escape(value: Any) -> str:
@@ -496,11 +598,51 @@ def _running_training_lifecycle(
     cluster: Any, queue: str,
 ) -> tuple[dict[str, dict[str, Any]], bool]:
     queue_id = cluster._get_queue_id(queue)
-    response = cluster.client.list_training_jobs(
-        filter_str=f'queue_id="{queue_id}" AND state="RUNNING"', page_size=1000,
-    )
-    rows = response.get("training_jobs") or response.get("trainingJobs") or []
-    total = response.get("total_size") or response.get("total")
+    rows: list[dict[str, Any]] = []
+    page_token: str | None = None
+    seen_tokens: set[str] = set()
+    seen_ids: set[str] = set()
+    expected_total: int | None = None
+    for _ in range(MAX_NODE_PAGES):
+        response = _list_training_jobs_page(cluster, queue_id, "RUNNING", page_token)
+        if not isinstance(response, dict):
+            raise RuntimeError("training lifecycle response must be an object")
+        page = _training_job_page(response, "training lifecycle")
+        for item in page:
+            identity = str(item.get("uid") or item.get("id") or item.get("name") or "")
+            if identity and identity in seen_ids:
+                raise RuntimeError("training lifecycle pagination returned a duplicate")
+            if identity:
+                seen_ids.add(identity)
+        rows.extend(page)
+        if len(rows) > MAX_PAGE_ITEMS:
+            raise RuntimeError("training lifecycle pagination exceeded the record limit")
+        page_total = _response_total(response, "training lifecycle", default=expected_total)
+        if page_total is not None:
+            if expected_total is not None and page_total != expected_total:
+                raise RuntimeError("training lifecycle total_size changed during pagination")
+            expected_total = page_total
+        next_token = response.get("next_page_token")
+        if not page:
+            if next_token not in (None, ""):
+                raise RuntimeError("training lifecycle pagination continued after final page")
+            break
+        if expected_total is not None and len(rows) >= expected_total:
+            if next_token not in (None, ""):
+                raise RuntimeError("training lifecycle pagination continued after total_size")
+            break
+        if next_token in (None, ""):
+            # The API may omit a token when the SDK caps the first page.  Keep
+            # the rows but report ``complete=False`` from the total_size check.
+            break
+        if not isinstance(next_token, str) or not next_token.strip():
+            raise RuntimeError("training lifecycle response has invalid next_page_token")
+        if next_token in seen_tokens:
+            raise RuntimeError("training lifecycle pagination cursor repeated")
+        seen_tokens.add(next_token)
+        page_token = next_token
+    else:
+        raise RuntimeError("training lifecycle pagination exceeded the page limit")
     result = {}
     for row in rows:
         uid = str(row.get("uid") or "")
@@ -516,7 +658,7 @@ def _running_training_lifecycle(
             "runtime_source": "training_status_start",
             "runtime_quality": "exact",
         }
-    return result, total is None or int(total) <= len(rows)
+    return result, expected_total is None or expected_total <= len(rows)
 
 
 def _workspace_resource_lifecycle(
@@ -524,15 +666,61 @@ def _workspace_resource_lifecycle(
 ) -> tuple[list[dict[str, Any]], bool]:
     client = cluster.client
     base_path = client._get_base_path().rstrip("/")
-    response = client._make_signed_base_request(
-        client.compute_base_endpoint,
-        "GET",
-        f"{api_prefix}{base_path}/{resource_name}",
-        params={"page_size": 1000, "skip": 0, "filter": 'state="RUNNING"'},
-    )
-    rows = list(response.get(resource_name) or [])
-    total = response.get("total_size") or response.get("total")
-    return rows, total is None or int(total) <= len(rows)
+    rows: list[dict[str, Any]] = []
+    page_token: str | None = None
+    seen_tokens: set[str] = set()
+    seen_ids: set[str] = set()
+    expected_total: int | None = None
+    for _ in range(MAX_NODE_PAGES):
+        response = client._make_signed_base_request(
+            client.compute_base_endpoint,
+            "GET",
+            f"{api_prefix}{base_path}/{resource_name}",
+            params={
+                "page_size": 1000,
+                **({"page_token": page_token} if page_token is not None else {}),
+                "filter": 'state="RUNNING"',
+            },
+        )
+        if not isinstance(response, dict):
+            raise RuntimeError(f"{resource_name} lifecycle response must be an object")
+        page = response.get(resource_name) or []
+        if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+            raise RuntimeError(f"{resource_name} lifecycle rows must be a list of objects")
+        for item in page:
+            identity = str(item.get("uid") or item.get("id") or item.get("name") or "")
+            if identity and identity in seen_ids:
+                raise RuntimeError(f"{resource_name} lifecycle pagination returned a duplicate")
+            if identity:
+                seen_ids.add(identity)
+        rows.extend(page)
+        if len(rows) > MAX_PAGE_ITEMS:
+            raise RuntimeError(f"{resource_name} lifecycle pagination exceeded the record limit")
+        page_total = _response_total(response, f"{resource_name} lifecycle", default=expected_total)
+        if page_total is not None:
+            if expected_total is not None and page_total != expected_total:
+                raise RuntimeError(f"{resource_name} lifecycle total_size changed during pagination")
+            expected_total = page_total
+        next_token = response.get("next_page_token")
+        if not page:
+            if next_token not in (None, ""):
+                raise RuntimeError(f"{resource_name} lifecycle pagination continued after final page")
+            break
+        if expected_total is not None and len(rows) >= expected_total:
+            if next_token not in (None, ""):
+                raise RuntimeError(f"{resource_name} lifecycle pagination continued after total_size")
+            break
+        if next_token in (None, ""):
+            break
+        if not isinstance(next_token, str) or not next_token.strip():
+            raise RuntimeError(f"{resource_name} lifecycle response has invalid next_page_token")
+        if next_token in seen_tokens:
+            raise RuntimeError(f"{resource_name} lifecycle pagination cursor repeated")
+        seen_tokens.add(next_token)
+        page_token = next_token
+    else:
+        raise RuntimeError(f"{resource_name} lifecycle pagination exceeded the page limit")
+    return rows, expected_total is None or expected_total <= len(rows)
 
 
 def _running_aid_lifecycle(cluster: Any) -> tuple[dict[str, dict[str, Any]], bool]:
@@ -593,22 +781,59 @@ def _aid_pod_start_times(
     client = cluster.client
     path = f"/aid/v1/{resource_id.lstrip('/')}".rstrip("/") + "/events"
     events: list[dict[str, Any]] = []
-    skip = 0
-    while True:
+    page_token: str | None = None
+    seen_tokens: set[str] = set()
+    seen_events: set[str] = set()
+    expected_total: int | None = None
+    for _ in range(MAX_NODE_PAGES):
+        params: dict[str, Any] = {"page_size": 100, "order_by": "created_at asc"}
+        if page_token is not None:
+            params["page_token"] = page_token
         response = client._make_signed_base_request(
             client.compute_base_endpoint,
             "GET",
             path,
-            params={"page_size": 100, "skip": skip, "order_by": "created_at asc"},
+            params=params,
         )
-        page = list(response.get("events") or [])
+        if not isinstance(response, dict):
+            raise RuntimeError("AID event response must be an object")
+        page = response.get("events") or []
+        if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+            raise RuntimeError("AID event response events must be a list of objects")
+        for event in page:
+            identity = json.dumps(event, sort_keys=True, default=str)
+            if identity in seen_events:
+                raise RuntimeError("AID event pagination returned a duplicate")
+            seen_events.add(identity)
         events.extend(page)
-        total = int(response.get("total_size") or response.get("total") or len(events))
-        if len(events) >= total:
-            break
+        if len(events) > MAX_PAGE_ITEMS:
+            raise RuntimeError("AID event pagination exceeded the record limit")
+        page_total = _response_total(response, "AID event", default=expected_total)
+        if page_total is not None:
+            if expected_total is not None and page_total != expected_total:
+                raise RuntimeError("AID event total_size changed during pagination")
+            expected_total = page_total
+        next_token = response.get("next_page_token")
         if not page:
-            raise RuntimeError("AID event response is truncated")
-        skip += len(page)
+            if next_token not in (None, ""):
+                raise RuntimeError("AID event pagination continued after final page")
+            break
+        if expected_total is not None and len(events) >= expected_total:
+            if next_token not in (None, ""):
+                raise RuntimeError("AID event pagination continued after total_size")
+            break
+        if next_token in (None, ""):
+            # Without a total_size, a page without a token is the only safe
+            # indication that the endpoint reached its end.
+            break
+        if not isinstance(next_token, str) or not next_token.strip():
+            raise RuntimeError("AID event response has invalid next_page_token")
+        if next_token in seen_tokens:
+            raise RuntimeError("AID event pagination cursor repeated")
+        seen_tokens.add(next_token)
+        page_token = next_token
+    else:
+        raise RuntimeError("AID event pagination exceeded the page limit")
 
     starts: dict[str, list[datetime]] = {uid: [] for uid in pod_uids}
     for event in events:
@@ -632,12 +857,53 @@ def _aid_pod_start_times(
 
 def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], bool]:
     queue_id = cluster._get_queue_id(queue)
-    response = cluster.client.list_training_jobs(
-        filter_str=f'queue_id="{queue_id}" AND state="PENDING"', page_size=1000
-    )
-    jobs = response.get("training_jobs") or response.get("trainingJobs") or []
-    total = response.get("total_size") or response.get("total")
-    complete = total is None or int(total) <= len(jobs)
+    jobs: list[dict[str, Any]] = []
+    page_token: str | None = None
+    seen_tokens: set[str] = set()
+    seen_job_ids: set[str] = set()
+    expected_total: int | None = None
+    for _ in range(MAX_NODE_PAGES):
+        response = _list_training_jobs_page(cluster, queue_id, "PENDING", page_token)
+        if not isinstance(response, dict):
+            raise RuntimeError("pending workload response must be an object")
+        page = _training_job_page(response, "pending workload")
+        duplicate = False
+        for item in page:
+            identity = str(item.get("uid") or item.get("id") or item.get("name") or "")
+            if identity and identity in seen_job_ids:
+                duplicate = True
+            if identity:
+                seen_job_ids.add(identity)
+        if duplicate:
+            raise RuntimeError("pending workload pagination returned a duplicate")
+        jobs.extend(page)
+        if len(jobs) > MAX_PAGE_ITEMS:
+            raise RuntimeError("pending workload pagination exceeded the record limit")
+        page_total = _response_total(response, "pending workload", default=expected_total)
+        if page_total is not None:
+            if expected_total is not None and page_total != expected_total:
+                raise RuntimeError("pending workload total_size changed during pagination")
+            expected_total = page_total
+        next_token = response.get("next_page_token")
+        if not page:
+            if next_token not in (None, ""):
+                raise RuntimeError("pending workload pagination continued after final page")
+            break
+        if expected_total is not None and len(jobs) >= expected_total:
+            if next_token not in (None, ""):
+                raise RuntimeError("pending workload pagination continued after total_size")
+            break
+        if next_token in (None, ""):
+            break
+        if not isinstance(next_token, str) or not next_token.strip():
+            raise RuntimeError("pending workload response has invalid next_page_token")
+        if next_token in seen_tokens:
+            raise RuntimeError("pending workload pagination cursor repeated")
+        seen_tokens.add(next_token)
+        page_token = next_token
+    else:
+        raise RuntimeError("pending workload pagination exceeded the page limit")
+    complete = expected_total is None or expected_total <= len(jobs)
     now = datetime.now(timezone.utc)
     result = []
     for job in jobs:
@@ -652,8 +918,8 @@ def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], 
                 "role": str(task.get("role") or ""),
                 "replicas": replicas,
                 "gpu_per_replica": _optional_number(resource.get("accelerate_device_count")) or 0,
-                "cpu_per_replica": _optional_number(resource.get("cpu_count")),
-                "memory_gib_per_replica": _optional_number(resource.get("memory_gib")),
+                "cpu_per_replica": _optional_resource_number(resource.get("cpu_count")),
+                "memory_gib_per_replica": _optional_resource_number(resource.get("memory_gib"), memory=True),
             })
         resource_shapes = {
             (
@@ -707,10 +973,14 @@ def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], 
 
 
 class ClusterCollector:
-    def __init__(self, cluster: Any, queue: str, cluster_name: str) -> None:
+    def __init__(self, cluster: Any, queue: str, cluster_name: str, *, gateway: Any = None) -> None:
         self.cluster = cluster
         self.queue = queue
         self.cluster_name = cluster_name
+        if gateway is None:
+            from .gateway import ClusterxGateway
+            gateway = ClusterxGateway(cluster)
+        self.gateway = gateway
         self._history_cache: dict[str, dict[str, float]] = {}
         self._history_fetched_at: datetime | None = None
         self._history_last_attempt_at: datetime | None = None
@@ -721,7 +991,7 @@ class ClusterCollector:
 
     def get_realtime_log(self, resource_name: str, worker: str, lines: int) -> str:
         """Fetch one explicitly selected Worker log outside snapshot collection."""
-        return self.cluster.get_log(resource_name, worker=worker, lines=lines)
+        return self.gateway.realtime_log(resource_name, worker, lines)
 
     def _enrich_lifecycle(
         self, workloads: dict[str, dict[str, Any]], warnings: list[str],
@@ -732,9 +1002,9 @@ class ClusterCollector:
         }
 
         fetchers = {
-            "trainingJob": lambda: _running_training_lifecycle(self.cluster, self.queue),
-            "aid": lambda: _running_aid_lifecycle(self.cluster),
-            "air": lambda: _running_air_lifecycle(self.cluster),
+            "trainingJob": lambda: self.gateway.running_training_lifecycle(self.queue),
+            "aid": lambda: self.gateway.running_aid_lifecycle(),
+            "air": lambda: self.gateway.running_air_lifecycle(),
         }
         for kind, fetch in fetchers.items():
             if not any(item.get("type") == kind for item in workloads.values()):
@@ -771,7 +1041,8 @@ class ClusterCollector:
                 unresolved.append((workload, pod_uids))
         failures = 0
         if unresolved:
-            with ThreadPoolExecutor(max_workers=min(8, len(unresolved))) as pool:
+            pool = ThreadPoolExecutor(max_workers=min(8, len(unresolved)), thread_name_prefix="monitor-aid")
+            try:
                 futures = {
                     pool.submit(
                         _aid_pod_start_times,
@@ -781,11 +1052,17 @@ class ClusterCollector:
                     ): pod_uids
                     for workload, pod_uids in unresolved
                 }
-                for future in as_completed(futures):
+                done, pending_futures = wait(futures, timeout=20)
+                failures += len(pending_futures)
+                for future in done:
                     try:
                         self._aid_pod_start_cache.update(future.result())
                     except Exception:
                         failures += 1
+                for future in pending_futures:
+                    future.cancel()
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
         if failures:
             warnings.append(f"AID start events are unavailable for {failures} workloads")
 
@@ -843,27 +1120,36 @@ class ClusterCollector:
         self, *, telemetry_minutes: int = 5,
         historical_window_hours: int = 24,
         historical_refresh_minutes: int = 5,
+        deadline_seconds: float = 90.0,
     ) -> dict[str, Any]:
-        raw_nodes = _list_queue_nodes(self.cluster, self.cluster_name, self.queue)
+        started = time.monotonic()
+        raw_nodes = self.gateway.list_queue_nodes(self.cluster_name, self.queue)
         nodes = normalize_nodes(raw_nodes)
-        node_by_name = {item["node"]: item for item in nodes}
         occupied = [
             item for item in nodes
             if item["allocated_gpu"] or item["allocated_cpu"] or item["allocated_memory_gib"]
         ]
         pods_by_node: dict[str, list[dict[str, Any]]] = {}
         failures: list[str] = []
-        with ThreadPoolExecutor(max_workers=16) as pool:
+        pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="monitor-pod")
+        try:
             futures = {
-                pool.submit(_list_node_pods, self.cluster, self.cluster_name, self.queue, item["id"]): item["node"]
+                pool.submit(self.gateway.list_node_pods, self.cluster_name, self.queue, item["id"]): item["node"]
                 for item in occupied
             }
-            for future in as_completed(futures):
+            remaining = max(0.01, deadline_seconds - (time.monotonic() - started))
+            done, pending_futures = wait(futures, timeout=remaining)
+            for future in pending_futures:
+                failures.append(futures[future])
+                future.cancel()
+            for future in done:
                 name = futures[future]
                 try:
                     pods_by_node[name] = future.result()
                 except Exception:
                     failures.append(name)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         if failures:
             raise RuntimeError(f"pod workload mapping failed for {len(failures)} occupied nodes")
 
@@ -941,7 +1227,9 @@ class ClusterCollector:
         self._enrich_lifecycle(workloads, warnings)
 
         try:
-            telemetry = _query_gpu_telemetry(self.cluster, self.queue, self.cluster_name, telemetry_minutes)
+            telemetry = self.gateway.query_gpu_telemetry(
+                self.queue, self.cluster_name, telemetry_minutes,
+            )
             warnings.extend(_attach_telemetry(workloads, telemetry, hostname_to_node))
             telemetry_available = True
         except Exception:
@@ -961,9 +1249,8 @@ class ClusterCollector:
             self._history_last_attempt_at = history_now
             self._history_window_hours = historical_window_hours
             try:
-                self._history_cache = _query_workload_history(
-                    self.cluster, self.queue, self.cluster_name,
-                    historical_window_hours,
+                self._history_cache = self.gateway.query_workload_history(
+                    self.queue, self.cluster_name, historical_window_hours,
                 )
                 self._history_fetched_at = history_now
                 self._history_query_available = True
@@ -985,14 +1272,16 @@ class ClusterCollector:
                 "memory_sample_count": int(values.get("memory_sample_count", 0)),
             }
         try:
-            pending, pending_complete = _pending_workloads(self.cluster, self.queue)
+            pending, pending_complete = self.gateway.pending_workloads(self.queue)
         except Exception:
             pending, pending_complete = [], False
             warnings.append("pending workload inventory is unavailable")
 
-        after = _list_queue_nodes(self.cluster, self.cluster_name, self.queue)
+        after = self.gateway.list_queue_nodes(self.cluster_name, self.queue)
         if _node_signature(raw_nodes) != _node_signature(after):
             raise RuntimeError("queue node allocation changed during collection")
+        if time.monotonic() - started > deadline_seconds:
+            raise TimeoutError("collection deadline exceeded")
         generated = datetime.now(timezone.utc)
         return {
             "schema_version": SCHEMA_VERSION,

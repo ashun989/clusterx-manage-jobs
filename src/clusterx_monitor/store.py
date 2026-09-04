@@ -5,8 +5,10 @@ from contextlib import closing
 from copy import deepcopy
 from datetime import datetime, timezone
 import math
+import json
 from pathlib import Path
 import sqlite3
+import time
 from threading import RLock
 from typing import Any, Callable
 
@@ -40,6 +42,8 @@ class SQLiteHistoryStore:
         self.max_db_mib = max_db_mib
         self._lock = RLock()
         self.last_error: str | None = None
+        self._failure_cooldown_until = 0.0
+        self._checkpoint_at = 0.0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self.path.parent.chmod(0o700)
@@ -91,19 +95,31 @@ class SQLiteHistoryStore:
                     PRIMARY KEY(snapshot_id, severity)
                 );
             """)
-            connection.execute("PRAGMA user_version = 1")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version > 1:
+                raise RuntimeError(f"unsupported history schema version {version}")
+            # Version 1 is the initial schema.  Keep this explicit so future
+            # migrations can be added without silently accepting old layouts.
+            if version < 1:
+                connection.execute("PRAGMA user_version = 1")
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+            if integrity != "ok":
+                raise RuntimeError(f"history database integrity check failed: {integrity}")
         try:
             self.path.chmod(0o600)
         except OSError:
             pass
 
     def publish(self, point: dict[str, Any], alerts: list[dict[str, Any]]) -> None:
+        if time.monotonic() < self._failure_cooldown_until:
+            return
         severities: dict[str, int] = {}
         for alert in alerts:
             severity = str(alert.get("severity") or "unknown").lower()
             severities[severity] = severities.get(severity, 0) + 1
         values = [point.get(field) for field in HISTORY_NUMERIC_FIELDS]
         try:
+            checkpoint_due = False
             with self._lock, closing(self._connect()) as connection, connection:
                 connection.execute(
                     f"INSERT OR REPLACE INTO history_points (snapshot_id, generated_at, generated_ts, {', '.join(HISTORY_NUMERIC_FIELDS)}) VALUES ({', '.join('?' for _ in range(3 + len(HISTORY_NUMERIC_FIELDS)))})",
@@ -126,9 +142,16 @@ class SQLiteHistoryStore:
                     (self.max_points,),
                 )
                 self._enforce_size(connection)
+                checkpoint_due = time.monotonic() >= self._checkpoint_at
+            if checkpoint_due:
+                with self._lock, closing(self._connect()) as checkpoint_connection:
+                    checkpoint_connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                self._checkpoint_at = time.monotonic() + 60
             self.last_error = None
+            self._failure_cooldown_until = 0.0
         except Exception as error:
             self.last_error = str(error)
+            self._failure_cooldown_until = time.monotonic() + 30
             raise
 
     def _enforce_size(self, connection: sqlite3.Connection) -> None:
@@ -137,10 +160,12 @@ class SQLiteHistoryStore:
         for _ in range(32):
             pages = int(connection.execute("PRAGMA page_count").fetchone()[0])
             free = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
-            if (pages - free) * page_size <= max_bytes:
+            wal_size = Path(f"{self.path}-wal").stat().st_size if Path(f"{self.path}-wal").exists() else 0
+            shm_size = Path(f"{self.path}-shm").stat().st_size if Path(f"{self.path}-shm").exists() else 0
+            if (pages - free) * page_size + wal_size + shm_size <= max_bytes:
                 return
             count = int(connection.execute("SELECT COUNT(*) FROM history_points").fetchone()[0])
-            if count <= 2:
+            if count <= 1:
                 return
             remove = max(1, count // 4)
             connection.execute(
@@ -229,6 +254,7 @@ class SQLiteHistoryStore:
 
     def status(self) -> dict[str, Any]:
         with self._lock, closing(self._connect()) as connection:
+            integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
             count = int(connection.execute("SELECT COUNT(*) FROM history_points").fetchone()[0])
             oldest = connection.execute("SELECT generated_at FROM history_points ORDER BY generated_ts LIMIT 1").fetchone()
             newest = connection.execute("SELECT generated_at FROM history_points ORDER BY generated_ts DESC LIMIT 1").fetchone()
@@ -237,7 +263,7 @@ class SQLiteHistoryStore:
                 self.path, Path(f"{self.path}-wal"), Path(f"{self.path}-shm"),
             ) if candidate.exists()
         )
-        return {"enabled": True, "storage": "sqlite", "points": count, "oldest_at": oldest[0] if oldest else None, "newest_at": newest[0] if newest else None, "retention_days": self.retention_days, "max_points": self.max_points, "max_db_mib": self.max_db_mib, "database_bytes": size, "last_error": self.last_error}
+        return {"enabled": True, "storage": "sqlite", "points": count, "oldest_at": oldest[0] if oldest else None, "newest_at": newest[0] if newest else None, "retention_days": self.retention_days, "max_points": self.max_points, "max_db_mib": self.max_db_mib, "database_bytes": size, "integrity": integrity, "last_error": self.last_error}
 
 
 class SnapshotStore:
@@ -272,7 +298,7 @@ class SnapshotStore:
                 self._history.popitem(last=False)
             self.last_error = None
             self.last_attempt_at = datetime.now(timezone.utc).isoformat()
-        if self.persistent_history is not None:
+        if self.persistent_history is not None and time.monotonic() >= self.persistent_history._failure_cooldown_until:
             try:
                 self.persistent_history.publish(point, list(snapshot.get("alerts") or []))
                 self.history_error = None
@@ -330,9 +356,10 @@ class SnapshotStore:
         self, limit: int = 240, *, since: str | None = None,
         until: str | None = None, resolution_seconds: int | None = None,
     ) -> dict[str, Any]:
-        if self.persistent_history is not None:
+        persistent = self.persistent_history
+        if persistent is not None and time.monotonic() >= persistent._failure_cooldown_until:
             try:
-                result = self.persistent_history.history(
+                result = persistent.history(
                     limit=limit, since=since, until=until,
                     resolution_seconds=resolution_seconds,
                 )
@@ -340,6 +367,7 @@ class SnapshotStore:
                 return result
             except Exception as error:
                 self.history_error = str(error)
+                persistent._failure_cooldown_until = time.monotonic() + 30
         with self._lock:
             points = list(self._history.values())[-limit:]
             return {
@@ -412,19 +440,28 @@ class SnapshotStore:
             "history_points": len(self._history),
             "history": {"enabled": False, "storage": "memory", "points": len(self._history), "last_error": self.history_error},
         }
-        if self.persistent_history is not None:
+        if self.persistent_history is not None and time.monotonic() >= self.persistent_history._failure_cooldown_until:
             try:
                 result["history"] = self.persistent_history.status()
                 result["history"]["last_error"] = self.history_error or result["history"].get("last_error")
             except Exception as error:
                 self.history_error = str(error)
                 result["history"] = {"enabled": True, "storage": "sqlite", "points": 0, "last_error": self.history_error}
+        elif self.persistent_history is not None:
+            result["history"] = {
+                "enabled": True, "storage": "memory", "points": len(self._history),
+                "last_error": self.history_error, "degraded": True,
+            }
         return result
 
 
 class PlanCache:
-    def __init__(self, capacity: int = 128) -> None:
+    def __init__(self, capacity: int = 128, max_bytes: int = 32 * 1024 * 1024) -> None:
+        if capacity < 1 or max_bytes < 1024:
+            raise ValueError("plan cache limits must be positive")
         self.capacity = capacity
+        self.max_bytes = max_bytes
+        self._bytes = 0
         self._items: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._lock = RLock()
 
@@ -446,14 +483,23 @@ class PlanCache:
         value = compute()
         value["cache_hit"] = False
         with self._lock:
-            self._items[key] = deepcopy(value)
-            while len(self._items) > self.capacity:
-                self._items.popitem(last=False)
+            self._put_locked(key, value)
         return value
 
     def put(self, key: str, value: dict[str, Any]) -> None:
         with self._lock:
-            self._items[key] = deepcopy(value)
-            self._items.move_to_end(key)
-            while len(self._items) > self.capacity:
-                self._items.popitem(last=False)
+            self._put_locked(key, value)
+
+    def _put_locked(self, key: str, value: dict[str, Any]) -> None:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode()
+        previous = self._items.pop(key, None)
+        if previous is not None:
+            self._bytes -= len(json.dumps(previous, ensure_ascii=False, separators=(",", ":"), default=str).encode())
+        if len(encoded) > self.max_bytes:
+            return
+        self._items[key] = deepcopy(value)
+        self._items.move_to_end(key)
+        self._bytes += len(encoded)
+        while len(self._items) > self.capacity or self._bytes > self.max_bytes:
+            old_key, old_value = self._items.popitem(last=False)
+            self._bytes -= len(json.dumps(old_value, ensure_ascii=False, separators=(",", ":"), default=str).encode())

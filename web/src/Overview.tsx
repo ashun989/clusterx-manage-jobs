@@ -233,7 +233,7 @@ export function Overview({ snapshot, history, open, navigate, range, onRange, hi
       </InsightList>
 
       <InsightList title="策略与利用率" action={<button type="button" onClick={() => navigate("workloads")}>Workload 视图</button>}>
-        {lowUtilization.map((workload) => <button type="button" className="low-utilization-item" key={workload.workload_id} onClick={() => openWorkload(workload)}><span><b>{workload.workload_name}</b><small>{workload.user} · 低 GPU 活跃度</small></span><em className="low-utilization-readout" role="group" aria-label="GPU 利用率预览"><small>最近 {number(workload.historical_telemetry?.window_hours)} 小时 GPU 利用率</small><b>{number(workload.historical_telemetry?.gpu_compute_util_avg_pct, "%")}</b></em></button>)}
+        {lowUtilization.map((workload) => <button type="button" className="low-utilization-item" key={workload.workload_id} onClick={() => openWorkload(workload)}><span><b>{workload.workload_name}</b><small>{workload.user} · 低 GPU/显存利用率</small></span><em className="low-utilization-readout" role="group" aria-label="GPU 与显存利用率预览"><small>最近 {number(workload.historical_telemetry?.window_hours)} 小时</small><b>GPU {number(workload.historical_telemetry?.gpu_compute_util_avg_pct, "%")} · 显存 {number(workload.historical_telemetry?.gpu_memory_util_avg_pct, "%")}</b></em></button>)}
         {!lowUtilization.length && <p className="overview-empty">当前没有低利用率策略发现</p>}
       </InsightList>
 

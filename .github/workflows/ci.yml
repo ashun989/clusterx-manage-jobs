@@ -10,16 +10,36 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
       - name: Install test dependencies
         run: |
-          python -m pip install --disable-pip-version-check -e ".[test]"
+          python -m pip install --disable-pip-version-check -c constraints.txt -e ".[test,dev]"
       - name: Run tests
-        run: python -m unittest discover -s tests -v
+        run: coverage run -m unittest discover -s tests -v && coverage report --fail-under=70
+      - name: Lint and type checks
+        run: |
+          ruff check --select E9,F src
+          mypy --ignore-missing-imports --follow-imports=skip src/clusterx_monitor/gateway.py src/clusterx_monitor/service.py
+      - name: Web tests and build
+        working-directory: web
+        run: npm ci --ignore-scripts && npm test -- --run && npm run build
+      - name: Verify generated static assets and version
+        run: |
+          test -f src/clusterx_monitor/static/index.html
+          python scripts/check_versions.py
+      - name: Chrome extension tests and build
+        working-directory: chrome-extension
+        run: npm ci --ignore-scripts && npm test -- --run && npm run build
+      - name: Dependency audit
+        working-directory: web
+        run: npm audit --audit-level=high
       - name: Validate Skill metadata
         run: |
           python - <<'PY'

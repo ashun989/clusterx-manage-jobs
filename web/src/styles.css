@@ -454,9 +454,9 @@ tr.clickable:hover, tr.clickable:focus { background: var(--surface-hover); }
 .insight-list > button:hover { border-color: var(--line-strong); background: color-mix(in srgb, var(--accent) 8%, var(--surface-raised)); }
 .insight-list > button > span, .insight-list > button > em { display: grid; min-width: 0; gap: 2px; font-style: normal; }
 .insight-list > button > em { flex: 0 0 auto; text-align: right; }
-.insight-list > button > em.low-utilization-readout { min-width: 150px; gap: 3px; }
-.insight-list > button > em.low-utilization-readout > small { color: var(--accent-strong); }
-.insight-list > button > em.low-utilization-readout > b { font-size: 15px; }
+.insight-list > button > em.low-utilization-readout { min-width: 150px; gap: 2px; }
+.insight-list > button > em.low-utilization-readout > small { color: var(--muted); }
+.insight-list > button > em.low-utilization-readout > b { font-size: 12px; }
 .insight-list > button b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .insight-list > button small { color: var(--muted); font-size: 10px; }
 .overview-empty { padding: 22px 8px; color: var(--muted); text-align: center; font-size: 11px; }

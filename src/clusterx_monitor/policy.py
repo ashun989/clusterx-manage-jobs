@@ -33,13 +33,21 @@ RULE_CATALOG = [
     {"code": "resource.development.gpu_limit", "category": "resource-shape", "applies_to": "aid", "title": "Development GPU limit", "description": "Development instances may use zero or one GPU; more GPUs are a violation."},
     {"code": "resource.development.cpu_limit", "category": "resource-shape", "applies_to": "aid", "title": "Development CPU per-node limit", "description": "CPU is checked per development instance against the separate zero-GPU and one-GPU limits."},
     {"code": "resource.development.memory_limit", "category": "resource-shape", "applies_to": "aid", "title": "Development memory per-node limit", "description": "Memory is checked per development instance against the separate zero-GPU and one-GPU limits."},
+    {"code": "resource.development.cpu_unknown", "category": "resource-shape", "applies_to": "aid", "title": "Development CPU unavailable", "description": "Missing CPU attribution is unknown and never treated as zero."},
+    {"code": "resource.development.memory_unknown", "category": "resource-shape", "applies_to": "aid", "title": "Development memory unavailable", "description": "Missing memory attribution is unknown and never treated as zero."},
+    {"code": "resource.development.placement_unknown", "category": "resource-shape", "applies_to": "aid", "title": "Development placement unavailable", "description": "Missing placement attribution is unknown and never treated as zero."},
     {"code": "runtime.development.one_gpu_limit", "category": "runtime", "applies_to": "aid", "title": "One-GPU development runtime limit", "description": "Only one-GPU development instances have a runtime limit; equality is compliant."},
     {"code": "resource.training.cpu_ratio", "category": "resource-shape", "applies_to": "trainingJob", "title": "Training CPU-to-GPU ratio", "description": "Each task/node may request at most GPU count times cpu_per_gpu; zero-GPU tasks use a separate limit."},
     {"code": "resource.training.memory_ratio", "category": "resource-shape", "applies_to": "trainingJob", "title": "Training memory-to-GPU ratio", "description": "Each task/node may request at most GPU count times memory_gib_per_gpu; zero-GPU tasks use a separate limit."},
+    {"code": "resource.training.cpu_unknown", "category": "resource-shape", "applies_to": "trainingJob", "title": "Training CPU unavailable", "description": "Missing CPU attribution is unknown and never treated as zero."},
+    {"code": "resource.training.memory_unknown", "category": "resource-shape", "applies_to": "trainingJob", "title": "Training memory unavailable", "description": "Missing memory attribution is unknown and never treated as zero."},
+    {"code": "resource.training.placement_unknown", "category": "resource-shape", "applies_to": "trainingJob", "title": "Training placement unavailable", "description": "Missing placement attribution is unknown and never treated as zero."},
     {"code": "quota.gpu", "category": "quota", "applies_to": "group", "title": "Group GPU quota", "description": "Usage above quota is burst without pending pressure and violation with active pressure; equality is compliant."},
     {"code": "quota.cpu", "category": "quota", "applies_to": "group", "title": "Group CPU quota", "description": "CPU usage is checked only when the group explicitly configures cpu_quota."},
     {"code": "quota.memory", "category": "quota", "applies_to": "group", "title": "Group memory quota", "description": "Memory usage is checked only when the group explicitly configures memory_quota_gib."},
-    {"code": "utilization.low_gpu_activity", "category": "utilization", "applies_to": "GPU workload", "title": "Historical low GPU activity", "description": "Both historical compute and capacity/time-weighted memory utilization are at or below their inclusive thresholds."},
+    {"code": "quota.cpu.unknown", "category": "quota", "applies_to": "group", "title": "Group CPU quota unavailable", "description": "A configured quota with missing CPU usage is unknown and never treated as zero."},
+    {"code": "quota.memory.unknown", "category": "quota", "applies_to": "group", "title": "Group memory quota unavailable", "description": "A configured quota with missing memory usage is unknown and never treated as zero."},
+    {"code": "utilization.low_gpu_activity", "category": "utilization", "applies_to": "GPU workload", "title": "Historical low GPU activity", "description": "Either historical compute or capacity/time-weighted memory utilization is at or below its inclusive threshold."},
     {"code": "node.idle", "category": "node-classification", "applies_to": "node", "title": "Idle node", "description": "The schedulable node has no allocated GPU, CPU, or memory."},
     {"code": "node.gpu_full", "category": "node-classification", "applies_to": "node", "title": "GPU-full node", "description": "All GPUs are allocated."},
     {"code": "node.fragmented", "category": "node-classification", "applies_to": "node", "title": "Fragmented node", "description": "The node is partially allocated and its free GPU capacity remains usable for the configured standard planning profile."},
@@ -361,6 +369,18 @@ class PolicyManager:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if path.is_symlink():
             raise ValueError("refusing to write audit log through a symlink")
+        # Keep operational audit storage bounded. Rotate before appending so a
+        # single large update cannot exceed the configured capacity.
+        if path.is_file() and (
+            path.stat().st_size >= 10 * 1024 * 1024
+            or (datetime.now(timezone.utc).timestamp() - path.stat().st_mtime) >= 30 * 86_400
+        ):
+            for index in (2, 1):
+                source = path.with_name(path.name + f".{index}")
+                destination = path.with_name(path.name + f".{index + 1}")
+                if source.exists() and not source.is_symlink():
+                    source.replace(destination)
+            path.replace(path.with_name(path.name + ".1"))
         record = json.dumps({
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "actor": actor,
@@ -567,6 +587,7 @@ def _workload_limits(
     workload: dict[str, Any], policy: PolicyConfig, now: datetime
 ) -> tuple[str, list[dict[str, Any]]]:
     findings: list[dict[str, Any]] = []
+    unknown_resources = False
     kind = str(workload.get("type") or "unknown")
     placements = workload.get("placements") or []
     anchor = (
@@ -592,6 +613,15 @@ def _workload_limits(
     runtime = _runtime_hours(workload, now)
     workload["runtime_hours"] = round(runtime, 2) if runtime is not None else None
     workload["runtime_estimated"] = quality == "estimated"
+    if kind in {"aid", "trainingJob"} and not placements and (
+        workload.get("total_cpu") is None or workload.get("total_memory_gib") is None
+    ):
+        unknown_resources = True
+        findings.append(_finding(
+            f"resource.{ 'development' if kind == 'aid' else 'training' }.placement_unknown", "resource-shape", "unknown",
+            "workload resource placement is unavailable; limits cannot be evaluated",
+            tags=(kind, "resource", "unknown"),
+        ))
     if kind == "aid":
         cfg = policy.development
         total_gpu = float(workload.get("total_gpu") or 0)
@@ -611,20 +641,36 @@ def _workload_limits(
             if total_gpu == 0 else cfg.one_gpu_max_memory_gib_per_node
         )
         for placement in placements:
-            if float(placement.get("cpu") or 0) > max_cpu:
+            cpu = placement.get("cpu")
+            memory = placement.get("memory_gib")
+            if cpu is None:
+                unknown_resources = True
+                findings.append(_finding(
+                    "resource.development.cpu_unknown", "resource-shape", "unknown",
+                    "development CPU usage is unavailable; limit cannot be evaluated",
+                    tags=("development", "cpu", "unknown"),
+                ))
+            elif float(cpu) > max_cpu:
                 findings.append(_finding(
                     "resource.development.cpu_limit", "resource-shape", "violation",
                     "development CPU per node exceeds limit",
                     tags=("development", "cpu"),
-                    observed={"cpu_per_node": float(placement.get("cpu") or 0)},
+                    observed={"cpu_per_node": float(cpu)},
                     limit={"max_cpu_per_node": max_cpu},
                 ))
-            if float(placement.get("memory_gib") or 0) > max_memory:
+            if memory is None:
+                unknown_resources = True
+                findings.append(_finding(
+                    "resource.development.memory_unknown", "resource-shape", "unknown",
+                    "development memory usage is unavailable; limit cannot be evaluated",
+                    tags=("development", "memory", "unknown"),
+                ))
+            elif float(memory) > max_memory:
                 findings.append(_finding(
                     "resource.development.memory_limit", "resource-shape", "violation",
                     "development memory per node exceeds limit",
                     tags=("development", "memory"),
-                    observed={"memory_gib_per_node": float(placement.get("memory_gib") or 0)},
+                    observed={"memory_gib_per_node": float(memory)},
                     limit={"max_memory_gib_per_node": max_memory},
                 ))
         if total_gpu == 1 and runtime is not None and runtime > cfg.one_gpu_max_runtime_hours:
@@ -643,25 +689,41 @@ def _workload_limits(
         cfg = policy.training
         for placement in placements:
             gpus = float(placement.get("gpu") or 0)
+            cpu = placement.get("cpu")
+            memory = placement.get("memory_gib")
             max_cpu = cfg.zero_gpu_max_cpu_per_node if gpus == 0 else gpus * cfg.cpu_per_gpu
             max_memory = (
                 cfg.zero_gpu_max_memory_gib_per_node
                 if gpus == 0 else gpus * cfg.memory_gib_per_gpu
             )
-            if float(placement.get("cpu") or 0) > max_cpu:
+            if cpu is None:
+                unknown_resources = True
+                findings.append(_finding(
+                    "resource.training.cpu_unknown", "resource-shape", "unknown",
+                    "training CPU usage is unavailable; limit cannot be evaluated",
+                    tags=("training", "cpu", "unknown"),
+                ))
+            elif float(cpu) > max_cpu:
                 findings.append(_finding(
                     "resource.training.cpu_ratio", "resource-shape", "violation",
                     "training CPU per node exceeds resource ratio",
                     tags=("training", "cpu", "gpu-ratio"),
-                    observed={"cpu_per_node": float(placement.get("cpu") or 0), "gpu_per_node": gpus},
+                    observed={"cpu_per_node": float(cpu), "gpu_per_node": gpus},
                     limit={"max_cpu_per_node": max_cpu},
                 ))
-            if float(placement.get("memory_gib") or 0) > max_memory:
+            if memory is None:
+                unknown_resources = True
+                findings.append(_finding(
+                    "resource.training.memory_unknown", "resource-shape", "unknown",
+                    "training memory usage is unavailable; limit cannot be evaluated",
+                    tags=("training", "memory", "unknown"),
+                ))
+            elif float(memory) > max_memory:
                 findings.append(_finding(
                     "resource.training.memory_ratio", "resource-shape", "violation",
                     "training memory per node exceeds resource ratio",
                     tags=("training", "memory", "gpu-ratio"),
-                    observed={"memory_gib_per_node": float(placement.get("memory_gib") or 0), "gpu_per_node": gpus},
+                    observed={"memory_gib_per_node": float(memory), "gpu_per_node": gpus},
                     limit={"max_memory_gib_per_node": max_memory},
                 ))
 
@@ -686,11 +748,11 @@ def _workload_limits(
         history["evaluation_status"] = "evaluated"
         if (
             float(compute) <= policy.low_utilization.gpu_compute_threshold_pct
-            and float(memory) <= policy.low_utilization.gpu_memory_threshold_pct
+            or float(memory) <= policy.low_utilization.gpu_memory_threshold_pct
         ):
             findings.append(_finding(
                 "utilization.low_gpu_activity", "utilization", "violation",
-                "historical GPU compute and memory utilization are both at or below limits",
+                "historical GPU compute or memory utilization is at or below its limit",
                 tags=("gpu", "historical", "low-utilization"),
                 observed={
                     "gpu_compute_util_pct": float(compute),
@@ -709,7 +771,13 @@ def _workload_limits(
 
     unique = {item["code"] + repr(item.get("observed")): item for item in findings}
     findings = sorted(unique.values(), key=lambda item: (item["category"], item["code"], item["message"]))
-    return ("violation" if findings else "compliant", findings)
+    if any(item.get("status") == "violation" for item in findings):
+        status = "violation"
+    elif unknown_resources or any(item.get("status") == "unknown" for item in findings):
+        status = "unknown"
+    else:
+        status = "compliant"
+    return status, findings
 
 
 def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str, Any]:
@@ -850,14 +918,28 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             for resource, (observed, limit, _) in resource_values.items()
             if observed is not None and limit is not None and observed > limit
         ]
+        unknown_quota_resources = [
+            resource
+            for resource, (observed, limit, _) in resource_values.items()
+            if limit is not None and observed is None
+        ]
         status = (
             "unknown" if group_name == "unattributed" else
+            "unknown" if unknown_quota_resources else
             "unknown" if pressure_state == "unknown" and over else
             "violation" if pressure_state == "active" and over else
             "burst" if over else
             "compliant"
         )
         quota_findings = []
+        for resource in unknown_quota_resources:
+            _observed, limit, limit_key = resource_values[resource]
+            quota_findings.append(_finding(
+                f"quota.{resource}.unknown", "quota", "unknown",
+                f"group {resource} usage is unavailable; quota cannot be evaluated",
+                tags=("quota", resource, "unknown"),
+                limit={limit_key: _clean(limit)},
+            ))
         for resource in over:
             observed, limit, limit_key = resource_values[resource]
             quota_findings.append(_finding(

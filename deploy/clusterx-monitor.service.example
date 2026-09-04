@@ -1,0 +1,27 @@
+[Unit]
+Description=Clusterx Monitor (trusted internal network)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clusterx-monitor
+Group=clusterx-monitor
+WorkingDirectory=/opt/clusterx-monitor
+Environment=CLUSTERX_MONITOR_HOST=127.0.0.1
+Environment=CLUSTERX_MONITOR_PORT=8765
+Environment=CLUSTERX_MONITOR_HISTORY_DB=/var/lib/clusterx-monitor/history.sqlite3
+ExecStart=/opt/clusterx-monitor/.venv/bin/clusterx-monitor serve --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/clusterx-monitor /etc/clusterx-monitor
+
+# This service intentionally assumes a trusted, isolated network.  Add an
+# authenticated reverse proxy before exposing it outside that boundary.
+
+[Install]
+WantedBy=multi-user.target

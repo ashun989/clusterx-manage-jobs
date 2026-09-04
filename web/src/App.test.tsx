@@ -78,7 +78,7 @@ const baseSnapshot: Snapshot = {
 const policyResponse: PolicyResponse = {
   valid: true, using_last_known_good: false, error: null,
   status_definitions: { compliant: { description: "within limits", propagation: "no escalation" }, violation: { description: "rule violated", propagation: "workload to user" }, burst: "over quota without pressure", unknown: "insufficient data", pending: "queued" },
-  rule_catalog: [{ code: "utilization.low_gpu_activity", category: "utilization", applies_to: "GPU workload", title: "Historical low GPU activity", description: "Both metrics are at or below thresholds." }],
+  rule_catalog: [{ code: "utilization.low_gpu_activity", category: "utilization", applies_to: "GPU workload", title: "Historical low GPU activity", description: "Either metric is at or below its threshold." }],
   evaluation_behavior: { historical_scope: "Only current running GPU workloads are evaluated." },
   policy: {
     refresh_seconds: 30, telemetry_lookback_minutes: 5,
@@ -153,7 +153,7 @@ describe("Clusterx monitor dashboard", () => {
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "1.0.1", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "1.1.0", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       if (path.includes("/history?")) return { ok: true, status: 200, json: async () => ({ retained_snapshots: 2, history_capacity: 2880, window_started_at: "2026-08-14T00:59:30Z", newest_at: "2026-08-14T01:00:00Z", points: [
         { snapshot_id: "snapshot-0", generated_at: "2026-08-14T00:59:30Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: { fragmented: 1, "gpu-full": 1 } },
         { snapshot_id: "snapshot-1", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 12, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: { fragmented: 1, "gpu-full": 1 } },
@@ -222,12 +222,12 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
 
-    fireEvent.click(screen.getByLabelText("查看 v1.0.1 更新内容"));
+    fireEvent.click(screen.getByLabelText("查看 v1.1.0 更新内容"));
 
     expect(screen.getByText("本版更新")).toBeInTheDocument();
-    expect(screen.getByText(/趋势范围支持 1 分钟/)).toBeInTheDocument();
-    expect(screen.getByText(/Workload 详情.*官方控制台/)).toBeInTheDocument();
-    expect(screen.getByText(/刷新按钮明确区分/)).toBeInTheDocument();
+    expect(screen.getByText(/采集链路增加统一超时/)).toBeInTheDocument();
+    expect(screen.getByText(/资源解析.*不再被当作 0/)).toBeInTheDocument();
+    expect(screen.getByText(/总览页同时展示 GPU 与显存利用率/)).toBeInTheDocument();
   });
 
   it("provides an operational overview and global entity search", async () => {
@@ -331,7 +331,7 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(document.body);
     expect(menu).toHaveProperty("open", false);
 
-    const versionSummary = screen.getByLabelText("查看 v1.0.1 更新内容");
+    const versionSummary = screen.getByLabelText("查看 v1.1.0 更新内容");
     const versionMenu = versionSummary.closest("details")!;
     fireEvent.click(versionSummary);
     expect(versionMenu).toHaveProperty("open", true);
@@ -377,8 +377,7 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByText("attention-alert-5")).toBeInTheDocument();
     for (const label of ["排队焦点列表", "节点健康列表", "策略与利用率列表", "最新告警列表"]) expect(screen.getByRole("region", { name: label })).toHaveAttribute("tabindex", "0");
     const lowItem = screen.getByText("low-0").closest("button")!;
-    expect(within(lowItem).getByRole("group", { name: "GPU 利用率预览" })).toHaveTextContent("最近 36 小时 GPU 利用率12%");
-    expect(lowItem).not.toHaveTextContent("显存");
+    expect(within(lowItem).getByRole("group", { name: "GPU 与显存利用率预览" })).toHaveTextContent("最近 36 小时GPU 12% · 显存 8%");
     expect(lowItem).not.toHaveTextContent("实时");
   });
 
@@ -398,7 +397,7 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "groups" }));
-    expect(screen.getByText("v1.0.1")).toBeInTheDocument();
+    expect(screen.getByText("v1.1.0")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);

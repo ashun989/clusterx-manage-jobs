@@ -22,6 +22,12 @@ const dateTime = (value: string | null | undefined) => {
 };
 
 const releaseNotes: Record<string, string[]> = {
+  "1.1.0": [
+    "采集链路增加统一超时、重试、分页进展校验与完整快照发布保护，外部接口异常不会污染当前快照。",
+    "资源解析、策略评估和调度规划统一处理单位、缺失字段与非法响应，无法判断的资源不再被当作 0。",
+    "补充健康检查、就绪状态、运行指标、SQLite 降级与趋势历史容量保护，提升内网部署的可运维性。",
+    "总览页同时展示 GPU 与显存利用率，低利用率规则按任一指标达到阈值触发。",
+  ],
   "1.0.1": [
     "趋势范围支持 1 分钟至 30 天的连续对数滑块，并在关键时长处自动吸附；悬停任一趋势图会同步显示四项指标。",
     "筛选、列管理、节点和调度模拟等自定义菜单支持点击外部或按 Escape 自动收起，弹层不再被面板裁切。",
@@ -411,7 +417,7 @@ export default function App() {
     return monitorTabs.includes(saved as Tab) ? saved as Tab : "overview";
   })();
   const [navigation, setNavigation] = useState<NavigationState>(() => readNavigationState(fallbackTab));
-  const { snapshot, policy, serviceStatus, history, error, policyError, statusError, connection, refreshing, historyRefreshing, lastSuccessfulAt, refresh } = useMonitorData(navigation.trendRange);
+  const { snapshot, policy, serviceStatus, history, error, policyError, statusError, historyError, connection, refreshing, historyRefreshing, lastSuccessfulAt, refresh } = useMonitorData(navigation.trendRange);
   const detailDepth = useRef(0);
   const [plan, setPlan] = useState<PlanResult | null>(null);
   const [adminOpen, setAdminOpen] = useState(false);
@@ -474,12 +480,12 @@ export default function App() {
   useEffect(() => { document.documentElement.dataset.theme = theme; if (import.meta.env.MODE !== "test") window.localStorage.setItem("clusterx-monitor:theme:v1", theme); }, [theme]);
   const workloads = useMemo(() => snapshot ? [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])] : [], [snapshot]);
   if (!snapshot) {
-    const loadingMessages = [error, statusError, policyError, serviceStatus?.setup_required ? "服务处于 setup-required，请由管理员补全本地配置。" : "", serviceStatus?.snapshot.last_error, serviceStatus?.policy.error, serviceStatus?.policy.audit_error].filter(Boolean);
+    const loadingMessages = [error, statusError, historyError, policyError, serviceStatus?.setup_required ? "服务处于 setup-required，请由管理员补全本地配置。" : "", serviceStatus?.snapshot.last_error, serviceStatus?.policy.error, serviceStatus?.policy.audit_error].filter(Boolean);
     return <main className="loading"><Brand compact version={serviceStatus?.version} /><div className="pulse" /><p>{loadingMessages.join(" · ") || "正在等待第一份完整快照…"}</p><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button>{adminOpen && <AdminPanel close={() => setAdminOpen(false)} onConfigured={() => { void refresh(); }} />}</main>;
   }
   const telemetryCoverage = snapshot.telemetry;
   const coverageMessages = [["compute", telemetryCoverage.compute_reported_gpu_count], ["memory", telemetryCoverage.memory_reported_gpu_count], ["power", telemetryCoverage.power_reported_gpu_count]].filter(([, count]) => Number(count) < telemetryCoverage.allocated_gpu_count).map(([metric, count]) => `${metric} 遥测覆盖 ${count}/${telemetryCoverage.allocated_gpu_count}`);
-  const bannerMessages = [error, policyError, statusError, policy?.error, policy?.audit_error, serviceStatus?.policy.audit_error, serviceStatus?.snapshot.last_error, serviceStatus?.snapshot.history?.last_error ? `本地趋势历史降级：${serviceStatus.snapshot.history.last_error}` : "", serviceStatus?.setup_required ? "服务处于 setup-required" : "", serviceStatus?.skipped_refreshes ? `已跳过 ${serviceStatus.skipped_refreshes} 次刷新` : "", snapshot.policy_config?.error, ...snapshot.warnings, ...coverageMessages, snapshot.historical_telemetry_status === "unavailable" ? "历史 GPU 遥测不可用，低利用率规则本轮未评估" : ""].filter(Boolean);
+  const bannerMessages = [error, policyError, statusError, historyError, policy?.error, policy?.audit_error, serviceStatus?.policy.audit_error, serviceStatus?.snapshot.last_error, serviceStatus?.snapshot.history?.last_error ? `本地趋势历史降级：${serviceStatus.snapshot.history.last_error}` : "", serviceStatus?.setup_required ? "服务处于 setup-required" : "", serviceStatus?.skipped_refreshes ? `已跳过 ${serviceStatus.skipped_refreshes} 次刷新` : "", snapshot.policy_config?.error, ...snapshot.warnings, ...coverageMessages, snapshot.historical_telemetry_status === "unavailable" ? "历史 GPU 遥测不可用，低利用率规则本轮未评估" : ""].filter(Boolean);
   const workloadRef = (workload: Workload): DetailRef => ({ kind: "workload", id: workload.workload_id, label: workload.workload_name });
   const plannerIntentFor = (ref: DetailRef): PlannerIntent => {
     const defaults: PlannerIntent = {

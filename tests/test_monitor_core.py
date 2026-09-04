@@ -529,6 +529,32 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(group["status"], "compliant")
         self.assertNotIn("utilization.low_gpu_activity", group["finding_codes"])
 
+    def test_low_utilization_uses_or_between_compute_and_memory(self):
+        old = datetime.now(timezone.utc) - timedelta(hours=2)
+        workloads = []
+        for name, compute, memory in (
+            ("compute-low", 10, 50),
+            ("memory-low", 50, 10),
+            ("both-high", 50, 50),
+        ):
+            item = workload(name, name, "trainingJob", [placement(name, 1)], created=old)
+            item["historical_telemetry"] = {
+                "window_hours": 24, "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "collection_status": "available", "gpu_compute_util_avg_pct": compute,
+                "gpu_memory_util_avg_pct": memory, "compute_sample_count": 100,
+                "memory_sample_count": 100,
+            }
+            workloads.append(item)
+
+        result = apply_policy(
+            snapshot([node("compute-low", 1), node("memory-low", 1), node("both-high", 1)], workloads),
+            self.policy,
+        )
+        by_id = {item["workload_id"]: item for item in result["workloads"]}
+        self.assertIn("utilization.low_gpu_activity", by_id["compute-low"]["finding_codes"])
+        self.assertIn("utilization.low_gpu_activity", by_id["memory-low"]["finding_codes"])
+        self.assertNotIn("utilization.low_gpu_activity", by_id["both-high"]["finding_codes"])
+
     def test_low_utilization_skips_zero_gpu_warming_and_missing_metric(self):
         now = datetime.now(timezone.utc)
         zero = workload("zero", "alice", "trainingJob", [placement("n", 0)], created=now - timedelta(hours=2))
@@ -793,7 +819,10 @@ class PlannerTests(unittest.TestCase):
             "gpu_memory_util_avg_pct": 10, "compute_sample_count": 20, "memory_sample_count": 20,
         }
         normal = workload("normal", "u2", "trainingJob", [placement("n2", 1)], created=old)
-        normal["historical_telemetry"] = {**low["historical_telemetry"], "gpu_compute_util_avg_pct": 50}
+        normal["historical_telemetry"] = {
+            **low["historical_telemetry"], "gpu_compute_util_avg_pct": 50,
+            "gpu_memory_util_avg_pct": 50,
+        }
         evaluated = apply_policy(snapshot([node("n1", 1), node("n2", 1)], [low, normal]), self.policy)
         result = solve_plan(evaluated, {
             "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
@@ -1085,7 +1114,7 @@ class LifecycleTests(unittest.TestCase):
     def test_aid_start_events_match_current_pod_and_paginate(self):
         client = mock.Mock(compute_base_endpoint="https://compute.example")
         client._make_signed_base_request.side_effect = [
-            {"total_size": 4, "events": [
+            {"total_size": 4, "next_page_token": "events-cursor-1", "events": [
                 {"type": "Normal", "reason": "Started", "firstTimestamp": "2026-08-14T08:00:05Z", "lastTimestamp": "2026-08-14T09:00:00Z", "count": 2, "involvedObject": {"uid": "current"}},
                 {"type": "Normal", "reason": "Started", "firstTimestamp": "2026-08-14T08:00:10Z", "involvedObject": {"uid": "current"}},
             ]},
@@ -1100,7 +1129,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(starts, {"current": "2026-08-14T08:00:10+00:00"})
         self.assertEqual(client._make_signed_base_request.call_count, 2)
         self.assertEqual(
-            client._make_signed_base_request.call_args_list[1].kwargs["params"]["skip"], 2,
+            client._make_signed_base_request.call_args_list[1].kwargs["params"]["page_token"], "events-cursor-1",
         )
 
     def test_aid_start_cache_resets_only_when_pod_uid_changes(self):

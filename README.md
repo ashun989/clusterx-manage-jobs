@@ -1,7 +1,7 @@
 # Clusterx Manage Jobs Skill with Monitor
 
 用于安全管理 PT/SSP 集群 Clusterx 训练任务，并提供新增的只读队列监控、
-资源策略检查和调度模拟。当前版本为 `1.0.1`，已验证 Clusterx `2026.8.19`；
+资源策略检查和调度模拟。当前版本为 `1.1.0`，已验证 Clusterx `2026.8.19`；
 其他版本以安装后的动态帮助为准。
 
 原有任务生命周期能力保持不变：配置检查、提交预览与创建、任务/节点查询、
@@ -74,8 +74,8 @@ A3、Worker、日志限制和停止规则见 Skill reference。
 服务要求 Linux、Python 3.10+、Clusterx CLI 和权限为 `600` 的 Clusterx 配置。
 
 ```bash
-python3 -m pip install -e .
-cd web && npm install && npm run build && cd ..
+python3 -m pip install -c constraints.txt -e .
+cd web && npm ci && npm run build && cd ..
 cp skill/clusterx-manage-jobs/assets/resource-policy.json \
   config/resource-policy.local.json
 cp config/groups.example.yaml config/groups.local.yaml
@@ -134,6 +134,17 @@ clusterx-monitor admin init \
 采集失败时继续提供最后完整快照并标记 stale。GPU compute、显存和功率使用
 最近 5 分钟滚动平均，并显示逐卡遥测覆盖率。
 
+采集通过 `ClusterxGateway` 适配层访问外部 API：连接超时 5 秒、读取超时 20 秒，
+单次完整采集最多 90 秒，幂等读取最多重试两次；节点、Pod、生命周期和事件分页均
+限制 1000 页/100000 条并检测重复游标和无进展。结构化响应校验失败不会发布部分快照，
+服务继续提供上一份完整快照。运行时提供 `/healthz`、`/readyz` 和 Prometheus 文本
+格式 `/metrics`，并在响应中返回 `X-Request-ID`。
+
+Monitor 按已验证的 Clusterx `2026.8.19` 合约解析分页响应（`total_size`、
+`training_jobs` 和 `next_page_token`）；历史 `total`/`trainingJobs` 别名不再兜底，
+发现时会快速失败，避免把旧格式误当成完整数据。缺少下一页令牌时保留已取行并
+明确标记 inventory incomplete，不会伪造完整性。
+
 Workload 快照统一提供 `total_gpu`、`total_cpu`、`total_memory_gib` 和
 `resource_basis`。Running 资源按 Pod placement 归属汇总；Pending 资源按全部
 task 的副本申请汇总，并在 `task_resources` 中保留每个 task 的资源规格。无法
@@ -170,7 +181,10 @@ Web 控制台提供运行总览、全局实体搜索、明暗主题、表格文�
 和 256 MiB，也可使用同名 `CLUSTERX_MONITOR_HISTORY_*` 环境变量。查询会按区间自动
 降采样，Web 支持 1 分钟至 30 天的连续范围，并在 1 小时、6 小时、24 小时、7 天和 30 天处提供参考刻度。SQLite 失败只会
 使趋势降级到内存，不阻止实时快照发布。`/api/v1/history`、`/api/v1/snapshots` 和
-`/api/v1/snapshots/compare` 都是只读接口。
+`/api/v1/snapshots/compare` 都是只读接口。`/api/v1/snapshots/latest/workloads` 提供
+`limit`/`offset` 服务端分页；快照和历史响应支持 ETag，较大的响应自动 gzip。SSE
+使用 no-cache 和禁止代理缓冲响应头，并限制并发连接。日志接口本轮保持内网匿名可读，
+不引入登录或访问审计；如果部署边界变化，应先增加认证反向代理再开放网络访问。
 
 管理员资源策略支持常用字段表单和完整 JSON 两种编辑方式，并在保存前展示结构化
 差异。配置页只展示不含配置正文的审计记录；已有 `.bak` 可通过显式确认回滚，回滚
@@ -238,7 +252,7 @@ export CLUSTERX_RESOURCE_POLICY="$PWD/config/resource-policy.local.json"
 - 私有配置中的显式 quota 保持不缩放；`default.gpu_quota: remainder` 时获得绑定 GPU
   总容量扣除其他显式 GPU quota 后的剩余部分。
 - 当前仍在运行、使用 GPU 且已运行至少 60 分钟的 `trainingJob`/`aid`，过去
-  24 小时 GPU compute 样本加权平均与显存容量/时间加权平均同时 `<=20%` 时，
+  24 小时 GPU compute 样本加权平均或显存容量/时间加权平均任一 `<=20%` 时，
   产生 `utilization.low_gpu_activity` 违规；0-GPU、预热中或缺指标均不判违规。
 - 低利用率违规传播到 workload 与用户，不改变分组自身 quota/burst 状态。
 

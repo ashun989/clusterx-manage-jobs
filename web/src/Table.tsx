@@ -113,7 +113,13 @@ export function DataTable<T>({ rows, columns, state, onState, rowKey, rowLabel, 
   const activeFilterCount = Object.values(state.filters).reduce((sum, values) => sum + values.length, 0);
   const reset = () => onState(emptyTableState());
   const exportCsv = () => {
-    const escape = (value: unknown) => `"${display(value).replaceAll('"', '""')}"`;
+    const escape = (value: unknown) => {
+      const text = display(value);
+      // Excel interprets leading formula characters even inside quoted CSV
+      // cells. Prefix a tab so exported operational data remains inert.
+      const safe = /^[=+\-@]/.test(text) ? `\t${text}` : text;
+      return `"${safe.replaceAll('"', '""')}"`;
+    };
     const lines = [visibleColumns.map((column) => escape(column.label)).join(","), ...visibleRows.map((row) => visibleColumns.map((column) => escape(column.value(row))).join(","))];
     const url = URL.createObjectURL(new Blob(["\ufeff", lines.join("\n")], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a");

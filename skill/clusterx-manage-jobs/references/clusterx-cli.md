@@ -244,8 +244,8 @@ Unattributed resources remain visible but are never claimed as releasable.
 The historical low-activity rule is independent of pending pressure. By
 default, Prometheus is queried every 5 minutes for the preceding 24 hours. A
 currently running GPU `trainingJob` or `aid` is a violation only after 60
-minutes when sample-weighted compute utilization and capacity/time-weighted
-memory utilization are both `<= 20%`. The workload UID joins samples across
+minutes when either sample-weighted compute utilization or capacity/time-weighted
+memory utilization is `<= 20%`. The workload UID joins samples across
 Pod restarts or node movement. Zero-GPU workloads are `not-applicable`, newer
 workloads are `warming-up`, and a missing compute or memory metric is
 `unavailable`. A historical query failure leaves the normal snapshot and

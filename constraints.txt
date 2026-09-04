@@ -1,0 +1,11 @@
+# Generated from the supported CI environment.  Update deliberately and review
+# the resulting lock diff when upgrading the monitor service.
+fastapi==0.141.1
+uvicorn==0.52.3
+pydantic==2.13.4
+PyYAML==6.0.3
+requests==2.34.2
+rich==14.3.4
+argon2-cffi==25.1.0
+ortools==9.15.6755
+httpx==0.28.1

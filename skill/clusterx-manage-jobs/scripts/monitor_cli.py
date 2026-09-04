@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any
 
 import requests
@@ -31,7 +32,7 @@ def _url(endpoint: str, path: str) -> str:
 
 def _request(endpoint: str, method: str, path: str, **kwargs: Any) -> Any:
     try:
-        response = requests.request(method, _url(endpoint, path), timeout=35, **kwargs)
+        response = requests.request(method, _url(endpoint, path), timeout=(5, 20), **kwargs)
     except requests.RequestException as error:
         raise ApiError(str(error)) from error
     if response.status_code >= 400:
@@ -296,24 +297,36 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _run_watch(args: argparse.Namespace) -> int:
     emitted = 0
-    try:
-        with requests.get(_url(args.endpoint, "/api/v1/events"), stream=True, timeout=(5, None)) as response:
-            if response.status_code >= 400:
-                raise ApiError(f"HTTP {response.status_code}")
-            for line in response.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data: "):
-                    continue
-                event = json.loads(line[6:])
-                snapshot = _snapshot(args.endpoint, event["snapshot_id"])
-                payload = _select_view(snapshot, args.view, args)
-                _emit(payload, args, jsonl=args.format == "jsonl")
-                emitted += 1
-                if _has_failure(payload, args.fail_on, snapshot=snapshot):
-                    return EXIT_FAIL_ON
-                if args.count is not None and emitted >= args.count:
-                    return 0
-    except requests.RequestException as error:
-        raise ApiError(str(error)) from error
+    backoff = 0.5
+    while args.count is None or emitted < args.count:
+        try:
+            with requests.get(_url(args.endpoint, "/api/v1/events"), stream=True, timeout=(5, 90)) as response:
+                if response.status_code >= 400:
+                    raise ApiError(f"HTTP {response.status_code}", status=response.status_code)
+                backoff = 0.5
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line or not line.startswith("data: "):
+                        continue
+                    try:
+                        event = json.loads(line[6:])
+                        snapshot_id = str(event["snapshot_id"])
+                    except (ValueError, TypeError, KeyError) as error:
+                        raise ApiError("monitor returned malformed SSE event") from error
+                    snapshot = _snapshot(args.endpoint, snapshot_id)
+                    payload = _select_view(snapshot, args.view, args)
+                    _emit(payload, args, jsonl=args.format == "jsonl")
+                    emitted += 1
+                    if _has_failure(payload, args.fail_on, snapshot=snapshot):
+                        return EXIT_FAIL_ON
+                    if args.count is not None and emitted >= args.count:
+                        return 0
+        except ApiError:
+            raise
+        except requests.RequestException:
+            if args.count is not None and emitted >= args.count:
+                return 0
+            time.sleep(backoff)
+            backoff = min(8.0, backoff * 2)
     return 0
 
 

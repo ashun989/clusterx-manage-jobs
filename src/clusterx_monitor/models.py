@@ -138,7 +138,7 @@ class PlanFilters(FrozenModel):
 
 
 class PlanRequest(FrozenModel):
-    snapshot_id: str = Field(min_length=1)
+    snapshot_id: str = Field(min_length=1, max_length=128)
     target: PlanTarget
     target_nodes: tuple[str, ...] = ()
     strategies: tuple[Literal["min-gpu", "min-workloads", "min-users"], ...] = (
@@ -160,7 +160,7 @@ class PlanRequest(FrozenModel):
     @classmethod
     def normalize_target_nodes(cls, value: object) -> tuple[str, ...]:
         nodes = tuple(str(item).strip() for item in (value or []))
-        if any(not item or len(item) > 256 for item in nodes):
+        if len(nodes) > 1024 or any(not item or len(item) > 256 for item in nodes):
             raise ValueError("target node names must contain 1 to 256 characters")
         if len(set(nodes)) != len(nodes):
             raise ValueError("target_nodes must be unique")
@@ -170,4 +170,12 @@ class PlanRequest(FrozenModel):
     def validate_target_nodes(self) -> "PlanRequest":
         if self.target_nodes and len(self.target_nodes) != self.target.nodes:
             raise ValueError("target_nodes count must equal target.nodes")
+        return self
+
+    @model_validator(mode="after")
+    def validate_candidate_size(self) -> "PlanRequest":
+        for field_name in ("workload_types", "groups", "users", "workloads", "exclude_workloads", "exclude_users", "violation_categories", "violation_codes", "violation_tags"):
+            values = getattr(self.filters, field_name)
+            if len(values) > 1000 or any(len(str(value)) > 256 for value in values):
+                raise ValueError(f"filters.{field_name} is too large")
         return self

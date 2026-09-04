@@ -169,8 +169,8 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 - The low-activity rule evaluates only currently running GPU `trainingJob` and
   `aid` workloads. With the shipped policy, a workload running for at least 60
   minutes is a violation when its Prometheus sample-weighted 24-hour average
-  GPU compute utilization and capacity/time-weighted memory utilization are
-  both at or below 20%. Zero-GPU workloads are not applicable; short-running
+  GPU compute utilization or capacity/time-weighted memory utilization is at
+  or below 20%. Zero-GPU workloads are not applicable; short-running
   workloads are warming up; a missing metric is unavailable. Missing history
   must not be treated as a violation and does not block other monitor data.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
