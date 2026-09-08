@@ -1,7 +1,7 @@
 # Clusterx Manage Jobs Skill with Monitor
 
 用于安全管理 PT/SSP 集群 Clusterx 训练任务，并提供新增的只读队列监控、
-资源策略检查和调度模拟。当前版本为 `1.1.0`，已验证 Clusterx `2026.8.19`；
+资源策略检查和调度模拟。当前版本为 `1.1.1`，已验证 Clusterx `2026.8.19`；
 其他版本以安装后的动态帮助为准。
 
 原有任务生命周期能力保持不变：配置检查、提交预览与创建、任务/节点查询、
@@ -251,9 +251,18 @@ export CLUSTERX_RESOURCE_POLICY="$PWD/config/resource-policy.local.json"
 - 无 pressure 时超额为 burst，有 pressure 时为 violation。
 - 私有配置中的显式 quota 保持不缩放；`default.gpu_quota: remainder` 时获得绑定 GPU
   总容量扣除其他显式 GPU quota 后的剩余部分。
-- 当前仍在运行、使用 GPU 且已运行至少 60 分钟的 `trainingJob`/`aid`，过去
-  24 小时 GPU compute 样本加权平均或显存容量/时间加权平均任一 `<=20%` 时，
-  产生 `utilization.low_gpu_activity` 违规；0-GPU、预热中或缺指标均不判违规。
+- 当前仍在运行、使用 GPU 且已运行至少 60 分钟的 `trainingJob`/`aid`/`air`，过去
+  24 小时 GPU compute 样本加权平均或显存容量/时间加权平均任一 `<=20%`，
+  或已启用的平均每卡功率占比 `<=25%` 时，产生 `utilization.low_gpu_activity` 违规。
+  功率占比 = 历史有效功率样本加权均值 / 配置的每卡功率上限 × 100；不使用当前申请卡数除历史总功率。
+  模板的 `low_utilization.gpu_power_limit_w` 为 400 W，`gpu_power_threshold_pct` 为 25，
+  对应 100 W/卡；两者均可在管理员配置修改。功率上限是队列统一计算基准，需按实际限制配置，
+  不自动识别 GPU 型号或改变硬件限功率。旧配置缺少百分比或设置为 `null` 时关闭功率判定。
+  0-GPU 和预热中不评估；Compute/Mem 仍需同时有效，功率独立评估，缺失值不补零。
+  部分条件可评估时标记 `partial`，仍可产生违规；告警列出命中指标，详情显示总功率、百分比、基准和样本数，隐藏平均每卡功率。
+  表格、节点和顶部指标显示最近 5 分钟功率占比；总览低利用率列表显示历史比例。
+  实时比例按有效上报卡数计算，保留覆盖数；排序和 CSV 导出也使用比例。
+  样本数不代表卡数覆盖率；运行不足 24 小时的任务使用窗口内已有数据。
 - 低利用率违规传播到 workload 与用户，不改变分组自身 quota/burst 状态。
 
 本地资源策略与私有分组文件都会热加载；非法新配置不会替换 last-known-good

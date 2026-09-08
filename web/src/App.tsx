@@ -3,7 +3,7 @@ import { AdminPanel } from "./AdminPanel";
 import { GlobalSearch } from "./GlobalSearch";
 import { Overview } from "./Overview";
 import { alertIdentity, DetailDrawer } from "./DetailDrawer";
-import { DataTable, formatPower, statusClass, TelemetryCell } from "./Table";
+import { DataTable, formatPowerPercent, statusClass, TelemetryCell } from "./Table";
 import type { ColumnDef, TableState } from "./Table";
 import { api } from "./api";
 import { emptyNavigationState, monitorTabs, navigationUrl, readNavigationState, type MonitorTab as Tab, type NodeSortKey, type NodeViewState, type PlannerIntent, type TableTab, type NavigationState, type TrendRange } from "./navigation";
@@ -13,7 +13,6 @@ import type { Alert, DetailRef, GroupSummary, NodeSummary, PlanItem, PlanResult,
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
 const quota = (value: unknown) => value == null ? "不限" : number(value);
-const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
 const runtimeMark = (row: Workload) => row.runtime_quality === "observed" ? "（观测）" : row.runtime_quality === "estimated" || row.runtime_estimated ? "（估算）" : "";
 const dateTime = (value: string | null | undefined) => {
   if (!value) return "—";
@@ -22,6 +21,11 @@ const dateTime = (value: string | null | undefined) => {
 };
 
 const releaseNotes: Record<string, string[]> = {
+  "1.1.1": [
+    "低利用率判定增加历史平均每卡功率，功率上限和百分比阈值均可配置，默认 400 W、25%（100 W/卡）。",
+    "表格和概览展示功率百分比，详情展示总功率，告警列出命中指标，缺失功率不阻断原有 Compute / Mem 判定。",
+    "低利用率检查覆盖运行中的 trainingJob、aid 和 air GPU 工作负载。",
+  ],
   "1.1.0": [
     "采集链路增加统一超时、重试、分页进展校验与完整快照发布保护，外部接口异常不会污染当前快照。",
     "资源解析、策略评估和调度规划统一处理单位、缺失字段与非法响应，无法判断的资源不再被当作 0。",
@@ -100,7 +104,7 @@ export function FreshnessBadge({ snapshotId, freshness }: { snapshotId: string; 
 const telemetryColumns = <T extends { telemetry: Snapshot["telemetry"] }>(): ColumnDef<T>[] => [
   { key: "gpu_util", label: "GPU Util", kind: "number", value: (row) => row.telemetry.gpu_compute_util_avg_pct, format: (value) => number(value, "%") },
   { key: "gpu_mem", label: "GPU Mem", kind: "number", value: (row) => row.telemetry.gpu_memory_util_avg_pct, format: (value) => number(value, "%") },
-  { key: "power", label: "功率", kind: "number", value: (row) => row.telemetry.gpu_power_total_w, format: formatPower },
+  { key: "power", label: "功率占比 (%)", kind: "number", value: (row) => row.telemetry.gpu_power_util_avg_pct, format: formatPowerPercent },
 ];
 
 const groupColumns: ColumnDef<GroupSummary>[] = [
@@ -169,7 +173,7 @@ function MultiFilter({ label, options, selected, onChange }: { label: string; op
 function nodeSortValue(node: NodeSummary, key: NodeSortKey) {
   if (key === "gpu_util") return node.telemetry.gpu_compute_util_avg_pct;
   if (key === "gpu_mem") return node.telemetry.gpu_memory_util_avg_pct;
-  if (key === "power") return node.telemetry.gpu_power_total_w;
+  if (key === "power") return node.telemetry.gpu_power_util_avg_pct;
   return node[key];
 }
 
@@ -198,7 +202,7 @@ function NodeHeatmap({ nodes, state, onState, onNode }: { nodes: NodeSummary[]; 
   const reset = () => onState({ classifications: [], states: [], sort: null, direction: "desc" });
   const hasControls = state.classifications.length > 0 || state.states.length > 0 || state.sort;
   return <>
-    <div className="table-tools node-tools"><div className="filter-list"><MultiFilter label="负载状态" options={classifications} selected={validClassifications} onChange={(values) => onState({ ...state, classifications: values })} /><MultiFilter label="节点状态" options={states} selected={validStates} onChange={(values) => onState({ ...state, states: values })} /><label className="sort-select"><span>排序</span><select aria-label="节点排序字段" value={state.sort ?? ""} onChange={(event) => onState({ ...state, sort: event.target.value ? event.target.value as NodeSortKey : null })}><option value="">默认顺序</option><option value="allocated_gpu">GPU 已用</option><option value="effective_free_gpu">有效空闲 GPU</option><option value="stranded_gpu">受阻 GPU</option><option value="gpu_util">GPU Util</option><option value="gpu_mem">GPU Mem</option><option value="power">功率</option></select></label>{state.sort && <button type="button" className="direction-button" onClick={() => onState({ ...state, direction: state.direction === "asc" ? "desc" : "asc" })}>{state.direction === "asc" ? "升序 ↑" : "降序 ↓"}</button>}</div><div className="result-count"><span>{visibleNodes.length}/{nodes.length}</span>{hasControls && <button type="button" onClick={reset}>重置</button>}</div></div>
+    <div className="table-tools node-tools"><div className="filter-list"><MultiFilter label="负载状态" options={classifications} selected={validClassifications} onChange={(values) => onState({ ...state, classifications: values })} /><MultiFilter label="节点状态" options={states} selected={validStates} onChange={(values) => onState({ ...state, states: values })} /><label className="sort-select"><span>排序</span><select aria-label="节点排序字段" value={state.sort ?? ""} onChange={(event) => onState({ ...state, sort: event.target.value ? event.target.value as NodeSortKey : null })}><option value="">默认顺序</option><option value="allocated_gpu">GPU 已用</option><option value="effective_free_gpu">有效空闲 GPU</option><option value="stranded_gpu">受阻 GPU</option><option value="gpu_util">GPU Util</option><option value="gpu_mem">GPU Mem</option><option value="power">功率占比</option></select></label>{state.sort && <button type="button" className="direction-button" onClick={() => onState({ ...state, direction: state.direction === "asc" ? "desc" : "asc" })}>{state.direction === "asc" ? "升序 ↑" : "降序 ↓"}</button>}</div><div className="result-count"><span>{visibleNodes.length}/{nodes.length}</span>{hasControls && <button type="button" onClick={reset}>重置</button>}</div></div>
     <div className="node-grid">{visibleNodes.map((node) => {
       const ratio = node.total_gpu > 0 ? Math.min(100, node.allocated_gpu / node.total_gpu * 100) : 0;
       const open = () => onNode(node);
@@ -532,7 +536,7 @@ export default function App() {
   const tabLabels: Record<Tab, string> = { overview: "总览", groups: "分组", users: "用户", nodes: "节点", workloads: "Workload", alerts: "告警", planner: "调度模拟", rules: "规则" };
   return <div className="app">
     <header className="app-header"><div className="brand-block"><Brand version={serviceStatus?.version} onHome={resetNavigation} /><span className="cluster-context">{snapshot.cluster} / {snapshot.queue}</span></div><GlobalSearch snapshot={snapshot} open={open} /><div className="header-actions"><div className={`connection connection-${connection}`}><span />{{ connecting: "正在连接", live: "实时", reconnecting: "重连中", polling: "轮询" }[connection]}</div><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="icon-button" disabled={refreshing} onClick={() => { void refresh(); }} aria-label="获取最新快照" title={lastSuccessfulAt ? `只获取后端已发布的最新快照；上次成功：${new Date(lastSuccessfulAt).toLocaleTimeString()}` : "只获取后端已发布的最新快照，不会触发后端立即采集"}>{refreshing ? "…" : "↻"}</button><button type="button" className="icon-button" onClick={() => { void copyCurrentView(); }} aria-label={linkCopied ? "已复制当前视图链接" : "复制当前视图链接"} title={linkCopied ? "已复制当前视图链接" : "复制当前视图链接"}>{linkCopied ? "✓" : <CopyLinkIcon />}</button><button type="button" className="icon-button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="切换明暗主题">{theme === "dark" ? "☼" : "☾"}</button><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
-    {tab !== "overview" && <section className="cards"><article><span>绑定容量</span><strong>{number(snapshot.capacity.bound_gpu)}</strong><small>{number(snapshot.capacity.planning_eligible_gpu)} 可参与调度</small></article><article><span>已分配</span><strong>{number(snapshot.capacity.allocated_gpu)}</strong><small>{number(snapshot.capacity.free_gpu)} 空闲</small></article><article><span>Pending 压力</span><strong className={statusClass(snapshot.pending_pressure.state)}>{String(snapshot.pending_pressure.state)}</strong><small>{number(snapshot.pending_pressure.eligible_jobs)} 个有效排队任务</small></article><article><span>GPU 功率</span><strong>{power(snapshot.telemetry.gpu_power_total_w)}</strong><small>{snapshot.telemetry.power_reported_gpu_count}/{snapshot.telemetry.allocated_gpu_count} 已覆盖 · {snapshot.telemetry_status ?? "unknown"}</small></article></section>}
+    {tab !== "overview" && <section className="cards"><article><span>绑定容量</span><strong>{number(snapshot.capacity.bound_gpu)}</strong><small>{number(snapshot.capacity.planning_eligible_gpu)} 可参与调度</small></article><article><span>已分配</span><strong>{number(snapshot.capacity.allocated_gpu)}</strong><small>{number(snapshot.capacity.free_gpu)} 空闲</small></article><article><span>Pending 压力</span><strong className={statusClass(snapshot.pending_pressure.state)}>{String(snapshot.pending_pressure.state)}</strong><small>{number(snapshot.pending_pressure.eligible_jobs)} 个有效排队任务</small></article><article><span>GPU 功率占比</span><strong>{formatPowerPercent(snapshot.telemetry.gpu_power_util_avg_pct)}</strong><small>{snapshot.telemetry.power_reported_gpu_count}/{snapshot.telemetry.allocated_gpu_count} 已覆盖 · {snapshot.telemetry_status ?? "unknown"}</small></article></section>}
     {bannerMessages.length > 0 && <div className="banner">{bannerMessages.join(" · ")}</div>}
     <section className="workspace"><div className="main-panel"><nav aria-label="Monitor 主导航">{monitorTabs.map((name) => <button aria-label={name} className={tab === name ? "active" : ""} key={name} onClick={() => navigateTab(name)}>{tabLabels[name]}{name === "alerts" && snapshot.alerts.length > 0 && <span className="nav-count">{snapshot.alerts.length}</span>}</button>)}</nav>
       {tab === "overview" && <Overview snapshot={snapshot} history={history} historyRefreshing={historyRefreshing} range={trendRange} onRange={updateTrendRange} open={open} navigate={navigateTab} />}

@@ -26,7 +26,7 @@ type EditorState = AdminFile & { dirty: boolean };
 const emptyEditor = (format: "json" | "yaml"): EditorState => ({ format, text: "", revision: "", parse_error: null, dirty: false });
 const editorFrom = (value: AdminFile): EditorState => ({ ...value, dirty: false });
 
-type GuidedField = { path: string; label: string; unit?: string; min: number; max: number; step?: number };
+type GuidedField = { path: string; label: string; unit?: string; min: number; max: number; step?: number; nullable?: boolean; defaultValue?: number };
 const guidedSections: Array<{ title: string; fields: GuidedField[] }> = [
   { title: "采集与排队", fields: [
     { path: "refresh_seconds", label: "快照刷新间隔", unit: "秒", min: 10, max: 3600 },
@@ -41,6 +41,8 @@ const guidedSections: Array<{ title: string; fields: GuidedField[] }> = [
     { path: "planning.default_memory_gib_per_gpu", label: "调度默认内存/GPU", unit: "GiB", min: 0.1, max: 16384, step: 0.1 },
   ] },
   { title: "低利用率规则", fields: [
+    { path: "low_utilization.gpu_power_limit_w", label: "每卡功率上限（计算基准）", unit: "W", min: 0.1, max: Infinity, step: 0.1, defaultValue: 400 },
+    { path: "low_utilization.gpu_power_threshold_pct", label: "功率阈值（留空关闭）", unit: "%", min: 0, max: 100, step: 0.1, nullable: true },
     { path: "low_utilization.window_hours", label: "评估窗口", unit: "小时", min: 1, max: 168 },
     { path: "low_utilization.min_observation_minutes", label: "最短观测时间", unit: "分钟", min: 0, max: 10080 },
     { path: "low_utilization.gpu_compute_threshold_pct", label: "GPU Compute 阈值", unit: "%", min: 0, max: 100, step: 0.1 },
@@ -53,11 +55,14 @@ const parseResource = (text: string): Record<string, unknown> | null => {
   catch { return null; }
 };
 const readPath = (value: Record<string, unknown>, path: string) => path.split(".").reduce<unknown>((current, key) => current && typeof current === "object" ? (current as Record<string, unknown>)[key] : undefined, value);
-const writePath = (value: Record<string, unknown>, path: string, next: number) => {
+const writePath = (value: Record<string, unknown>, path: string, next: number | null) => {
   const result = structuredClone(value);
   const parts = path.split(".");
   let cursor = result;
-  parts.slice(0, -1).forEach((key) => { cursor = cursor[key] as Record<string, unknown>; });
+  parts.slice(0, -1).forEach((key) => {
+    if (!cursor[key] || typeof cursor[key] !== "object") cursor[key] = {};
+    cursor = cursor[key] as Record<string, unknown>;
+  });
   cursor[parts.at(-1)!] = next;
   return result;
 };
@@ -208,10 +213,13 @@ export function AdminPanel({ close, onConfigured }: { close: () => void; onConfi
     const after = flatten(parsedResource);
     return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key])).map((key) => ({ key, before: before[key], after: after[key] }));
   }, [config, parsedResource]);
+  const powerThreshold = parsedResource ? readPath(parsedResource, "low_utilization.gpu_power_threshold_pct") : null;
+  const powerLimit = Number(parsedResource ? readPath(parsedResource, "low_utilization.gpu_power_limit_w") ?? 400 : 400);
+  const powerWatts = Number((Number(powerThreshold) * powerLimit / 100).toFixed(2));
   const updateGuided = (field: GuidedField, raw: string) => {
     if (!parsedResource) return;
-    const value = Number(raw);
-    if (!Number.isFinite(value)) return;
+    const value = field.nullable && raw.trim() === "" ? null : Number(raw);
+    if (value !== null && !Number.isFinite(value)) return;
     const next = writePath(parsedResource, field.path, value);
     setResourceEditor((current) => ({ ...current, text: JSON.stringify(next, null, 2) + "\n", dirty: true, parse_error: null }));
   };
@@ -232,7 +240,10 @@ export function AdminPanel({ close, onConfigured }: { close: () => void; onConfi
         <section><div className="admin-section-heading"><div><h3>资源策略</h3><small>常用参数可视化编辑；高级模式仍提供完整 JSON。</small></div><div className="segmented"><button type="button" className={resourceMode === "guided" ? "active" : ""} onClick={() => setResourceMode("guided")}>常用设置</button><button type="button" className={resourceMode === "source" ? "active" : ""} onClick={() => setResourceMode("source")}>JSON 源码</button></div></div>
           {resourceEditor.parse_error && <p className="admin-error">{resourceEditor.parse_error}</p>}
           {!parsedResource && <p className="admin-error">JSON 无法解析，请切换到源码模式修复。</p>}
-          <div className="guided-config" hidden={resourceMode !== "guided"}>{parsedResource && guidedSections.map((section) => <fieldset key={section.title}><legend>{section.title}</legend><div>{section.fields.map((field) => <label key={field.path}><span>{field.label}</span><span className="number-input"><input type="number" min={field.min} max={field.max} step={field.step ?? 1} value={String(readPath(parsedResource, field.path) ?? "")} onChange={(event) => updateGuided(field, event.target.value)} /><em>{field.unit}</em></span></label>)}</div></fieldset>)}</div>
+          <div className="guided-config" hidden={resourceMode !== "guided"}>{parsedResource && guidedSections.map((section) => <fieldset key={section.title}><legend>{section.title}</legend><div>{section.fields.map((field) => <label key={field.path}><span>{field.label}</span><span className="number-input"><input type="number" min={field.min} max={Number.isFinite(field.max) ? field.max : undefined} step={field.step ?? 1} value={String(readPath(parsedResource, field.path) ?? field.defaultValue ?? "")} onChange={(event) => updateGuided(field, event.target.value)} /><em>{field.unit}</em></span></label>)}</div></fieldset>)}</div>
+          {parsedResource && <p aria-label="功率阈值换算">{powerThreshold == null
+            ? "功率判定已关闭"
+            : `功率阈值：${Number(powerThreshold)}% × ${powerLimit} W = ${powerWatts} W/卡`}</p>}
           <div hidden={resourceMode !== "source"}><textarea aria-label="资源策略 JSON" value={resourceEditor.text} onChange={(event) => setResourceEditor((current) => ({ ...current, text: event.target.value, dirty: true }))} spellCheck={false} /></div>
           {resourceEditor.dirty && <details className="change-preview"><summary>查看变更预览 <span>{resourceChanges.length}</span></summary><div>{resourceChanges.length ? resourceChanges.map((item) => <p key={item.key}><code>{item.key}</code><del>{String(item.before ?? "—")}</del><ins>{String(item.after ?? "—")}</ins></p>) : <p>源码格式发生变化，结构化值未改变。</p>}</div></details>}
           <div className="admin-editor-actions"><button type="button" disabled={busy} onClick={() => reloadEditor("resource")}>重新加载</button><button type="button" disabled={busy || !config.backups?.resource.available} onClick={() => rollback("resource")}>恢复上一版本</button><button type="button" disabled={busy || !resourceEditor.dirty || !parsedResource} onClick={() => save("resource")}>校验并保存资源策略</button></div></section>

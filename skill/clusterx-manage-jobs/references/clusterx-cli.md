@@ -241,18 +241,26 @@ GPU compute, memory, and power telemetry are observational and include coverage
 counts. They never change capacity attribution or default plan ranking.
 Unattributed resources remain visible but are never claimed as releasable.
 
-The historical low-activity rule is independent of pending pressure. By
-default, Prometheus is queried every 5 minutes for the preceding 24 hours. A
-currently running GPU `trainingJob` or `aid` is a violation only after 60
-minutes when either sample-weighted compute utilization or capacity/time-weighted
-memory utilization is `<= 20%`. The workload UID joins samples across
-Pod restarts or node movement. Zero-GPU workloads are `not-applicable`, newer
-workloads are `warming-up`, and a missing compute or memory metric is
-`unavailable`. A historical query failure leaves the normal snapshot and
-5-minute telemetry available and emits a telemetry warning. Completed jobs are
-not retained or evaluated by this rule. The Monitor's local SQLite trend
-database stores cluster-level aggregate points only; it never stores workload
-identities or completed-workload telemetry.
+The historical low-activity rule is independent of pending pressure. Prometheus
+is queried every 5 minutes for a 24-hour window, grouped by workload UID across
+Pod restarts and node movement. Running GPU `trainingJob`, `aid`, and `air`
+workloads qualify after 60 minutes. Compute <=20% OR memory <=20% triggers the
+rule when both metrics exist. Independently, enabled historical average power
+at or below `gpu_power_threshold_pct` percent of `gpu_power_limit_w` triggers it.
+Power is sum of valid power samples divided by sample count; missing data is
+never zero. The shipped reference is 400 W and threshold 25% (100 W/card).
+Both are administrator-editable; this reference does not change hardware power
+limits. Older configurations omit the threshold and keep power checking disabled;
+explicit null also disables it. Missing power does not block compute/memory,
+and missing compute/memory does not block power. Partial evaluation is `partial`;
+zero-GPU workloads are `not-applicable`, newer workloads are `warming-up`, and
+no evaluable conditions means `unavailable`. Findings identify triggered metrics.
+Snapshot historical telemetry includes `gpu_power_avg_w`, `power_sample_count`,
+`gpu_power_util_avg_pct` and `gpu_power_limit_w`; the percentage is recalculated
+from cached watts when configuration changes. Sample count is not GPU coverage.
+Query failures leave ordinary snapshots available with a warning. Completed
+workloads are not evaluated; SQLite retains cluster-level trends only.
+
 
 ### Monitor administrator configuration
 

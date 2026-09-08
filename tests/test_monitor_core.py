@@ -297,6 +297,30 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(result["nodes"][0]["classification"], "cpu-memory-blocked")
         self.assertGreater(result["nodes"][0]["stranded_gpu"], 0)
 
+    def test_power_percentage_aggregates_cards_and_preserves_missing_coverage(self):
+        a = workload("a", "alice", "trainingJob", [placement("n", 1)], power=100)
+        b = workload("b", "alice", "trainingJob", [placement("n", 3)], power=300)
+        missing = workload("missing", "alice", "trainingJob", [placement("n", 1)])
+        raw = snapshot([node("n", 5)], [a, b, missing])
+        result = apply_policy(raw, self.policy)
+        # 100 + 3*300 over four reporting cards, not five allocated cards
+        # or the unweighted average of the two task percentages.
+        for telemetry in (result["telemetry"], result["nodes"][0]["telemetry"],
+                          next(row["telemetry"] for row in result["users"] if row["user"] == "alice"),
+                          next(row["telemetry"] for row in result["groups"] if row["group"] == "example-team")):
+            self.assertEqual(telemetry["gpu_power_util_avg_pct"], 62.5)
+            self.assertEqual(telemetry["gpu_power_total_w"], 1000)
+            self.assertEqual(telemetry["power_reported_gpu_count"], 4)
+            self.assertEqual(telemetry["allocated_gpu_count"], 5)
+        self.assertIsNone(next(row for row in result["workloads"] if row["workload_id"] == "missing")["telemetry"]["gpu_power_util_avg_pct"])
+        cfg = self.policy.model_dump()
+        cfg["low_utilization"]["gpu_power_limit_w"] = 200
+        self.assertEqual(apply_policy(raw, PolicyConfig.model_validate(cfg))["telemetry"]["gpu_power_util_avg_pct"], 125)
+        for watts, expected in ((0, 0), (None, None), (float("nan"), None), (-10, None)):
+            row = workload("zero", "alice", "trainingJob", [placement("n", 1)], power=watts)
+            telemetry = apply_policy(snapshot([node("n", 1)], [row]), self.policy)["telemetry"]
+            self.assertEqual(telemetry["gpu_power_util_avg_pct"], expected)
+
     def test_workload_totals_are_normalized_once_for_summaries(self):
         item = workload("w", "alice", "trainingJob", [
             placement("n1", 1, 4, 10), placement("n2", 2, 8, 20),
@@ -515,7 +539,7 @@ class PolicyTests(unittest.TestCase):
         }
         result = apply_policy(snapshot([node("n", 1)], [low]), self.policy)
         evaluated = result["workloads"][0]
-        self.assertEqual(evaluated["historical_telemetry"]["evaluation_status"], "evaluated")
+        self.assertEqual(evaluated["historical_telemetry"]["evaluation_status"], "partial")
         self.assertIn("utilization.low_gpu_activity", evaluated["finding_codes"])
         low_finding = next(
             item for item in evaluated["policy_findings"]
@@ -573,6 +597,77 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(by_id["warming"]["historical_telemetry"]["evaluation_status"], "warming-up")
         self.assertEqual(by_id["missing"]["historical_telemetry"]["evaluation_status"], "unavailable")
         self.assertFalse(any("utilization.low_gpu_activity" in item["finding_codes"] for item in by_id.values()))
+
+    def test_power_percentage_boundary_missing_metrics_and_reconfiguration(self):
+        old = datetime.now(timezone.utc) - timedelta(hours=2)
+        for kind in ("trainingJob", "aid", "air"):
+            for watts, compute, memory, samples, expected, status in (
+                (100, 50, 50, 100, True, "evaluated"),
+                (100.001, 50, 50, 100, False, "evaluated"),
+                (0, 50, 50, 100, True, "evaluated"),
+                (100, None, None, 100, True, "partial"),
+                (200, None, None, 100, False, "partial"),
+                (None, 10, 50, 0, True, "partial"),
+                (None, None, None, 0, False, "unavailable"),
+                (100, 50, 50, 0, False, "partial"),
+                (float("nan"), 50, 50, 100, False, "partial"),
+                (-1, 50, 50, 100, False, "partial"),
+            ):
+                with self.subTest(kind=kind, watts=watts, compute=compute, samples=samples):
+                    item = workload("power", "alice", kind, [placement("n", 1)], created=old)
+                    item["historical_telemetry"] = {
+                        "gpu_compute_util_avg_pct": compute, "gpu_memory_util_avg_pct": memory,
+                        "gpu_power_avg_w": watts, "power_sample_count": samples,
+                    }
+                    raw = snapshot([node("n", 1)], [item])
+                    row = apply_policy(raw, self.policy)["workloads"][0]
+                    self.assertEqual("utilization.low_gpu_activity" in row["finding_codes"], expected)
+                    self.assertEqual(row["historical_telemetry"]["evaluation_status"], status)
+        item["historical_telemetry"].update(gpu_power_avg_w=100, power_sample_count=100,
+                                          gpu_compute_util_avg_pct=50, gpu_memory_util_avg_pct=50)
+        raw = snapshot([node("n", 1)], [item])
+        first = apply_policy(raw, self.policy)
+        self.assertEqual(first["workloads"][0]["historical_telemetry"]["gpu_power_util_avg_pct"], 25)
+        config = self.policy.model_dump()
+        config["low_utilization"]["gpu_power_limit_w"] = 300
+        second = apply_policy(first, PolicyConfig.model_validate(config))
+        self.assertNotIn("utilization.low_gpu_activity", second["workloads"][0]["finding_codes"])
+        config["low_utilization"].pop("gpu_power_threshold_pct")
+        config["low_utilization"].pop("gpu_power_limit_w")
+        legacy = PolicyConfig.model_validate(config)
+        self.assertIsNone(legacy.low_utilization.gpu_power_threshold_pct)
+        row = apply_policy(raw, legacy)["workloads"][0]
+        self.assertNotIn("utilization.low_gpu_activity", row["finding_codes"])
+        self.assertEqual(row["historical_telemetry"]["evaluation_status"], "evaluated")
+
+    def test_power_config_validation_and_warmup(self):
+        for key, values in (("gpu_power_limit_w", (0, -1, float("inf"), float("nan"))),
+                            ("gpu_power_threshold_pct", (-1, 101, float("inf"), float("nan")))):
+            for value in values:
+                config = self.policy.model_dump()
+                config["low_utilization"][key] = value
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    PolicyConfig.model_validate(config)
+        for gpu, age, expected in ((0, 120, "not-applicable"), (1, 30, "warming-up")):
+            item = workload("power", "alice", "trainingJob", [placement("n", gpu)],
+                            created=datetime.now(timezone.utc) - timedelta(minutes=age))
+            item["historical_telemetry"] = {"gpu_power_avg_w": 0, "power_sample_count": 100}
+            row = apply_policy(snapshot([node("n", 1)], [item]), self.policy)["workloads"][0]
+            self.assertEqual(row["historical_telemetry"]["evaluation_status"], expected)
+            self.assertNotIn("utilization.low_gpu_activity", row["finding_codes"])
+
+    def test_low_utilization_includes_air_workloads(self):
+        old = datetime.now(timezone.utc) - timedelta(hours=2)
+        item = workload("air-low", "alice", "air", [placement("n", 1)], created=old)
+        item["historical_telemetry"] = {
+            "window_hours": 24, "fetched_at": old.isoformat(), "collection_status": "available",
+            "gpu_compute_util_avg_pct": 50, "gpu_memory_util_avg_pct": 10,
+            "compute_sample_count": 100, "memory_sample_count": 100,
+        }
+        result = apply_policy(snapshot([node("n", 1)], [item]), self.policy)
+        evaluated = result["workloads"][0]
+        self.assertEqual(evaluated["historical_telemetry"]["evaluation_status"], "partial")
+        self.assertIn("utilization.low_gpu_activity", evaluated["finding_codes"])
 
     def test_unavailable_and_unattributed_nodes_are_explicit(self):
         item = node("offline", 1)
@@ -1341,8 +1436,20 @@ class StoreAndTelemetryTests(unittest.TestCase):
         self.assertEqual(result["w"]["gpu_compute_util_avg_pct"], 19.5)
         self.assertEqual(result["w"]["gpu_memory_util_avg_pct"], 20)
         self.assertEqual(result["w"]["compute_sample_count"], 720)
+        self.assertIn("sum_over_time(lepton__ssp__gpu_power_usage", query.call_args.args[1])
+        self.assertIn("count_over_time(lepton__ssp__gpu_power_usage", query.call_args.args[1])
         self.assertIn("sum_over_time", query.call_args.args[1])
         self.assertIn("sum by (label_resource_compute_sensecore_cn_workload_uid)", query.call_args.args[1])
+
+    def test_historical_power_preserves_precision_and_rejects_invalid_series(self):
+        cluster = mock.Mock(cfg={"workspace": "ws"})
+        for value, expected in (("100.001", 100.001), ("0", 0), ("NaN", None), ("Inf", None), ("-1", None)):
+            row = {"metric": {"label_resource_compute_sensecore_cn_workload_uid": "w",
+                              "monitor_metric": "history-gpu-power"}, "value": [0, value]}
+            with mock.patch("clusterx_monitor.collector._query_prometheus", return_value=[row]):
+                self.assertEqual(_query_workload_history(cluster, "q", "c", 24).get("w", {}).get("gpu_power_avg_w"), expected)
+            with mock.patch("clusterx_monitor.collector._query_prometheus", return_value=[row, row]):
+                self.assertNotIn("gpu_power_avg_w", _query_workload_history(cluster, "q", "c", 24).get("w", {}))
 
     def test_historical_collection_cache_and_non_blocking_failure(self):
         client = mock.Mock()

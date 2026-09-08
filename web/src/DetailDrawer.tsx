@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { statusClass } from "./Table";
+import { formatPowerPercent, statusClass } from "./Table";
 import { useDialogFocus } from "./useDialogFocus";
 import type { Alert, DetailRef, GroupSummary, NodeSummary, PolicyFinding, Snapshot, Telemetry, UserSummary, Workload, WorkloadLogResponse } from "./types";
 
@@ -48,8 +48,9 @@ function TelemetryPanel({ telemetry }: { telemetry: Telemetry }) {
   return <section className="detail-section"><h3>最近 5 分钟遥测</h3><Metrics>
     <Metric label="GPU Util" value={number(telemetry.gpu_compute_util_avg_pct, "%")} />
     <Metric label="GPU Memory" value={number(telemetry.gpu_memory_util_avg_pct, "%")} />
-    <Metric label="总功率" value={power(telemetry.gpu_power_total_w)} />
-    <Metric label="平均每卡" value={power(telemetry.gpu_power_avg_w)} />
+    <Metric label="总功率（已上报卡）" value={power(telemetry.gpu_power_total_w)} />
+    <Metric label="功率占比" value={formatPowerPercent(telemetry.gpu_power_util_avg_pct)} />
+    <Metric label="每卡功率计算基准" value={power(telemetry.gpu_power_limit_w ?? null)} />
     <Metric label="Compute 覆盖" value={`${telemetry.compute_reported_gpu_count}/${telemetry.allocated_gpu_count}`} />
     <Metric label="显存覆盖" value={`${telemetry.memory_reported_gpu_count}/${telemetry.allocated_gpu_count}`} />
     <Metric label="功率覆盖" value={`${telemetry.power_reported_gpu_count}/${telemetry.allocated_gpu_count}`} />
@@ -61,7 +62,7 @@ function FindingsPanel({ findings }: { findings?: PolicyFinding[] }) {
   return <section className="detail-section"><h3>策略发现<span className="section-count">{rows.length}</span></h3>{rows.length === 0 ? <p className="muted">无</p> : <div className="finding-list">{rows.map((finding, index) => <article key={`${finding.code}:${finding.source_id ?? "self"}:${index}`}>
     <header><code>{finding.code}</code><span className={statusClass(finding.status)}>{finding.status}</span></header>
     <p>{finding.message}</p><div className="tag-list"><span>{finding.category}</span>{finding.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
-    <dl><div><dt>观测值</dt><dd>{JSON.stringify(finding.observed)}</dd></div><div><dt>限制值</dt><dd>{JSON.stringify(finding.limit)}</dd></div>{finding.window_hours != null && <div><dt>窗口</dt><dd>{finding.window_hours}h</dd></div>}{finding.source_type && <div><dt>来源</dt><dd>{finding.source_type} · {finding.source_id}</dd></div>}</dl>
+    <dl><div><dt>观测值</dt><dd>{JSON.stringify(Object.fromEntries(Object.entries(finding.observed).filter(([key]) => key !== "gpu_power_avg_w")))}</dd></div><div><dt>限制值</dt><dd>{JSON.stringify(finding.limit)}</dd></div>{finding.window_hours != null && <div><dt>窗口</dt><dd>{finding.window_hours}h</dd></div>}{finding.source_type && <div><dt>来源</dt><dd>{finding.source_type} · {finding.source_id}</dd></div>}</dl>
   </article>)}</div>}</section>;
 }
 
@@ -259,6 +260,9 @@ function WorkloadDetail({ workload, snapshotId, open, planFrom }: { workload: Wo
       <Metric label="窗口" value={`${number(workload.historical_telemetry.window_hours)}h`} />
       <Metric label="GPU Util 平均" value={number(workload.historical_telemetry.gpu_compute_util_avg_pct, "%")} />
       <Metric label="显存 Util 平均" value={number(workload.historical_telemetry.gpu_memory_util_avg_pct, "%")} />
+      <Metric label="历史功率占比" value={formatPowerPercent(workload.historical_telemetry.gpu_power_util_avg_pct)} />
+      <Metric label="每卡功率计算基准" value={power(workload.historical_telemetry.gpu_power_limit_w ?? null)} />
+      <Metric label="功率有效样本数" value={number(workload.historical_telemetry.power_sample_count)} />
       <Metric label="样本（compute / memory）" value={`${number(workload.historical_telemetry.compute_sample_count)} / ${number(workload.historical_telemetry.memory_sample_count)}`} />
       <Metric label="抓取时间" value={workload.historical_telemetry.fetched_at ? new Date(workload.historical_telemetry.fetched_at).toLocaleString() : "—"} />
     </Metrics></section>}

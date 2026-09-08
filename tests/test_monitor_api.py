@@ -94,7 +94,7 @@ class MonitorApiTests(unittest.TestCase):
     def test_status_snapshot_policy_and_read_only_routes(self):
         client = TestClient(self.app)
         status_response = client.get("/api/v1/status")
-        self.assertEqual(status_response.json()["version"], "1.1.0")
+        self.assertEqual(status_response.json()["version"], "1.1.1")
         self.assertTrue(status_response.json()["snapshot"]["ready"])
         self.assertIn("default-src 'self'", status_response.headers["content-security-policy"])
         self.assertEqual(status_response.headers["x-content-type-options"], "nosniff")
@@ -407,6 +407,15 @@ class MonitorApiTests(unittest.TestCase):
         self.assertIn("alice", str(private["groups"]))
         resource = json.loads(private["resource"]["text"])
         resource["refresh_seconds"] = 31
+        resource["low_utilization"].update(gpu_power_limit_w=300, gpu_power_threshold_pct=25)
+        invalid_resource = json.loads(json.dumps(resource))
+        invalid_resource["low_utilization"]["gpu_power_limit_w"] = 0
+        invalid_power = client.put(
+            "/api/v1/admin/config/resource",
+            json={"revision": private["resource"]["revision"], "text": json.dumps(invalid_resource)},
+            headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+        )
+        self.assertEqual(invalid_power.status_code, 422)
         resource_text = json.dumps(resource)
         missing_csrf = client.put(
             "/api/v1/admin/config/resource",
@@ -420,6 +429,9 @@ class MonitorApiTests(unittest.TestCase):
             headers={"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin", "X-CSRF-Token": csrf},
         )
         self.assertEqual(updated.status_code, 200, updated.text)
+        public_power = client.get("/api/v1/policy").json()["policy"]["low_utilization"]
+        self.assertEqual(public_power["gpu_power_limit_w"], 300)
+        self.assertEqual(public_power["gpu_power_threshold_pct"], 25)
         self.assertEqual(json.loads(updated.json()["resource"]["text"])["refresh_seconds"], 31)
         self.assertTrue(updated.json()["backups"]["resource"]["available"])
         self.assertEqual(updated.json()["audit"][0]["action"], "update")

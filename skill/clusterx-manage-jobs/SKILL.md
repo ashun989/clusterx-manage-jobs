@@ -166,13 +166,21 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   with coverage counts but must never affect capacity attribution or default
   candidate ranking. Unattributed node resources remain visible and are never
   claimed as releasable.
-- The low-activity rule evaluates only currently running GPU `trainingJob` and
-  `aid` workloads. With the shipped policy, a workload running for at least 60
-  minutes is a violation when its Prometheus sample-weighted 24-hour average
-  GPU compute utilization or capacity/time-weighted memory utilization is at
-  or below 20%. Zero-GPU workloads are not applicable; short-running
-  workloads are warming up; a missing metric is unavailable. Missing history
-  must not be treated as a violation and does not block other monitor data.
+- The low-activity rule evaluates currently running GPU `trainingJob`, `aid`,
+  and `air` workloads after 60 minutes. The shipped policy uses sample-weighted
+  24-hour compute utilization or capacity/time-weighted memory utilization at
+  or below 20%, OR sample-weighted average per-GPU power at or below 25% of a
+  configurable 400 W reference (100 W/card). `low_utilization.gpu_power_limit_w`
+  is a queue-wide calculation reference, not a hardware power setting;
+  `gpu_power_threshold_pct` is nullable and omission/null disables the power rule
+  for older configurations. Compute/memory retain their paired availability
+  requirement; power is evaluated independently. Missing values are not zero;
+  partial evaluation is labeled `partial` and can still produce a finding.
+  Zero-GPU workloads are not applicable and short-running workloads warm up.
+  The Web UI displays power percentages in tables and overview, and total watts,
+  percentage, reference watts and sample counts in details;
+  sample count is not GPU coverage. Power never changes capacity attribution
+  or default candidate ranking.
 - For SSP Worker discovery, use `get-job <job-id> --workers`; use the live-help
   pagination, filter, and ordering options when the result set is large. Treat
   Worker fields as runtime observations and do not infer missing nodes.

@@ -1,4 +1,6 @@
 export type Telemetry = {
+  gpu_power_util_avg_pct?: number | null;
+  gpu_power_limit_w?: number;
   allocated_gpu_count: number;
   reported_gpu_count: number;
   compute_reported_gpu_count: number;
@@ -54,6 +56,10 @@ export type FindingFacets = {
 };
 
 export type HistoricalTelemetry = {
+  gpu_power_avg_w?: number | null;
+  gpu_power_util_avg_pct?: number | null;
+  gpu_power_limit_w?: number;
+  power_sample_count?: number;
   window_hours: number;
   fetched_at: string | null;
   collection_status: "available" | "unavailable" | string;
@@ -190,6 +196,8 @@ export type PolicyResponse = {
     training: Record<string, number>;
     planning: { default_cpu_per_gpu: number; default_memory_gib_per_gpu: number };
     low_utilization: {
+      gpu_power_limit_w?: number;
+      gpu_power_threshold_pct?: number | null;
       window_hours: number;
       refresh_minutes: number;
       min_observation_minutes: number;

@@ -47,7 +47,7 @@ RULE_CATALOG = [
     {"code": "quota.memory", "category": "quota", "applies_to": "group", "title": "Group memory quota", "description": "Memory usage is checked only when the group explicitly configures memory_quota_gib."},
     {"code": "quota.cpu.unknown", "category": "quota", "applies_to": "group", "title": "Group CPU quota unavailable", "description": "A configured quota with missing CPU usage is unknown and never treated as zero."},
     {"code": "quota.memory.unknown", "category": "quota", "applies_to": "group", "title": "Group memory quota unavailable", "description": "A configured quota with missing memory usage is unknown and never treated as zero."},
-    {"code": "utilization.low_gpu_activity", "category": "utilization", "applies_to": "GPU workload", "title": "Historical low GPU activity", "description": "Either historical compute or capacity/time-weighted memory utilization is at or below its inclusive threshold."},
+    {"code": "utilization.low_gpu_activity", "category": "utilization", "applies_to": "GPU workload", "title": "Historical low GPU activity", "description": "Historical compute, capacity/time-weighted memory, or enabled sample-weighted per-GPU power percentage is at or below its inclusive threshold."},
     {"code": "node.idle", "category": "node-classification", "applies_to": "node", "title": "Idle node", "description": "The schedulable node has no allocated GPU, CPU, or memory."},
     {"code": "node.gpu_full", "category": "node-classification", "applies_to": "node", "title": "GPU-full node", "description": "All GPUs are allocated."},
     {"code": "node.fragmented", "category": "node-classification", "applies_to": "node", "title": "Fragmented node", "description": "The node is partially allocated and its free GPU capacity remains usable for the configured standard planning profile."},
@@ -245,7 +245,7 @@ class PolicyManager:
                     "configuration_error": "Missing or invalid initial files enter authenticated setup-required mode. A later hot-reload error keeps the complete last-known-good resource and group policy.",
                     "pending_pressure_unavailable": "An incomplete pending inventory or any unavailable queue timestamp makes pending pressure unknown instead of inactive.",
                     "historical_telemetry_unavailable": "The snapshot is still published, historical low-utilization evaluation is skipped, and a telemetry warning is emitted.",
-                    "historical_scope": "Only currently running GPU trainingJob and aid workloads are evaluated; no completed-workload history is stored.",
+                    "historical_scope": "Only currently running GPU trainingJob, aid, and air workloads are evaluated; no completed-workload history is stored.",
                     "development_instance_limit": "Only active aid workloads with known owners count toward the per-user development instance limit; the finding remains user-scoped.",
                     "group_quotas": "GPU, CPU, and memory quotas are independent; an omitted or null resource quota is unlimited.",
                     "default_group": "When default.gpu_quota is remainder, its effective quota is max(0, current bound GPU capacity minus all other explicit group GPU quotas).",
@@ -536,7 +536,7 @@ def _normalize_workload_resources(workload: dict[str, Any]) -> None:
     workload.setdefault("task_resources", [])
 
 
-def _telemetry_summary(workloads: Iterable[dict[str, Any]]) -> dict[str, Any]:
+def _telemetry_summary(workloads: Iterable[dict[str, Any]], power_limit_w: float) -> dict[str, Any]:
     cards = [card for workload in workloads for card in workload.get("gpus", [])]
     allocated = int(_sum(workload.get("total_gpu") for workload in workloads))
     reported = [
@@ -547,7 +547,9 @@ def _telemetry_summary(workloads: Iterable[dict[str, Any]]) -> dict[str, Any]:
     ]
     compute = [float(card["gpu_compute_util_pct"]) for card in cards if card.get("gpu_compute_util_pct") is not None]
     memory = [float(card["gpu_memory_util_pct"]) for card in cards if card.get("gpu_memory_util_pct") is not None]
-    powers = [float(card["gpu_power_w"]) for card in cards if card.get("gpu_power_w") is not None]
+    powers = [float(card["gpu_power_w"]) for card in cards
+              if card.get("gpu_power_w") is not None
+              and math.isfinite(float(card["gpu_power_w"])) and float(card["gpu_power_w"]) >= 0]
 
     def average(items: list[float]) -> float | None:
         return round(sum(items) / len(items), 2) if items else None
@@ -560,6 +562,8 @@ def _telemetry_summary(workloads: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "power_reported_gpu_count": len(powers),
         "gpu_compute_util_avg_pct": average(compute),
         "gpu_memory_util_avg_pct": average(memory),
+        "gpu_power_util_avg_pct": sum(powers) / len(powers) / power_limit_w * 100 if powers else None,
+        "gpu_power_limit_w": power_limit_w,
         "gpu_power_total_w": round(sum(powers), 2) if powers else None,
         "gpu_power_avg_w": average(powers),
     }
@@ -733,40 +737,69 @@ def _workload_limits(
         "gpu_compute_util_avg_pct": None, "gpu_memory_util_avg_pct": None,
         "compute_sample_count": 0, "memory_sample_count": 0,
     })
+    cfg = policy.low_utilization
+    history.setdefault("gpu_power_avg_w", None)
+    history.setdefault("power_sample_count", 0)
+    raw_power = history.get("gpu_power_avg_w")
+    power = None
+    if (
+        isinstance(raw_power, (int, float)) and math.isfinite(raw_power)
+        and raw_power >= 0 and (history.get("power_sample_count") or 0) > 0
+    ):
+        power = float(raw_power)
+    history["gpu_power_avg_w"] = power
+    power_pct = 100 * power / cfg.gpu_power_limit_w if power is not None else None
+    history["gpu_power_util_avg_pct"] = power_pct
+    history["gpu_power_limit_w"] = cfg.gpu_power_limit_w
     total_gpu = float(workload.get("total_gpu") or 0)
     compute = history.get("gpu_compute_util_avg_pct")
     memory = history.get("gpu_memory_util_avg_pct")
-    if kind not in {"trainingJob", "aid"} or total_gpu <= 0:
+    legacy_available = compute is not None and memory is not None
+    power_enabled = cfg.gpu_power_threshold_pct is not None
+    power_available = power_enabled and power_pct is not None
+    if kind not in {"trainingJob", "aid", "air"} or total_gpu <= 0:
         history["evaluation_status"] = "not-applicable"
     elif runtime is None:
         history["evaluation_status"] = "unavailable"
-    elif runtime * 60 < policy.low_utilization.min_observation_minutes:
+    elif runtime * 60 < cfg.min_observation_minutes:
         history["evaluation_status"] = "warming-up"
-    elif compute is None or memory is None:
+    elif not legacy_available and not power_available:
         history["evaluation_status"] = "unavailable"
     else:
-        history["evaluation_status"] = "evaluated"
-        if (
-            float(compute) <= policy.low_utilization.gpu_compute_threshold_pct
-            or float(memory) <= policy.low_utilization.gpu_memory_threshold_pct
-        ):
+        history["evaluation_status"] = (
+            "evaluated" if legacy_available and (not power_enabled or power_available) else "partial"
+        )
+        triggered = []
+        if legacy_available:
+            if float(compute) <= cfg.gpu_compute_threshold_pct:
+                triggered.append("compute")
+            if float(memory) <= cfg.gpu_memory_threshold_pct:
+                triggered.append("memory")
+        if power_available and power_pct <= cfg.gpu_power_threshold_pct:
+            triggered.append("power")
+        if triggered:
             findings.append(_finding(
                 "utilization.low_gpu_activity", "utilization", "violation",
-                "historical GPU compute or memory utilization is at or below its limit",
+                "historical GPU " + ", ".join(triggered) + " is at or below its limit",
                 tags=("gpu", "historical", "low-utilization"),
                 observed={
-                    "gpu_compute_util_pct": float(compute),
-                    "gpu_memory_util_pct": float(memory),
+                    "gpu_compute_util_pct": compute,
+                    "gpu_memory_util_pct": memory,
+                    "gpu_power_avg_w": power,
+                    "gpu_power_util_avg_pct": power_pct,
+                    "triggered_metrics": triggered,
                     "runtime_hours": round(runtime, 2),
                     "runtime_quality": quality,
                     "runtime_source": source,
                 },
                 limit={
-                    "gpu_compute_util_pct": policy.low_utilization.gpu_compute_threshold_pct,
-                    "gpu_memory_util_pct": policy.low_utilization.gpu_memory_threshold_pct,
-                    "min_observation_minutes": policy.low_utilization.min_observation_minutes,
+                    "gpu_compute_util_pct": cfg.gpu_compute_threshold_pct,
+                    "gpu_memory_util_pct": cfg.gpu_memory_threshold_pct,
+                    "gpu_power_threshold_pct": cfg.gpu_power_threshold_pct,
+                    "gpu_power_limit_w": cfg.gpu_power_limit_w,
+                    "min_observation_minutes": cfg.min_observation_minutes,
                 },
-                window_hours=policy.low_utilization.window_hours,
+                window_hours=cfg.window_hours,
             ))
 
     unique = {item["code"] + repr(item.get("observed")): item for item in findings}
@@ -842,7 +875,7 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         pending_item.setdefault("task_resources", [])
         pending_item["placements"] = []
         pending_item["gpus"] = []
-        pending_item["telemetry"] = _telemetry_summary([])
+        pending_item["telemetry"] = _telemetry_summary([], policy.low_utilization.gpu_power_limit_w)
 
     pending_workloads = snapshot.get("pending_workloads") or []
     unknown_age_pending = [
@@ -886,7 +919,7 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         workload["policy_findings"] = findings
         workload["policy_reasons"] = [item["message"] for item in findings]
         _set_finding_facets(workload)
-        workload["telemetry"] = _telemetry_summary([workload])
+        workload["telemetry"] = _telemetry_summary([workload], policy.low_utilization.gpu_power_limit_w)
         by_user[user].append(workload)
         by_group[group].append(workload)
 
@@ -962,7 +995,7 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             "over_resources": over,
             "policy_findings": quota_findings,
             "policy_reasons": [item["message"] for item in quota_findings],
-            "telemetry": _telemetry_summary(group_workloads),
+            "telemetry": _telemetry_summary(group_workloads, policy.low_utilization.gpu_power_limit_w),
         }
         _set_finding_facets(summary)
         group_summaries.append(summary)
@@ -1037,7 +1070,7 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             ),
             "policy_findings": user_findings,
             "policy_reasons": [item["message"] for item in user_findings],
-            "telemetry": _telemetry_summary(items),
+            "telemetry": _telemetry_summary(items, policy.low_utilization.gpu_power_limit_w),
         }
         _set_finding_facets(summary)
         user_summaries.append(summary)
@@ -1136,7 +1169,7 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             scoped["gpus"] = [card for card in workload.get("gpus", []) if str(card.get("node")) == str(node.get("node"))]
             scoped["total_gpu"] = sum(float(p.get("gpu") or 0) for p in workload.get("placements", []) if str(p.get("node")) == str(node.get("node")))
             node_cards.append(scoped)
-        node["telemetry"] = _telemetry_summary(node_cards)
+        node["telemetry"] = _telemetry_summary(node_cards, policy.low_utilization.gpu_power_limit_w)
     snapshot["capacity"] = {
         "bound_gpu": bound_gpu,
         "schedulable_gpu": int(_sum(
@@ -1173,7 +1206,7 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
     snapshot["users"] = user_summaries
     snapshot["groups"] = group_summaries
     snapshot["alerts"] = alerts
-    snapshot["telemetry"] = _telemetry_summary(workloads)
+    snapshot["telemetry"] = _telemetry_summary(workloads, policy.low_utilization.gpu_power_limit_w)
     if not snapshot.get("telemetry_available", True):
         snapshot["telemetry_status"] = "unavailable"
     elif snapshot["telemetry"]["reported_gpu_count"] < snapshot["telemetry"]["allocated_gpu_count"]:

@@ -41,6 +41,8 @@ class PlanningConfig(FrozenModel):
 
 
 class LowUtilizationConfig(FrozenModel):
+    gpu_power_limit_w: float = Field(default=400, gt=0, allow_inf_nan=False)
+    gpu_power_threshold_pct: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
     window_hours: int = Field(default=24, ge=1, le=168)
     refresh_minutes: int = Field(default=5, ge=1, le=60)
     min_observation_minutes: int = Field(default=60, ge=0, le=10_080)

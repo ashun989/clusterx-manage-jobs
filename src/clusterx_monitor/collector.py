@@ -16,6 +16,8 @@ from .models import SCHEMA_VERSION
 GPU_COMPUTE_UTIL = "gpu-compute-util"
 GPU_MEMORY_UTIL = "gpu-memory-util"
 GPU_POWER = "gpu-power"
+HISTORY_POWER = "history-gpu-power"
+HISTORY_POWER_SAMPLES = "history-gpu-power-samples"
 HISTORY_COMPUTE_UTIL = "history-gpu-compute-util"
 HISTORY_MEMORY_UTIL = "history-gpu-memory-util"
 HISTORY_COMPUTE_SAMPLES = "history-gpu-compute-samples"
@@ -449,6 +451,8 @@ def _query_workload_history(
     util = f"lepton__ssp__gpu_util{{{selector}}}"
     used = f"lepton__ssp__gpu_memory_used__MiB{{{selector}}}"
     total = f"lepton__ssp__gpu_memory_total__MiB{{{selector}}}"
+    power = f"lepton__ssp__gpu_power_usage{{{selector}}}"
+    power_count = f"sum by ({uid}) (count_over_time({power}[{window}]))"
     compute_count = f"sum by ({uid}) (count_over_time({util}[{window}]))"
     memory_count = f"sum by ({uid}) (count_over_time({used}[{window}]))"
     expressions = [
@@ -466,8 +470,18 @@ def _query_workload_history(
         f"{memory_count},"
         f'"monitor_metric","{HISTORY_MEMORY_SAMPLES}","__name__",".*")',
     ]
+    expressions.extend([
+        "label_replace("
+        f"sum by ({uid}) (sum_over_time({power}[{window}])) / {power_count},"
+        f'"monitor_metric","{HISTORY_POWER}","__name__",".*")',
+        "label_replace("
+        f"{power_count},"
+        f'"monitor_metric","{HISTORY_POWER_SAMPLES}","__name__",".*")',
+    ])
     series = _query_prometheus(cluster, " or ".join(f"({item})" for item in expressions))
     fields = {
+        HISTORY_POWER: "gpu_power_avg_w",
+        HISTORY_POWER_SAMPLES: "power_sample_count",
         HISTORY_COMPUTE_UTIL: "gpu_compute_util_avg_pct",
         HISTORY_MEMORY_UTIL: "gpu_memory_util_avg_pct",
         HISTORY_COMPUTE_SAMPLES: "compute_sample_count",
@@ -490,8 +504,8 @@ def _query_workload_history(
             value = float((item.get("value") or [None, None])[1])
         except (TypeError, ValueError, IndexError):
             continue
-        if math.isfinite(value):
-            result.setdefault(workload_id, {})[field] = round(value, 2)
+        if math.isfinite(value) and value >= 0:
+            result.setdefault(workload_id, {})[field] = value if field == "gpu_power_avg_w" else round(value, 2)
     return result
 
 
@@ -1266,6 +1280,8 @@ class ClusterCollector:
                 "window_hours": historical_window_hours,
                 "fetched_at": history_fetched_at if history_available else None,
                 "collection_status": "available" if values else "unavailable",
+                "gpu_power_avg_w": values.get("gpu_power_avg_w"),
+                "power_sample_count": int(values.get("power_sample_count", 0)),
                 "gpu_compute_util_avg_pct": values.get("gpu_compute_util_avg_pct"),
                 "gpu_memory_util_avg_pct": values.get("gpu_memory_util_avg_pct"),
                 "compute_sample_count": int(values.get("compute_sample_count", 0)),

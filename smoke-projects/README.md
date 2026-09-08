@@ -36,3 +36,10 @@ type and alias.
 seconds, and persists a sanitized final result to an explicitly supplied shared
 path. It is used to distinguish running-pod log access from post-completion
 HTTP 404 behavior.
+
+`gpu-power-probe` reads the visible GPU model and current/default/maximum power
+limits through `nvidia-smi` with a 60-second timeout, persists `result.local.json`
+next to its script on shared storage, prints sanitized JSON and exits. Submit
+with 1 node, 1 GPU, 1 CPU, 4 GiB memory and 1 GiB shared memory. Use the current
+power limit as the monitor reference; one sample does not establish uniform
+limits across the queue. The result is ignored by Git.

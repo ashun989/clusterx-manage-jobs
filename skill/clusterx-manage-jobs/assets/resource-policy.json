@@ -29,6 +29,8 @@
     "refresh_minutes": 5,
     "min_observation_minutes": 60,
     "gpu_compute_threshold_pct": 20,
-    "gpu_memory_threshold_pct": 20
+    "gpu_memory_threshold_pct": 20,
+    "gpu_power_limit_w": 400,
+    "gpu_power_threshold_pct": 25
   }
 }

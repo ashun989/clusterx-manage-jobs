@@ -28,14 +28,13 @@ export const emptyTableState = (): TableState => ({ filters: {}, sort: null, que
 
 const display = (value: unknown) => value == null ? "—" : Array.isArray(value) ? value.join(", ") || "—" : typeof value === "number" ? value.toLocaleString() : String(value);
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
-const power = (watts: number | null) => watts == null ? "—" : watts >= 1000 ? `${(watts / 1000).toFixed(1)} kW` : `${watts.toFixed(0)} W`;
 export const statusClass = (status: unknown) => `status status-${String(status ?? "unknown")}`;
 
 export function TelemetryCell({ data }: { data: Telemetry }) {
   return <div className="telemetry-cell">
     <span>{number(data.gpu_compute_util_avg_pct, "%")} util <small>{data.compute_reported_gpu_count}/{data.allocated_gpu_count}</small></span>
     <span>{number(data.gpu_memory_util_avg_pct, "%")} mem <small>{data.memory_reported_gpu_count}/{data.allocated_gpu_count}</small></span>
-    <span>{power(data.gpu_power_total_w)} <small>{data.power_reported_gpu_count}/{data.allocated_gpu_count}</small></span>
+    <span>{formatPowerPercent(data.gpu_power_util_avg_pct)} <small>{data.power_reported_gpu_count}/{data.allocated_gpu_count}</small></span>
   </div>;
 }
 
@@ -154,4 +153,4 @@ export function DataTable<T>({ rows, columns, state, onState, rowKey, rowLabel, 
   </>;
 }
 
-export const formatPower = (value: unknown) => power(value == null ? null : Number(value));
+export const formatPowerPercent = (value: unknown) => value == null || !Number.isFinite(Number(value)) ? "—" : `${Number(value).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
