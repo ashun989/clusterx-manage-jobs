@@ -579,7 +579,52 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("utilization.low_gpu_activity", by_id["memory-low"]["finding_codes"])
         self.assertNotIn("utilization.low_gpu_activity", by_id["both-high"]["finding_codes"])
 
-    def test_low_utilization_skips_zero_gpu_warming_and_missing_metric(self):
+    def test_low_utilization_evaluates_each_available_metric_independently(self):
+        from itertools import product
+
+        old = datetime.now(timezone.utc) - timedelta(hours=2)
+        for kind, power_enabled, compute, memory, watts in product(
+            ("trainingJob", "aid", "air"), (True, False),
+            (None, 20, 50), (None, 20, 50), (None, 100, 200),
+        ):
+            with self.subTest(kind=kind, power_enabled=power_enabled,
+                              compute=compute, memory=memory, watts=watts):
+                config = self.policy.model_dump()
+                if not power_enabled:
+                    config["low_utilization"]["gpu_power_threshold_pct"] = None
+                item = workload("independent", "alice", kind, [placement("n", 1)], created=old)
+                item["historical_telemetry"] = {
+                    "gpu_compute_util_avg_pct": compute,
+                    "gpu_memory_util_avg_pct": memory,
+                    "gpu_power_avg_w": watts,
+                    "power_sample_count": 100 if watts is not None else 0,
+                }
+                row = apply_policy(
+                    snapshot([node("n", 1)], [item]), PolicyConfig.model_validate(config),
+                )["workloads"][0]
+                expected_metrics = []
+                if compute == 20:
+                    expected_metrics.append("compute")
+                if memory == 20:
+                    expected_metrics.append("memory")
+                if power_enabled and watts == 100:
+                    expected_metrics.append("power")
+                findings = [finding for finding in row["policy_findings"]
+                            if finding["code"] == "utilization.low_gpu_activity"]
+                self.assertEqual(len(findings), int(bool(expected_metrics)))
+                self.assertEqual("utilization.low_gpu_activity" in row["finding_codes"],
+                                 bool(expected_metrics))
+                if findings:
+                    self.assertEqual(findings[0]["observed"]["triggered_metrics"], expected_metrics)
+                if compute is None and memory is None and (not power_enabled or watts is None):
+                    expected_status = "unavailable"
+                elif compute is not None and memory is not None and (not power_enabled or watts is not None):
+                    expected_status = "evaluated"
+                else:
+                    expected_status = "partial"
+                self.assertEqual(row["historical_telemetry"]["evaluation_status"], expected_status)
+
+    def test_low_utilization_skips_zero_gpu_warming_and_all_metrics_missing(self):
         now = datetime.now(timezone.utc)
         zero = workload("zero", "alice", "trainingJob", [placement("n", 0)], created=now - timedelta(hours=2))
         warming = workload("warming", "alice", "aid", [placement("n", 1)], created=now - timedelta(minutes=30))
@@ -590,7 +635,9 @@ class PolicyTests(unittest.TestCase):
                 "gpu_compute_util_avg_pct": 10, "gpu_memory_util_avg_pct": 10,
                 "compute_sample_count": 10, "memory_sample_count": 10,
             }
-        missing["historical_telemetry"]["gpu_memory_util_avg_pct"] = None
+        missing["historical_telemetry"].update(
+            gpu_compute_util_avg_pct=None, gpu_memory_util_avg_pct=None,
+        )
         result = apply_policy(snapshot([node("n", 2)], [zero, warming, missing]), self.policy)
         by_id = {item["workload_id"]: item for item in result["workloads"]}
         self.assertEqual(by_id["zero"]["historical_telemetry"]["evaluation_status"], "not-applicable")

@@ -754,7 +754,8 @@ def _workload_limits(
     total_gpu = float(workload.get("total_gpu") or 0)
     compute = history.get("gpu_compute_util_avg_pct")
     memory = history.get("gpu_memory_util_avg_pct")
-    legacy_available = compute is not None and memory is not None
+    compute_available = compute is not None
+    memory_available = memory is not None
     power_enabled = cfg.gpu_power_threshold_pct is not None
     power_available = power_enabled and power_pct is not None
     if kind not in {"trainingJob", "aid", "air"} or total_gpu <= 0:
@@ -763,18 +764,19 @@ def _workload_limits(
         history["evaluation_status"] = "unavailable"
     elif runtime * 60 < cfg.min_observation_minutes:
         history["evaluation_status"] = "warming-up"
-    elif not legacy_available and not power_available:
+    elif not (compute_available or memory_available or power_available):
         history["evaluation_status"] = "unavailable"
     else:
         history["evaluation_status"] = (
-            "evaluated" if legacy_available and (not power_enabled or power_available) else "partial"
+            "evaluated"
+            if compute_available and memory_available and (not power_enabled or power_available)
+            else "partial"
         )
         triggered = []
-        if legacy_available:
-            if float(compute) <= cfg.gpu_compute_threshold_pct:
-                triggered.append("compute")
-            if float(memory) <= cfg.gpu_memory_threshold_pct:
-                triggered.append("memory")
+        if compute_available and float(compute) <= cfg.gpu_compute_threshold_pct:
+            triggered.append("compute")
+        if memory_available and float(memory) <= cfg.gpu_memory_threshold_pct:
+            triggered.append("memory")
         if power_available and power_pct <= cfg.gpu_power_threshold_pct:
             triggered.append("power")
         if triggered:
