@@ -17,8 +17,8 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
 - For a preflight check, run `python3 scripts/preflight.py`.
 - For queue capacity, per-user/group usage, policy alerts, node fragmentation,
   cached monitoring, or full-node scheduling simulation, run
-  `python3 scripts/monitor_cli.py`. It is a thin read-only client for the local
-  `clusterx-monitor` service and never connects to Clusterx directly.
+  `python3 scripts/monitor_cli.py`. It is a thin read-only client for the
+  configured `clusterx-monitor` service and never connects to Clusterx directly.
 - Run Clusterx through `python3 scripts/clusterx_exec.py --cwd <project> --`
   so project configuration overrides the persistent global configuration and
   Clusterx stdout/stderr are redacted before they are returned.
@@ -113,8 +113,10 @@ stopping, privileged mode, credentials, and remote documentation as sensitive.
   operations without confirmation unless another action is implied.
 - Use `monitor_cli.py overview|users|groups|nodes|workloads|alerts` for cached
   monitoring views and `monitor_cli.py watch --count N --format jsonl` for a
-  bounded stream of complete snapshots. The service must already be running;
-  never fall back to an ad-hoc live collection when it is unavailable.
+  bounded stream of complete snapshots. The service must already be running at
+  the configured endpoint; it may be deployed on another development machine
+  and shared by all clients. Never fall back to an ad-hoc live collection when
+  it is unavailable.
 - Workload views expose resource creation time and normalized priority when the
   Clusterx resource API provides them. Pending TrainingJob creation time is the
   initial queue-age anchor; it is not a later retry/requeue transition. Missing

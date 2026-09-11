@@ -73,8 +73,9 @@ python3 scripts/clusterx_exec.py --cwd <project-dir> -- log <job-id> --hours 6
 `CLUSTERX_RESOURCE_POLICY`；显式参数优先于环境变量，环境变量优先于 Skill
 内置策略。该校验不依赖 monitor 服务。
 
-队列监控和调度模拟只访问本机 `clusterx-monitor` 服务的缓存，不读取上述
-Clusterx 配置，也不会在服务不可用时回退到实时采集：
+队列监控和调度模拟只访问配置的 `clusterx-monitor` 服务缓存，不读取上述
+Clusterx 配置，也不会在服务不可用时回退到实时采集。Monitor 可以部署在一台
+开发机上，由其他开发机共享：
 
 ```bash
 python3 scripts/monitor_cli.py status --format json
@@ -86,8 +87,15 @@ python3 scripts/monitor_cli.py plan --nodes 2 --gpus-per-node 8 \
 python3 scripts/monitor_cli.py watch --view alerts --count 10 --format jsonl
 ```
 
-服务地址默认是 `http://127.0.0.1:8765`。可以在子命令之前传
-`--endpoint`，或设置 `CLUSTERX_MONITOR_URL`。安装 Skill 后从任意目录调用时，
+服务地址按以下优先级解析：命令行 `--endpoint`、环境变量
+`CLUSTERX_MONITOR_URL`、默认值 `http://127.0.0.1:8765`。团队应通过统一的
+dev-env 环境配置在每台开发机注入共享地址，例如：
+
+```bash
+export CLUSTERX_MONITOR_URL=http://monitor-dev.example:8765
+```
+
+不要把真实内部地址写入 Skill 包或项目仓库。安装 Skill 后从任意目录调用时，
 使用 `${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/monitor_cli.py`
 的完整路径。
 

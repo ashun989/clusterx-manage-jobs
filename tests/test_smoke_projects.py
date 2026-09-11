@@ -208,6 +208,8 @@ class SmokeProjectTests(unittest.TestCase):
             "--auth-config config/admin.local.yaml",
             "setup-required",
             "Argon2id",
+            "CLUSTERX_MONITOR_URL",
+            "共享",
         ):
             self.assertIn(marker, readme)
         for marker in (
@@ -220,6 +222,7 @@ class SmokeProjectTests(unittest.TestCase):
             "utilization.low_gpu_activity",
             "--violation-category",
             "warming-up",
+            "CLUSTERX_MONITOR_URL",
         ):
             self.assertIn(marker, cli_reference)
         self.assertFalse((skill_root / "scripts" / "queue_plan.py").exists())

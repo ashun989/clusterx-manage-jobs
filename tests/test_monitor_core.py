@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -1827,6 +1828,21 @@ class SkillCliTests(unittest.TestCase):
             sys, "argv", ["monitor_cli.py", "status", "--format", "json"]
         ), mock.patch("sys.stdout"):
             self.assertEqual(self.module.main(), 0)
+
+    def test_cli_endpoint_precedence_supports_shared_environment(self):
+        with mock.patch.dict(
+            os.environ, {"CLUSTERX_MONITOR_URL": "http://shared-monitor:49394"}, clear=False,
+        ):
+            args = self.module.build_parser().parse_args(["status"])
+            self.assertEqual(args.endpoint, "http://shared-monitor:49394")
+            explicit = self.module.build_parser().parse_args([
+                "--endpoint", "http://override-monitor:8765", "status",
+            ])
+            self.assertEqual(explicit.endpoint, "http://override-monitor:8765")
+
+        with mock.patch.dict(os.environ, {"CLUSTERX_MONITOR_URL": "   "}, clear=False):
+            args = self.module.build_parser().parse_args(["status"])
+            self.assertEqual(args.endpoint, self.module.DEFAULT_ENDPOINT)
 
     def test_unavailable_returns_three(self):
         with mock.patch.object(

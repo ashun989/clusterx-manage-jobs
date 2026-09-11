@@ -23,7 +23,7 @@ Clusterx SDK → clusterx-monitor → immutable snapshots → Web / Skill CLI
 - `config/resource-policy.local.json`：权限为 `600`、被 Git 忽略的可写生效规则。
 - `config/groups.local.yaml`：权限为 `600`、被 Git 忽略的本地私有分组配置。
 - `config/admin.local.yaml`：仅保存 Argon2id 密码哈希的本地管理员配置。
-- `skill/clusterx-manage-jobs`：可独立打包的 Skill；监控 CLI 只访问本机 API。
+- `skill/clusterx-manage-jobs`：可独立打包的 Skill；监控 CLI 只访问配置的只读 API。
 - `tests`：模拟数据测试，不连接真实集群。
 
 监控服务对 Clusterx 完全只读，不提供停止、驱逐或自动整改接口；认证管理员只
@@ -95,8 +95,8 @@ clusterx-monitor serve \
   --port 8765
 ```
 
-默认只监听 loopback。打开 `http://127.0.0.1:8765` 查看面板。已有受控 NAT 时可
-显式监听外部接口，但必须声明可信 Host，例如：
+默认只监听 loopback。打开 `http://127.0.0.1:8765` 查看面板。若由一台开发机为
+其他开发机共享，应显式监听外部接口，并声明服务 URL 使用的可信 Host，例如：
 
 ```bash
 clusterx-monitor serve \
@@ -190,7 +190,15 @@ Web 控制台提供运行总览、全局实体搜索、明暗主题、表格文�
 差异。配置页只展示不含配置正文的审计记录；已有 `.bak` 可通过显式确认回滚，回滚
 继续要求管理员 session、同源 JSON、CSRF token、当前 revision 与备份 revision。
 
-监控 CLI 默认访问 `http://127.0.0.1:8765`：
+监控 CLI 按以下优先级选择 Monitor 地址：命令行 `--endpoint`、环境变量
+`CLUSTERX_MONITOR_URL`、默认的 `http://127.0.0.1:8765`。团队应将共享地址写入
+统一的 dev-env 配置，使每台开发机自动复用同一个 Monitor。例如：
+
+```bash
+export CLUSTERX_MONITOR_URL=http://10.140.80.10:49394
+```
+
+该地址不应写入 Skill 包或项目仓库；没有配置共享地址的机器仍可使用本机默认服务：
 
 ```bash
 python3 skill/clusterx-manage-jobs/scripts/monitor_cli.py overview --format json
@@ -221,8 +229,7 @@ CP-SAT 直接选择需要协调的 Workload。`--search-seconds` 是整个请求
 附带释放不会用于满足目标；归属异常节点、关联 Workload 和未知 owner 仍保持安全
 排除。求解结果会在返回前脱离求解器重新计算资源并验证。
 
-监控服务不可用时 CLI 明确失败，不直接查询集群。可用 `--endpoint` 或
-`CLUSTERX_MONITOR_URL` 修改地址。查询成功即退出 `0`；参数错误为 `2`，服务
+监控服务不可用时 CLI 明确失败，不直接查询集群。查询成功即退出 `0`；参数错误为 `2`，服务
 不可用为 `3`，`--fail-on` 命中为 `4`，用户中断为 `130`。
 
 为了让管理员修改后的训练 CPU 规则同时约束任务提交，在运行 Skill 包装器的

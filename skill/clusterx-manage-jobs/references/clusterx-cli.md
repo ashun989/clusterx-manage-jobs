@@ -230,9 +230,12 @@ For bounded monitoring use:
 python3 scripts/monitor_cli.py watch --view alerts --count 10 --format jsonl
 ```
 
-The client defaults to `http://127.0.0.1:8765`. It never falls back to a live
-Clusterx query. Exit status `0` means success, `2` invalid input, `3` service unavailable,
-`4` a `--fail-on` condition, and `130` interruption.
+The client resolves its endpoint from `--endpoint`, then
+`CLUSTERX_MONITOR_URL`, then the backwards-compatible default
+`http://127.0.0.1:8765`. The service may be shared from another development
+machine. It never falls back to a live Clusterx query. Exit status `0` means
+success, `2` invalid input, `3` service unavailable, `4` a `--fail-on` condition,
+and `130` interruption.
 HTTP `422` plan validation failures map to exit `2`. `--fail-on stale` evaluates
 the original snapshot freshness even for filtered list views; `--fail-on` is
 only offered on commands where stale or violation has a defined meaning.

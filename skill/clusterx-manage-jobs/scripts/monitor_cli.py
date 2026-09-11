@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Thin read-only client for the local Clusterx monitoring service."""
+"""Thin read-only client for a configured Clusterx monitoring service."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import requests
 
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
+ENDPOINT_ENV = "CLUSTERX_MONITOR_URL"
 EXIT_USAGE = 2
 EXIT_UNAVAILABLE = 3
 EXIT_FAIL_ON = 4
@@ -24,6 +25,16 @@ class ApiError(RuntimeError):
     def __init__(self, message: str, *, status: int | None = None) -> None:
         super().__init__(message)
         self.status = status
+
+
+def _configured_endpoint() -> str:
+    """Resolve the shared endpoint from the process environment.
+
+    The environment is intentionally the team-wide configuration boundary:
+    dev-env can inject one monitor URL for every development machine, while
+    the loopback address remains a backwards-compatible local default.
+    """
+    return os.environ.get(ENDPOINT_ENV, "").strip() or DEFAULT_ENDPOINT
 
 
 def _url(endpoint: str, path: str) -> str:
@@ -238,7 +249,10 @@ def _add_output_options(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--endpoint", default=os.environ.get("CLUSTERX_MONITOR_URL", DEFAULT_ENDPOINT))
+    parser.add_argument(
+        "--endpoint", default=_configured_endpoint(),
+        help=f"monitor URL (default: ${ENDPOINT_ENV} or {DEFAULT_ENDPOINT})",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     status = sub.add_parser("status")
     _add_output_options(status, snapshot=False, fail_on=("stale",))
