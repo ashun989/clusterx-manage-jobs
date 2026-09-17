@@ -63,10 +63,13 @@ jobs:
         run: git diff --check
       - name: Verify deterministic package
         run: |
-          python scripts/package_skill.py --output-dir /tmp/package-one
-          python scripts/package_skill.py --output-dir /tmp/package-two
-          cmp \
-            /tmp/package-one/clusterx-manage-jobs.tar.gz \
-            /tmp/package-two/clusterx-manage-jobs.tar.gz
-          cd /tmp/package-one
-          sha256sum -c clusterx-manage-jobs.tar.gz.sha256
+            python scripts/package_skill.py --output-dir /tmp/package-one
+            python scripts/package_skill.py --output-dir /tmp/package-two
+            archive_one="$(find /tmp/package-one -maxdepth 1 -type f -name 'clusterx-manage-jobs-*.tar.gz' -printf '%f\n')"
+            archive_two="$(find /tmp/package-two -maxdepth 1 -type f -name 'clusterx-manage-jobs-*.tar.gz' -printf '%f\n')"
+            test -n "$archive_one" && test "$archive_one" = "$archive_two"
+            cmp \
+              "/tmp/package-one/$archive_one" \
+              "/tmp/package-two/$archive_two"
+            cd /tmp/package-one
+            sha256sum -c "$archive_one.sha256"
