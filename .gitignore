@@ -12,6 +12,7 @@ build/
 .env.*
 !.env.example
 .clusterx/
+.clusterx-monitor/
 clusterx.yaml
 *.pem
 *.key

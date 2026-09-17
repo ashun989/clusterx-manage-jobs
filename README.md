@@ -364,8 +364,10 @@ Clusterx 凭据、私有分组或开发维护工具。打包器会拒绝 `lark-c
 
 ```bash
 python3 scripts/maintenance/install_clusterx.py \
-  --python /path/to/venv/bin/python
+ --python /path/to/venv/bin/python
 ```
+
+### 静态参考文档更新
 
 检查飞书文档更新并生成脱敏候选、diff 和报告：
 
