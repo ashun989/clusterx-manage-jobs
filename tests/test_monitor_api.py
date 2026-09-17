@@ -20,8 +20,61 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 try:
-    from fastapi.testclient import TestClient
+    import httpx2
 except ImportError:  # pragma: no cover - dependency installation is tested in CI
+    httpx2 = None
+
+
+if httpx2 is not None:
+    class TestClient:
+        """Small synchronous facade over httpx2's async ASGI transport.
+
+        Starlette's blocking-portal TestClient can hang on the Python 3.14
+        environments used by the mixed unittest job.  The application tests
+        do not need lifespan management, so using the ASGI transport directly
+        keeps each request in a bounded event loop without that portal.
+        """
+
+        def __init__(self, app):
+            self.app = app
+            self.cookies = httpx2.Cookies()
+
+        def request(self, method, url, **kwargs):
+            content = kwargs.get("content")
+            if (
+                content is not None
+                and hasattr(content, "__iter__")
+                and not isinstance(content, (bytes, bytearray, str))
+                and not hasattr(content, "__aiter__")
+            ):
+                async def async_content():
+                    for chunk in content:
+                        yield chunk
+
+                kwargs["content"] = async_content()
+
+            async def send():
+                async with httpx2.AsyncClient(
+                    transport=httpx2.ASGITransport(app=self.app),
+                    base_url="http://testserver",
+                    cookies=self.cookies,
+                    follow_redirects=True,
+                ) as client:
+                    response = await client.request(method, url, **kwargs)
+                    self.cookies.update(client.cookies)
+                    return response
+
+            return asyncio.run(send())
+
+        def get(self, url, **kwargs):
+            return self.request("GET", url, **kwargs)
+
+        def post(self, url, **kwargs):
+            return self.request("POST", url, **kwargs)
+
+        def put(self, url, **kwargs):
+            return self.request("PUT", url, **kwargs)
+else:  # pragma: no cover - dependency installation is tested in CI
     TestClient = None
 
 from clusterx_monitor.auth import AdminAuth, initialize_auth_config

@@ -23,7 +23,7 @@ pytest -q
 (cd web && npm test -- --run && npm run build)
 (cd chrome-extension && npm test && npm run build)
 python3 scripts/check_versions.py
-python3 /data/zengquansheng/.dev-env/codex/skills/.system/skill-creator/scripts/quick_validate.py \
+python3 "$CODEX_HOME/skills/.system/skill-creator/scripts/quick_validate.py" \
   skills/clusterx-manage-jobs
 ```
 

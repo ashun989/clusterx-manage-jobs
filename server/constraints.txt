@@ -8,4 +8,4 @@ requests==2.34.2
 rich==14.3.4
 argon2-cffi==25.1.0
 ortools==9.15.6755
-httpx==0.28.1
+httpx2==2.13.0

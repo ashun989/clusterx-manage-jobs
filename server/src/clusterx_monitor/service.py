@@ -63,11 +63,17 @@ class RequestRateLimiter:
         return True
 
 
+class StructuredGroupRequest(GroupConfig):
+    """Editable group fields plus the server-derived count shown in the UI."""
+
+    effective_member_count: int | None = Field(default=None, ge=0)
+
+
 class StructuredGroupsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     revision: str = Field(min_length=1, max_length=128)
     node_allocation: NodeAllocationConfig = NodeAllocationConfig()
-    groups: dict[str, GroupConfig]
+    groups: dict[str, StructuredGroupRequest]
 
 
 class MonitorRuntime:
@@ -707,7 +713,7 @@ def create_app(
     async def policy() -> dict[str, Any]:
         return runtime.policy.public_status(known_users=known_policy_users())
 
-    def require_auth(request: Request) -> AdminSession:
+    async def require_auth(request: Request) -> AdminSession:
         if auth is None:
             raise HTTPException(status_code=503, detail="administrator authentication is not configured")
         try:
@@ -794,7 +800,7 @@ def create_app(
         if not request.headers.get("content-type", "").lower().startswith("application/json"):
             raise HTTPException(status_code=415, detail="application/json is required")
 
-    def require_admin_write(
+    async def require_admin_write(
         request: Request, session: AdminSession = Depends(require_auth),
     ) -> AdminSession:
         require_same_origin_json(request)
@@ -811,9 +817,12 @@ def create_app(
         require_same_origin_json(request)
         client = request.client.host if request.client else "unknown"
         try:
-            token, session = await asyncio.to_thread(
-                auth.login, payload.username, payload.password, client,
-            )
+            # Argon2's native verifier can deadlock when called from the
+            # Python 3.14 thread helpers used by FastAPI/AnyIO.  Login is a
+            # deliberately infrequent operation, so keep this security-
+            # sensitive verification on the request loop instead of leaving
+            # a request waiting forever in a worker thread.
+            token, session = auth.login(payload.username, payload.password, client)
         except PermissionError as error:
             raise HTTPException(status_code=429, detail=str(error)) from error
         except ValueError as error:
@@ -886,9 +895,12 @@ def create_app(
 
     async def update_config(kind: str, payload: ConfigUpdateRequest, session: AdminSession) -> dict[str, Any]:
         try:
-            await asyncio.to_thread(
-                runtime.policy.update_config, kind, payload.text,
-                payload.revision, actor=session.username,
+            # Policy updates are short, administrator-only operations.  Keep
+            # them on the request loop: returning Pydantic/YAML objects from
+            # the Python 3.14 thread helper can leave the request future
+            # unresolved after the worker has finished.
+            runtime.policy.update_config(
+                kind, payload.text, payload.revision, actor=session.username,
             )
         except ConfigConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -923,7 +935,9 @@ def create_app(
             "schema_version": 1,
             "node_allocation": payload.node_allocation.model_dump(mode="json"),
             "groups": {
-                name: group.model_dump(mode="json", exclude_none=True)
+                name: group.model_dump(
+                    mode="json", exclude_none=True, exclude={"effective_member_count"},
+                )
                 for name, group in payload.groups.items()
             },
         }, sort_keys=False, allow_unicode=True)
@@ -995,9 +1009,8 @@ def create_app(
         kind: str, payload: ConfigRollbackRequest, session: AdminSession,
     ) -> dict[str, Any]:
         try:
-            result = await asyncio.to_thread(
-                runtime.policy.rollback_config, kind, payload.revision,
-                payload.backup_revision, actor=session.username,
+            result = runtime.policy.rollback_config(
+                kind, payload.revision, payload.backup_revision, actor=session.username,
             )
         except ConfigConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
