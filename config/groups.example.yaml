@@ -1,8 +1,11 @@
 schema_version: 1
+node_allocation:
+  enabled: false
 groups:
   example-team:
     gpu_quota: 8
     members: [alice]
+    nodes: [node-001]
   example-zero-quota:
     gpu_quota: 0
     cpu_quota: 14

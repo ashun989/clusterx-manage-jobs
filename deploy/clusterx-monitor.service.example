@@ -11,7 +11,7 @@ WorkingDirectory=/opt/clusterx-monitor
 Environment=CLUSTERX_MONITOR_HOST=127.0.0.1
 Environment=CLUSTERX_MONITOR_PORT=8765
 Environment=CLUSTERX_MONITOR_HISTORY_DB=/var/lib/clusterx-monitor/history.sqlite3
-ExecStart=/opt/clusterx-monitor/.venv/bin/clusterx-monitor serve --host 127.0.0.1 --port 8765
+ExecStart=/opt/clusterx-monitor/.venv/bin/clusterx-monitor serve --clusterx-config /etc/clusterx-monitor/clusterx.yaml --policy-config /etc/clusterx-monitor/resource-policy.json --group-config /etc/clusterx-monitor/groups.yaml --auth-config /etc/clusterx-monitor/admin.yaml --history-db /var/lib/clusterx-monitor/history.sqlite3 --host 127.0.0.1 --port 8765
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

@@ -48,20 +48,24 @@ chmod 600 ~/.config/clusterx.yaml
 
 ## Skill 命令入口
 
-先检查配置：
+先安装独立客户端（它提供 Monitor CLI 和 Clusterx 包装器），再检查配置：
 
 ```bash
-python3 scripts/preflight.py --cwd <project-dir> --tmpdir <shared-tmpdir>
+python3 -m pip install clusterx-monitor-cli
+```
+
+```bash
+clusterx-preflight --cwd <project-dir> --tmpdir <shared-tmpdir>
 ```
 
 通过统一包装器调用 Clusterx：
 
 ```bash
-python3 scripts/clusterx_exec.py --cwd <project-dir> -- list
-python3 scripts/clusterx_exec.py --cwd <project-dir> -- run <arguments>
-python3 scripts/clusterx_exec.py --cwd <project-dir> -- get-job <job-id> --workers
-python3 scripts/clusterx_exec.py --cwd <project-dir> -- log <job-id> --worker <worker-name>
-python3 scripts/clusterx_exec.py --cwd <project-dir> -- log <job-id> --hours 6
+clusterx-exec --cwd <project-dir> -- list
+clusterx-exec --cwd <project-dir> -- run <arguments>
+clusterx-exec --cwd <project-dir> -- get-job <job-id> --workers
+clusterx-exec --cwd <project-dir> -- log <job-id> --worker <worker-name>
+clusterx-exec --cwd <project-dir> -- log <job-id> --hours 6
 ```
 
 包装器只报告配置来源和路径，不输出配置值。
@@ -78,13 +82,14 @@ Clusterx 配置，也不会在服务不可用时回退到实时采集。Monitor 
 开发机上，由其他开发机共享：
 
 ```bash
-python3 scripts/monitor_cli.py status --format json
-python3 scripts/monitor_cli.py overview
-python3 scripts/monitor_cli.py groups --violations-only
-python3 scripts/monitor_cli.py plan --nodes 2 --gpus-per-node 8 \
+clusterx-monitor-cli status --format json
+clusterx-monitor-cli overview
+clusterx-monitor-cli groups --violations-only
+clusterx-monitor-cli plan --nodes 2 --gpus-per-node 8 \
   --strategy min-gpu --strategy min-workloads \
-  --candidate-scope all --alternatives 3
-python3 scripts/monitor_cli.py watch --view alerts --count 10 --format jsonl
+  --candidate-scope all --candidate-node-scope outside_selected_groups \
+  --group research --placement-scope borrowed_only --alternatives 3
+clusterx-monitor-cli watch --view alerts --count 10 --format jsonl
 ```
 
 服务地址按以下优先级解析：命令行 `--endpoint`、环境变量
@@ -93,11 +98,25 @@ dev-env 环境配置在每台开发机注入共享地址，例如：
 
 ```bash
 export CLUSTERX_MONITOR_URL=http://monitor-dev.example:8765
+export CLUSTERX_USER=<cluster-user>
 ```
 
+`CLUSTERX_USER` is the caller-supplied Clusterx identity used by
+`clusterx-monitor-cli nodes --mine` and the Skill wrapper's node-policy check.
+It is read only when no explicit `--user` or `--cluster-user` is supplied and
+is never inferred from `$USER`. The shared `env.sh` loader should source these
+values from the machine's private dev-env file rather than duplicating them in
+the Skill package or repository.
+
+调度模拟的 `--candidate-scope` 仍表示资源负载形态；节点归属范围单独由
+`--candidate-node-scope all|selected_groups|outside_selected_groups` 控制，后两者
+复用重复的 `--group` 参数。Workload 的节点使用关系由
+`--placement-scope any|owned_only|borrowed_only|mixed|includes_borrowed` 控制。
+这些条件都基于固定快照的有效公开节点归属。节点归属约束关闭时，服务端将有效
+范围报告为全部节点。
+
 不要把真实内部地址写入 Skill 包或项目仓库。安装 Skill 后从任意目录调用时，
-使用 `${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs/scripts/monitor_cli.py`
-的完整路径。
+使用安装后的 `clusterx-monitor-cli` 命令；客户端包和 Skill 包可以独立升级。
 
 Monitor 服务端另外要求一份权限为 `600` 的本地私有分组文件。仓库开发时从
 `config/groups.example.yaml` 复制为被 Git 忽略的
@@ -111,6 +130,22 @@ Monitor 服务端另外要求一份权限为 `600` 的本地私有分组文件�
 损坏文件的原始 JSON/YAML 并修复；两份文件均有效后开始采集，无需重启。运行中
 的错误继续使用完整 last-known-good 组合。Monitor 对 Clusterx 只读，但管理员
 界面会以 revision 校验、备份和原子替换方式写入这两份本地配置。
+
+分组文件还可包含：
+
+```yaml
+node_allocation:
+  enabled: false
+groups:
+  team-a:
+    gpu_quota: 8
+    members: [alice]
+    nodes: [node-001]
+```
+
+该开关只作用于当前 Monitor 配置的 queue。开启时节点归属公开且互斥，未显式分配的在线节点有效
+归属 `default`；placement 规则只产生 advisory 告警。关闭时 Skill 不添加节点限制，Monitor CLI
+访问范围为全部 queue 节点。Pending workload 没有节点 placement，不产生节点归属告警。
 
 公共策略中的 `planning.default_cpu_per_gpu` 与
 `planning.default_memory_gib_per_gpu` 是标准调度画像。方案未显式给出 CPU/内存

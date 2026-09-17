@@ -21,6 +21,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import Message, Receive, Scope, Send
@@ -29,7 +30,9 @@ import yaml
 from . import __version__
 from .auth import AdminAuth, AdminSession, SESSION_COOKIE
 from .collector import ClusterCollector
-from .models import PlanRequest
+from .models import GroupConfig, NodeAllocationConfig, PlanRequest
+from .node_allocation_planner import MODEL_VERSION as NODE_ALLOCATION_MODEL_VERSION
+from .node_allocation_planner import solve_node_allocation_plans
 from .planner import solve_plan
 from .planning.cp_sat import configured_solver_workers
 from .planning.domain import MODEL_VERSION as PLANNER_MODEL_VERSION
@@ -60,6 +63,13 @@ class RequestRateLimiter:
         return True
 
 
+class StructuredGroupsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: str = Field(min_length=1, max_length=128)
+    node_allocation: NodeAllocationConfig = NodeAllocationConfig()
+    groups: dict[str, GroupConfig]
+
+
 class MonitorRuntime:
     def __init__(
         self, collector: ClusterCollector, policy: PolicyManager, *,
@@ -85,6 +95,7 @@ class MonitorRuntime:
         self.snapshots = SnapshotStore(capacity=5, persistent_history=persistent_history)
         self.snapshots.history_error = self.history_init_error
         self.plans = PlanCache(capacity=128)
+        self.node_allocation_plans = PlanCache(capacity=32)
         self.executor = ProcessPoolExecutor(max_workers=1)
         self.stop_event = asyncio.Event()
         self.config_changed = asyncio.Event()
@@ -303,6 +314,13 @@ class ConfigRollbackRequest(BaseModel):
     backup_revision: str = Field(min_length=1, max_length=128)
 
 
+class NodeAllocationPlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    snapshot_id: str = Field(min_length=1, max_length=128)
+    groups_revision: str = Field(min_length=1, max_length=128)
+    search_seconds: float = Field(default=10, ge=1, le=30)
+
+
 class SnapshotResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     schema_version: int | None = None
@@ -383,6 +401,7 @@ class RequestBodyLimitMiddleware:
 def create_app(
     runtime: MonitorRuntime, *, static_dir: str | Path | None = None,
     auth: AdminAuth | None = None, allowed_hosts: list[str] | None = None,
+    allowed_origins: list[str] | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -404,6 +423,14 @@ def create_app(
         TrustedHostMiddleware,
         allowed_hosts=allowed_hosts or ["127.0.0.1", "localhost", "[::1]", "testserver"],
     )
+    if allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=allowed_origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+            allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID"],
+        )
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
@@ -571,6 +598,62 @@ def create_app(
         return {"snapshot_id": snapshot["snapshot_id"], "offset": offset, "limit": limit,
                 "total": len(rows), "workloads": rows[offset:offset + limit]}
 
+    @app.get("/api/v1/access/nodes")
+    async def access_nodes(
+        user: str | None = Query(default=None, max_length=256),
+    ) -> dict[str, Any]:
+        """Return public node access information for an explicitly named user."""
+        snapshot = snapshot_or_404()
+        allocation = snapshot.get("node_allocation") or {
+            "enabled": False, "access_scope": "all",
+        }
+        all_nodes = list(snapshot.get("nodes") or [])
+        if not allocation.get("enabled"):
+            return {
+                "snapshot_id": snapshot["snapshot_id"],
+                "generated_at": snapshot["generated_at"],
+                "freshness": snapshot.get("freshness"),
+                "node_allocation": {
+                    "enabled": False, "access_scope": "all",
+                    "message": "node allocation policy is disabled; all queue nodes are available",
+                },
+                "identity": {
+                    "requested_user": user,
+                    "normalized_user": None if user is None else user.strip().lower(),
+                    "group": None,
+                    "status": "not-required",
+                },
+                "nodes": all_nodes,
+            }
+        normalized = (user or "").strip().lower()
+        if not normalized:
+            raise HTTPException(status_code=422, detail="user is required when node allocation is enabled")
+        policy = runtime.policy.policy
+        group = next(
+            (name for name, config in policy.groups.items() if normalized in config.members),
+            "default",
+        )
+        identity_status = "assigned" if any(
+            normalized in config.members for config in policy.groups.values()
+        ) else "unassigned"
+        owned = [node for node in all_nodes if node.get("assigned_group") == group]
+        return {
+            "snapshot_id": snapshot["snapshot_id"],
+            "generated_at": snapshot["generated_at"],
+            "freshness": snapshot.get("freshness"),
+            "node_allocation": {
+                "enabled": True, "access_scope": "group-owned",
+                "message": "nodes are selected from the resolved group-owned pool",
+            },
+            "identity": {
+                "requested_user": user,
+                "normalized_user": normalized,
+                "group": group,
+                "status": identity_status,
+            },
+            "nodes": owned,
+        }
+
     @app.get("/api/v1/history", response_model=HistoryResponse)
     async def history(
         request: Request, response: Response,
@@ -603,9 +686,26 @@ def create_app(
             return Response(status_code=304, headers={"ETag": f'"{etag}"'})
         return result
 
+    def known_policy_users() -> set[str]:
+        """Return the current user inventory used to derive default members."""
+        latest = runtime.snapshots.latest() or {}
+        users = {
+            str(item.get("user")).strip().lower()
+            for item in [*(latest.get("users") or []), *(latest.get("pending_workloads") or [])]
+            if item.get("user") and item.get("user") != "unknown"
+        }
+        if runtime.policy.configured:
+            users.update(
+                member
+                for group_name, group in runtime.policy.policy.groups.items()
+                if group_name != "default"
+                for member in group.members
+            )
+        return users
+
     @app.get("/api/v1/policy")
     async def policy() -> dict[str, Any]:
-        return runtime.policy.public_status()
+        return runtime.policy.public_status(known_users=known_policy_users())
 
     def require_auth(request: Request) -> AdminSession:
         if auth is None:
@@ -741,13 +841,52 @@ def create_app(
         response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="strict")
         return {"ok": True}
 
+    def admin_config_payload() -> dict[str, Any]:
+        result = runtime.policy.admin_config()
+        latest = runtime.snapshots.latest() or {}
+        result["snapshot_id"] = latest.get("snapshot_id")
+        result["snapshot_generated_at"] = latest.get("generated_at")
+        nodes = list(latest.get("nodes") or [])
+        users = known_policy_users()
+        if runtime.policy.configured:
+            policy = runtime.policy.policy
+            explicit_members = {
+                member
+                for group_name, group in policy.groups.items()
+                if group_name != "default"
+                for member in group.members
+            }
+            result["groups_structured"] = {
+                "node_allocation": policy.node_allocation.model_dump(mode="json"),
+                "groups": {
+                    name: {
+                        **group.model_dump(mode="json"),
+                        "effective_member_count": (
+                            len(users - explicit_members)
+                            if name == "default" else len(group.members)
+                        ),
+                    }
+                    for name, group in policy.groups.items()
+                },
+            }
+        else:
+            result["groups_structured"] = None
+        if runtime.policy.configured:
+            users.update(
+                member for group in runtime.policy.policy.groups.values()
+                for member in group.members
+            )
+        result["node_options"] = nodes
+        result["member_options"] = sorted(users)
+        return result
+
     @app.get("/api/v1/admin/config")
     async def admin_config(_: AdminSession = Depends(require_auth)) -> dict[str, Any]:
-        return runtime.policy.admin_config()
+        return admin_config_payload()
 
     async def update_config(kind: str, payload: ConfigUpdateRequest, session: AdminSession) -> dict[str, Any]:
         try:
-            result = await asyncio.to_thread(
+            await asyncio.to_thread(
                 runtime.policy.update_config, kind, payload.text,
                 payload.revision, actor=session.username,
             )
@@ -757,7 +896,9 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(error)) from error
         if runtime.policy.configured:
             runtime.request_config_refresh()
-        return result
+        # Keep every admin mutation response shape identical to GET /config so
+        # the editor can continue working without a second privileged request.
+        return admin_config_payload()
 
     @app.put("/api/v1/admin/config/resource")
     async def update_resource_config(
@@ -772,6 +913,83 @@ def create_app(
         session: AdminSession = Depends(require_admin_write),
     ) -> dict[str, Any]:
         return await update_config("groups", payload, session)
+
+    @app.put("/api/v1/admin/config/groups-structured")
+    async def update_structured_group_config(
+        payload: StructuredGroupsRequest,
+        session: AdminSession = Depends(require_admin_write),
+    ) -> dict[str, Any]:
+        text = yaml.safe_dump({
+            "schema_version": 1,
+            "node_allocation": payload.node_allocation.model_dump(mode="json"),
+            "groups": {
+                name: group.model_dump(mode="json", exclude_none=True)
+                for name, group in payload.groups.items()
+            },
+        }, sort_keys=False, allow_unicode=True)
+        return await update_config(
+            "groups", ConfigUpdateRequest(revision=payload.revision, text=text), session,
+        )
+
+    allocation_plan_limiter = RequestRateLimiter(limit=3, window_seconds=60)
+
+    @app.post("/api/v1/admin/node-allocation/plans")
+    async def node_allocation_plans(
+        payload: NodeAllocationPlanRequest,
+        request: Request,
+        _: AdminSession = Depends(require_admin_write),
+    ) -> dict[str, Any]:
+        snapshot = runtime.snapshots.get(payload.snapshot_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="snapshot is not retained")
+        if not runtime.policy.configured:
+            raise HTTPException(status_code=503, detail="monitor policy is not configured")
+        current_groups_revision = runtime.policy.admin_config()["groups"]["revision"]
+        if not hmac.compare_digest(payload.groups_revision, current_groups_revision):
+            raise HTTPException(status_code=409, detail="group configuration changed after it was loaded")
+        client_key = request.client.host if request.client else "unknown"
+        if not allocation_plan_limiter.allow(client_key):
+            raise HTTPException(
+                status_code=429, detail="node allocation planner rate limit exceeded",
+                headers={"Retry-After": "20"},
+            )
+        key = hashlib.sha256(json.dumps({
+            "model_version": NODE_ALLOCATION_MODEL_VERSION,
+            "snapshot_id": payload.snapshot_id,
+            "groups_revision": payload.groups_revision,
+            "search_seconds": payload.search_seconds,
+        }, sort_keys=True).encode()).hexdigest()
+        cached = runtime.node_allocation_plans.get(key)
+        if cached is not None:
+            cached["cache_hit"] = True
+            latest = runtime.snapshots.latest()
+            cached["superseded"] = bool(latest and latest["snapshot_id"] != payload.snapshot_id)
+            return cached
+        policy_payload = runtime.policy.policy.model_dump(mode="json")
+        loop = asyncio.get_running_loop()
+
+        async def compute() -> dict[str, Any]:
+            return await loop.run_in_executor(
+                runtime.executor, solve_node_allocation_plans,
+                snapshot, policy_payload, payload.search_seconds,
+            )
+
+        try:
+            result = await runtime.coordinate_plan(key, compute)
+        except RuntimeError as error:
+            raise HTTPException(
+                status_code=429, detail=str(error), headers={"Retry-After": "1"},
+            ) from error
+        except Exception as error:
+            logger.exception("node allocation planner failed")
+            raise HTTPException(status_code=503, detail="node allocation planner is temporarily unavailable") from error
+        latest = runtime.snapshots.latest()
+        result["groups_revision"] = payload.groups_revision
+        result["superseded"] = bool(latest and latest["snapshot_id"] != payload.snapshot_id)
+        result["cache_hit"] = False
+        if all(item.get("status") in {"OPTIMAL", "FEASIBLE"} for item in result.get("proposals", [])):
+            runtime.node_allocation_plans.put(key, result)
+        return result
 
     async def rollback_config(
         kind: str, payload: ConfigRollbackRequest, session: AdminSession,
@@ -879,7 +1097,9 @@ def create_app(
             runtime.plans.put(key, result)
         return result
 
-    root = Path(static_dir) if static_dir else Path(__file__).with_name("static")
+    if static_dir is None:
+        return app
+    root = Path(static_dir)
     assets = root / "assets"
     if assets.is_dir() and not assets.is_symlink():
         app.mount("/assets", StaticFiles(directory=assets), name="assets")

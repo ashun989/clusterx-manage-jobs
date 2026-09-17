@@ -21,6 +21,69 @@ from .domain import (
 SCHEDULABLE_STATES = {"RUNNING", "IDLE", "MIXED", "running", "idle", "mixed"}
 
 
+def _node_owners(snapshot: dict[str, Any]) -> dict[str, str]:
+    """Return effective public node owners from the pinned snapshot."""
+    allocation = snapshot.get("node_allocation") or {}
+    if not allocation.get("enabled"):
+        return {}
+    owners = {
+        str(node): str(group)
+        for group, nodes in (allocation.get("assignments") or {}).items()
+        for node in nodes
+    }
+    for node in snapshot.get("nodes", []):
+        node_id = str(node.get("node") or "")
+        assigned_group = node.get("assigned_group")
+        if node_id and assigned_group is not None:
+            owners.setdefault(node_id, str(assigned_group))
+    return owners
+
+
+def _effective_scopes(
+    snapshot: dict[str, Any], request: PlanRequest,
+) -> tuple[str, str, dict[str, str]]:
+    allocation_enabled = bool((snapshot.get("node_allocation") or {}).get("enabled"))
+    requested_node_scope = request.filters.candidate_node_scope
+    requested_placement_scope = request.filters.placement_scope
+    if not allocation_enabled:
+        return "all", "any", {}
+    return requested_node_scope, requested_placement_scope, _node_owners(snapshot)
+
+
+def _placement_scope_matches(
+    workload: dict[str, Any], placement_scope: str, owners: dict[str, str],
+) -> bool:
+    if placement_scope == "any":
+        return True
+    placements = list(workload.get("placements") or [])
+    if not placements:
+        return False
+    group = str(workload.get("group") or "")
+    owned = False
+    borrowed = False
+    unknown = False
+    for placement in placements:
+        node = str(placement.get("node") or "")
+        owner = owners.get(node)
+        if owner is None:
+            unknown = True
+        elif owner == group:
+            owned = True
+        else:
+            borrowed = True
+    if unknown:
+        return False
+    if placement_scope == "owned_only":
+        return owned and not borrowed
+    if placement_scope == "borrowed_only":
+        return borrowed and not owned
+    if placement_scope == "mixed":
+        return owned and borrowed
+    if placement_scope == "includes_borrowed":
+        return borrowed
+    return False
+
+
 def _resource_total(item: dict[str, Any], key: str) -> float | int | None:
     value = item.get(key)
     if value is None:
@@ -110,6 +173,8 @@ def _passes_filters(
     group_findings: dict[str, list[dict[str, Any]]],
     user_findings: dict[str, list[dict[str, Any]]],
     snapshot: dict[str, Any],
+    placement_scope: str,
+    placement_owners: dict[str, str],
 ) -> bool:
     filters = request.filters
     user = str(workload.get("user") or "")
@@ -124,6 +189,8 @@ def _passes_filters(
     if filters.workloads and workload_id not in filters.workloads:
         return False
     if workload_id in filters.exclude_workloads or user in filters.exclude_users:
+        return False
+    if not _placement_scope_matches(workload, placement_scope, placement_owners):
         return False
     if filters.over_quota_only:
         state = next(
@@ -220,6 +287,8 @@ def _fit_nodes(problem: PlanningProblem, selected: set[str]) -> set[str]:
 def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan:
     requested, resolved, defaults, target = _target(request, snapshot)
     exclusions, excluded_node_ids = _exclusions(snapshot)
+    node_scope, placement_scope, placement_owners = _effective_scopes(snapshot, request)
+    allocation_enabled = bool((snapshot.get("node_allocation") or {}).get("enabled"))
     common = {
         "requested_target": requested,
         "requested_target_nodes": list(request.target_nodes),
@@ -227,6 +296,15 @@ def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan
         "defaults_applied": defaults,
         "planning_profile": snapshot.get("planning_profile") or {},
         "planning_exclusions": exclusions,
+        "candidate_selection": {
+            "resource_scope": request.candidate_scope,
+            "node_ownership_scope": request.filters.candidate_node_scope,
+            "effective_node_ownership_scope": node_scope,
+            "placement_scope": request.filters.placement_scope,
+            "effective_placement_scope": placement_scope,
+            "groups": list(request.filters.groups),
+            "node_allocation_enabled": allocation_enabled,
+        },
     }
     nodes = {
         str(item["node"]): item for item in snapshot.get("nodes", [])
@@ -236,7 +314,18 @@ def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan
     requested_node_ids = set(request.target_nodes)
     if requested_node_ids and not requested_node_ids.issubset(nodes):
         return PreparedPlan(None, common, (), "target-node-unavailable")
-    scoped_node_ids = requested_node_ids or set(nodes)
+    ownership_node_ids = set(nodes)
+    if node_scope != "all":
+        selected_groups = set(request.filters.groups)
+        ownership_node_ids = {
+            node_id for node_id in nodes
+            if placement_owners.get(node_id) is not None
+            and (placement_owners.get(node_id) in selected_groups)
+            == (node_scope == "selected_groups")
+        }
+    if requested_node_ids and not requested_node_ids.issubset(ownership_node_ids):
+        return PreparedPlan(None, common, (), "target-node-outside-ownership-scope")
+    scoped_node_ids = requested_node_ids or ownership_node_ids
     already_free = tuple(sorted(
         node_id for node_id, node in nodes.items()
         if node_id in scoped_node_ids and _node_free(node).covers(target)
@@ -276,6 +365,7 @@ def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan
         unfiltered_ids.add(workload_id)
         if not _passes_filters(
             workload_id, raw, request, group_findings, user_findings, snapshot,
+            placement_scope, placement_owners,
         ):
             continue
         placement_gpu = sum(item.gpu for item in releases.values())

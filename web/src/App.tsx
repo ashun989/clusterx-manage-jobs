@@ -3,6 +3,7 @@ import { AdminPanel } from "./AdminPanel";
 import { GlobalSearch } from "./GlobalSearch";
 import { Overview } from "./Overview";
 import { alertIdentity, DetailDrawer } from "./DetailDrawer";
+import { PolicyPropagationDiagram } from "./PolicyPropagationDiagram";
 import { DataTable, formatPowerPercent, statusClass, TelemetryCell } from "./Table";
 import type { ColumnDef, TableState } from "./Table";
 import { api } from "./api";
@@ -21,10 +22,10 @@ const dateTime = (value: string | null | undefined) => {
 };
 
 const releaseNotes: Record<string, string[]> = {
-  "1.1.1": [
-    "低利用率判定增加历史平均每卡功率，功率上限和百分比阈值均可配置，默认 400 W、25%（100 W/卡）。",
-    "表格和概览展示功率百分比，详情展示总功率，告警列出命中指标，缺失功率不阻断原有 Compute / Mem 判定。",
-    "低利用率检查覆盖运行中的 trainingJob、aid 和 air GPU 工作负载。",
+  "2.0.0": [
+    "Monitor 拆分为可独立发布的服务端、Web、客户端和 Skill，客户端提供统一 CLI 入口。",
+    "组节点归属支持管理员开关、互斥分配、组员和节点选择器，以及 quota 与借用节点告警。",
+    "独立 Web 支持通过 config.js 连接 API 服务，关闭节点策略时明确返回全部节点访问范围。",
   ],
   "1.1.0": [
     "采集链路增加统一超时、重试、分页进展校验与完整快照发布保护，外部接口异常不会污染当前快照。",
@@ -110,6 +111,7 @@ const telemetryColumns = <T extends { telemetry: Snapshot["telemetry"] }>(): Col
 const groupColumns: ColumnDef<GroupSummary>[] = [
   { key: "group", label: "分组", kind: "text", value: (row) => row.group },
   { key: "status", label: "状态", kind: "enum", value: (row) => row.status },
+  { key: "pending_pressure", label: "Pending 压力", kind: "enum", value: (row) => row.pending_pressure?.state, format: (value, row) => <span className={statusClass(value)}>{String(value)} · {number(row.pending_pressure?.eligible_jobs)} 个</span> },
   { key: "gpu_quota", label: "GPU quota", kind: "number", value: (row) => row.gpu_quota, format: quota },
   { key: "cpu_quota", label: "CPU quota", kind: "number", value: (row) => row.cpu_quota, format: quota },
   { key: "memory_quota_gib", label: "内存 quota GiB", kind: "number", value: (row) => row.memory_quota_gib, format: quota },
@@ -208,6 +210,7 @@ function NodeHeatmap({ nodes, state, onState, onNode }: { nodes: NodeSummary[]; 
       const open = () => onNode(node);
       return <article role="button" tabIndex={0} aria-label={`查看 ${node.node} 详情`} className={`node-tile node-${node.classification}`} key={node.node} onClick={open} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } }}>
         <header><b title={node.node}>{node.node}</b><span>{node.classification}</span></header>
+        <small className="node-owner">节点归属：{node.assigned_group ?? "未启用约束"}</small>
         <div className="gpu-bar"><i style={{ width: `${ratio}%` }} /></div>
         <p><strong>{number(node.allocated_gpu)}/{number(node.total_gpu)}</strong> GPU</p>
         <small>{number(node.effective_free_gpu)} effective free · {number(node.stranded_gpu)} blocked</small>
@@ -222,6 +225,8 @@ function NodeHeatmap({ nodes, state, onState, onNode }: { nodes: NodeSummary[]; 
 type PlannerFilterKey = "types" | "groups" | "users" | "workloads" | "excludeWorkloads" | "excludeUsers" | "violationCategories" | "violationCodes" | "violationTags";
 type PlannerFilters = Record<PlannerFilterKey, string[]>;
 type PlannerOption = { value: string; label: string; detail?: string };
+type CandidateNodeScope = "all" | "selected_groups" | "outside_selected_groups";
+type PlacementScope = "any" | "owned_only" | "borrowed_only" | "mixed" | "includes_borrowed";
 
 const plannerFilterKeys: PlannerFilterKey[] = ["types", "groups", "users", "workloads", "excludeWorkloads", "excludeUsers", "violationCategories", "violationCodes", "violationTags"];
 const emptyPlannerFilters = (): PlannerFilters => ({ types: [], groups: [], users: [], workloads: [], excludeWorkloads: [], excludeUsers: [], violationCategories: [], violationCodes: [], violationTags: [] });
@@ -263,6 +268,9 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
   const [memoryUsesDefault, setMemoryUsesDefault] = useState(true);
   const [filters, setFilters] = useState<PlannerFilters>(emptyPlannerFilters);
   const [scope, setScope] = useState<"fragmented" | "full" | "all">("fragmented");
+  const [candidateNodeScope, setCandidateNodeScope] = useState<CandidateNodeScope>("all");
+  const [placementScope, setPlacementScope] = useState<PlacementScope>("any");
+  const nodeAllocationEnabled = snapshot.node_allocation?.enabled === true;
   const filterOptions = useMemo<Record<PlannerFilterKey, PlannerOption[]>>(() => {
     const candidates = snapshot.workloads.filter((workload) => workload.planning_eligible !== false && workload.placements.length > 0 && workload.user && workload.user !== "unknown" && workload.group && workload.group !== "unattributed");
     const workloadOptions = candidates.map((workload) => ({ value: workload.workload_id, label: workload.workload_name, detail: `${workload.user} / ${workload.group} · ${workload.workload_id}` })).sort((left, right) => left.label.localeCompare(right.label) || left.value.localeCompare(right.value));
@@ -273,7 +281,11 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
     ].filter((finding) => finding.status === "violation");
     return {
       types: simpleOptions(candidates.map((workload) => workload.type)),
-      groups: simpleOptions(candidates.map((workload) => workload.group)),
+      groups: simpleOptions([
+        ...snapshot.groups.map((group) => group.group),
+        ...snapshot.workloads.map((workload) => workload.group),
+        ...(snapshot.pending_workloads ?? []).map((workload) => workload.group),
+      ].filter((group) => group && group !== "unattributed")),
       users: simpleOptions(candidates.map((workload) => workload.user)),
       workloads: workloadOptions,
       excludeWorkloads: workloadOptions,
@@ -283,6 +295,10 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
       violationTags: simpleOptions(findings.flatMap((finding) => finding.tags)),
     };
   }, [snapshot]);
+  useEffect(() => {
+    if (!nodeAllocationEnabled || filters.groups.length === 0) setCandidateNodeScope("all");
+    if (!nodeAllocationEnabled) setPlacementScope("any");
+  }, [nodeAllocationEnabled, filters.groups.length]);
   useEffect(() => {
     if (cpusUseDefault) setCpus(defaultFor(snapshot.planning_profile.default_cpu_per_gpu));
     if (memoryUsesDefault) setMemory(defaultFor(snapshot.planning_profile.default_memory_gib_per_gpu));
@@ -301,7 +317,12 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
   }, [filterOptions]);
   const intentSignature = JSON.stringify(intent);
   useEffect(() => {
-    if (!intent) return;
+    if (!intent) {
+      setFilters(emptyPlannerFilters());
+      setCandidateNodeScope("all");
+      setPlacementScope("any");
+      return;
+    }
     setNodes(String(intent.nodes));
     setGpus(String(intent.gpusPerNode));
     setCpus(intent.cpusTotal == null ? String(intent.nodes * intent.gpusPerNode * snapshot.planning_profile.default_cpu_per_gpu) : String(intent.cpusTotal));
@@ -310,8 +331,10 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
     setMemoryUsesDefault(intent.memoryTotalGib == null);
     setScope(intent.scope);
     setFilters({ ...emptyPlannerFilters(), types: intent.workloadTypes, groups: intent.groups, users: intent.users, workloads: intent.workloads });
+    setCandidateNodeScope(nodeAllocationEnabled && intent.sourceKind === "workload" && intent.groups.length > 0 ? "selected_groups" : "all");
+    setPlacementScope("any");
     setError("");
-  }, [intentSignature, snapshot.planning_profile.default_cpu_per_gpu, snapshot.planning_profile.default_memory_gib_per_gpu]);
+  }, [intentSignature, nodeAllocationEnabled, snapshot.planning_profile.default_cpu_per_gpu, snapshot.planning_profile.default_memory_gib_per_gpu]);
   const changeFilter = (key: PlannerFilterKey) => (values: string[]) => setFilters((current) => ({ ...current, [key]: values }));
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setBusy(true); setError("");
@@ -328,6 +351,8 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
         filters: {
           workload_types: filters.types, groups: filters.groups, users: filters.users, workloads: filters.workloads,
           exclude_workloads: filters.excludeWorkloads, exclude_users: filters.excludeUsers, over_quota_only: data.get("overQuota") === "on",
+          candidate_node_scope: nodeAllocationEnabled ? candidateNodeScope : "all",
+          placement_scope: nodeAllocationEnabled ? placementScope : "any",
           violation_categories: filters.violationCategories, violation_codes: filters.violationCodes, violation_tags: filters.violationTags,
         },
       }) });
@@ -342,7 +367,9 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
       <div className="planner-field"><label htmlFor="planner-memory">内存总量 GiB（可覆盖）</label><input id="planner-memory" name="memory" type="number" min="1" max={10_000_000 * Math.max(1, Number(nodes) || 1)} step="any" value={memory} onChange={(event) => { setMemoryUsesDefault(false); setMemory(event.target.value); }} required /><small><span>{memoryUsesDefault ? `${nodes || "—"} 节点 × ${gpus || "—"} GPU × ${snapshot.planning_profile.default_memory_gib_per_gpu} GiB/GPU` : "使用自定义内存总量"}</span>{!memoryUsesDefault && <button type="button" aria-label="内存恢复默认比例" onClick={() => { setMemory(defaultFor(snapshot.planning_profile.default_memory_gib_per_gpu)); setMemoryUsesDefault(true); }}>恢复跟随</button>}</small></div>
     </section>
     <section className="planner-section"><h3>求解设置</h3>
-      <label>候选范围<select name="scope" value={scope} onChange={(event) => setScope(event.target.value as typeof scope)}><option value="fragmented">碎片节点</option><option value="full">满 GPU 节点</option><option value="all">全部</option></select></label><label>备选数<input name="alternatives" type="number" min="1" max="10" defaultValue="1" required /></label>
+      <label>资源候选范围<select name="scope" value={scope} onChange={(event) => setScope(event.target.value as typeof scope)}><option value="fragmented">碎片节点</option><option value="full">满 GPU 节点</option><option value="all">全部</option></select></label>
+      <label>节点归属范围<select aria-label="节点归属范围" name="candidateNodeScope" value={candidateNodeScope} disabled={!nodeAllocationEnabled || filters.groups.length === 0} onChange={(event) => setCandidateNodeScope(event.target.value as CandidateNodeScope)}><option value="all">全部节点</option><option value="selected_groups">选中分组的节点</option><option value="outside_selected_groups">选中分组之外的节点</option></select><small>{!nodeAllocationEnabled ? "节点归属约束已关闭，全部 queue 节点可用。" : filters.groups.length === 0 ? "请先在“分组”中选择至少一个 group。" : "范围会基于已选 group 的节点归属计算。"}</small></label>
+      <label>备选数<input name="alternatives" type="number" min="1" max="10" defaultValue="1" required /></label>
       <label>总求解预算（秒）<input name="searchSeconds" type="number" min="1" max="30" defaultValue="10" required /></label>
       <fieldset><legend>策略</legend>{[["min-gpu", "最少 GPU"], ["min-workloads", "最少任务"], ["min-users", "最少用户"]].map(([value, label]) => <label className="check" key={value}><input name="strategy" value={value} type="checkbox" defaultChecked />{label}</label>)}</fieldset>
     </section>
@@ -351,8 +378,10 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
       <PlannerMultiSelect label="用户" options={filterOptions.users} selected={filters.users} onChange={changeFilter("users")} /><PlannerMultiSelect label="指定 Workload" options={filterOptions.workloads} selected={filters.workloads} onChange={changeFilter("workloads")} />
       <PlannerMultiSelect label="排除 Workload" options={filterOptions.excludeWorkloads} selected={filters.excludeWorkloads} onChange={changeFilter("excludeWorkloads")} emptyLabel="不排除" /><PlannerMultiSelect label="排除用户" options={filterOptions.excludeUsers} selected={filters.excludeUsers} onChange={changeFilter("excludeUsers")} emptyLabel="不排除" />
       <PlannerMultiSelect label="违规分类" options={filterOptions.violationCategories} selected={filters.violationCategories} onChange={changeFilter("violationCategories")} /><PlannerMultiSelect label="规则代码" options={filterOptions.violationCodes} selected={filters.violationCodes} onChange={changeFilter("violationCodes")} />
-      <PlannerMultiSelect label="违规标签" options={filterOptions.violationTags} selected={filters.violationTags} onChange={changeFilter("violationTags")} /><label className="check planner-check-card"><input name="overQuota" type="checkbox" />仅超 quota 分组</label>
-      <p className="planner-filter-note">筛选候选来自当前快照；快照更新后，不再存在的选项会自动移除。</p>
+      <PlannerMultiSelect label="违规标签" options={filterOptions.violationTags} selected={filters.violationTags} onChange={changeFilter("violationTags")} />
+      <label>节点使用关系<select name="placementScope" value={placementScope} disabled={!nodeAllocationEnabled} onChange={(event) => setPlacementScope(event.target.value as PlacementScope)}><option value="any">不限</option><option value="owned_only">仅本组节点</option><option value="borrowed_only">仅借用其他组节点</option><option value="mixed">本组与借用节点混用</option><option value="includes_borrowed">包含借用节点</option></select></label>
+      <label className="check planner-check-card"><input name="overQuota" type="checkbox" />仅超 quota 分组</label>
+      <p className="planner-filter-note">筛选候选来自当前快照；快照更新后，不再存在的选项会自动移除。{nodeAllocationEnabled ? "节点归属范围复用上面的分组筛选。" : "节点归属约束已关闭，所有节点可用，节点使用关系筛选不可用。"}</p>
     </section>
     <button disabled={busy}>{busy ? "计算中…" : "计算方案"}</button>{error && <p className="error planner-error">{error}</p>}
   </form>;
@@ -366,10 +395,14 @@ function PlanResults({ plan, currentSnapshotId, onWorkload }: { plan: PlanResult
   useEffect(() => setExpanded(plan?.plans[0] ? [planKey(plan.plans[0])] : []), [signature]);
   if (!plan) return <div className="plan-empty"><p>提交查询后，可在这里比较调度方案。</p></div>;
   const superseded = plan.superseded || plan.snapshot_id !== currentSnapshotId;
-  const reasonLabels: Record<string, string> = { "target-node-unavailable": "指定目标节点不存在、状态不可调度或已因资源归属异常被排除。", "attribution-excluded": "归属异常节点及关联 Workload 已被安全排除。", "no-candidates-after-filters": "筛选后没有可协调的 Workload。", "insufficient-releasable-resources": "候选 Workload 可释放的资源不足。", "solver-time-limit": "求解器在时间预算内没有找到可验证方案。" };
+  const resourceScopeLabels: Record<string, string> = { fragmented: "碎片节点", full: "满 GPU 节点", all: "全部节点" };
+  const nodeScopeLabels: Record<string, string> = { all: "全部节点", selected_groups: "选中分组节点", outside_selected_groups: "选中分组之外" };
+  const placementScopeLabels: Record<string, string> = { any: "不限", owned_only: "仅本组节点", borrowed_only: "仅借用其他组节点", mixed: "本组与借用混用", includes_borrowed: "包含借用节点" };
+  const reasonLabels: Record<string, string> = { "target-node-unavailable": "指定目标节点不存在、状态不可调度或已因资源归属异常被排除。", "target-node-outside-ownership-scope": "指定目标节点不在当前节点归属候选范围内。", "attribution-excluded": "归属异常节点及关联 Workload 已被安全排除。", "no-candidates-after-filters": "筛选后没有可协调的 Workload。", "insufficient-releasable-resources": "候选 Workload 可释放的资源不足。", "solver-time-limit": "求解器在时间预算内没有找到可验证方案。" };
   return <div className="plan-results">
     <div className="plan-result-heading"><div><h3>{plan.optimality}</h3><span>{plan.solver.backend} · {plan.search_elapsed_seconds}s · snapshot {plan.snapshot_id.slice(0, 12)}</span></div>{superseded && <span className="status status-warning">快照已更新</span>}</div>
     <p className="plan-timestamp">快照时间 {new Date(plan.snapshot_generated_at).toLocaleString()}{plan.cache_hit ? " · cache hit" : ""}</p>
+    {plan.candidate_selection && <p className="plan-filter-summary">资源候选：{resourceScopeLabels[plan.candidate_selection.resource_scope] ?? plan.candidate_selection.resource_scope} · 节点归属：{nodeScopeLabels[plan.candidate_selection.effective_node_ownership_scope] ?? plan.candidate_selection.effective_node_ownership_scope}{plan.candidate_selection.node_ownership_scope !== plan.candidate_selection.effective_node_ownership_scope ? `（请求 ${nodeScopeLabels[plan.candidate_selection.node_ownership_scope] ?? plan.candidate_selection.node_ownership_scope}，约束已关闭）` : ""} · 节点使用关系：{placementScopeLabels[plan.candidate_selection.effective_placement_scope] ?? plan.candidate_selection.effective_placement_scope}</p>}
     {plan.strategy_results.length > 0 && <div className="tag-list">{plan.strategy_results.map((result) => <span key={result.strategy}>{result.strategy}: {result.status} · {result.returned_alternatives}/{result.requested_alternatives}{result.top_k_complete ? "" : " · partial"}</span>)}</div>}
     <div className="plan-resolved"><b>实际资源画像</b><span>{number(plan.resolved_target.nodes)} 节点 ×（每节点 {number(plan.resolved_target.gpus_per_node)} GPU / {number(plan.resolved_target.cpus_per_node)} CPU / {number(plan.resolved_target.memory_per_node_gib)} GiB）</span>{plan.defaults_applied.length > 0 && <small>已应用默认值：{plan.defaults_applied.join(", ")}</small>}<small>排除 {plan.planning_exclusions.node_count} 节点 / {plan.planning_exclusions.workload_count} Workload{plan.planning_exclusions.reasons.length ? ` · ${plan.planning_exclusions.reasons.join(", ")}` : ""}</small>{plan.planning_exclusions.nodes?.map((item) => <small key={`node:${item.node}`}>节点 {item.node}: {item.reasons.join(", ")}</small>)}{plan.planning_exclusions.workloads?.map((item) => <small key={`workload:${item.workload_id}`}>Workload {item.workload_id}: {item.reasons.join(", ")} ({item.nodes.join(", ")})</small>)}</div>
     {plan.plans.length === 0 ? plan.optimality === "not-needed" ? <div className="plan-notice"><b>无需协调 Workload</b><p>当前可调度节点：{plan.currently_schedulable_nodes?.join(", ") || "—"}</p></div> : <div className="plan-notice"><b>没有可行方案</b><p>{reasonLabels[plan.no_plan_reason ?? ""] ?? "当前候选范围不足以释放目标资源。"}</p></div> : plan.plans.map((item) => {
@@ -400,6 +433,9 @@ function RulesPage({ response, snapshot, error }: { response: PolicyResponse | n
     ["低 GPU 利用率", policy.low_utilization],
     ["Pending pressure", policy.pending_pressure],
   ] as const;
+  const allocationEnabled = snapshot.node_allocation?.enabled === true;
+  const effectiveAssignments = snapshot.node_allocation?.assignments ?? {};
+  const nodeGpuCapacity = (nodes: string[]) => snapshot.nodes.filter((node) => nodes.includes(node.node)).reduce((total, node) => total + node.total_gpu, 0);
   return <div className="rules-page">
     <header className="rules-heading"><div><span className="eyebrow">Effective policy</span><h2>规则说明</h2><p>本页内容来自 <code>/api/v1/policy</code>，显示当前实际生效值。</p></div><span className={response.valid ? statusClass("compliant") : statusClass("warning")}>{response.valid ? "配置有效" : response.using_last_known_good ? "使用 last-known-good" : "配置无效"}</span></header>
     {response.error && <p className="banner">{response.error}</p>}
@@ -407,10 +443,10 @@ function RulesPage({ response, snapshot, error }: { response: PolicyResponse | n
     <section className="rules-section"><h3>状态含义与传播</h3><div className="status-definition-grid">{Object.entries(response.status_definitions).map(([status, definition]) => {
       const detail = typeof definition === "string" ? { description: definition, propagation: "" } : definition;
       return <article key={status}><span className={statusClass(status)}>{status}</span><p>{detail.description}</p>{detail.propagation && <small>{detail.propagation}</small>}</article>;
-    })}</div></section>
-    <section className="rules-section"><h3>当前配置</h3><p className="rule-note">采集间隔 {number(policy.refresh_seconds, "s")} · 逐卡遥测窗口 {number(policy.telemetry_lookback_minutes, "min")} · 当前 default quota {quota(snapshot.capacity.default_gpu_quota)} GPU</p><p className="rule-note">Monitor 对 Clusterx 只读；认证管理员只能写入本机资源和分组配置。节点 effective/blocked 均相对于标准调度画像。</p><div className="config-grid">{sections.map(([title, values]) => <article key={title}><h4>{title}</h4><dl>{Object.entries(values).map(([key, value]) => <div key={key}><dt>{policyLabel(key)}</dt><dd>{number(value)}</dd></div>)}</dl></article>)}</div></section>
+    })}</div><h4>规则产生层级与传播</h4><PolicyPropagationDiagram /></section>
+    <section className="rules-section"><h3>当前配置</h3><p className="rule-note">采集间隔 {number(policy.refresh_seconds, "s")} · 逐卡遥测窗口 {number(policy.telemetry_lookback_minutes, "min")} · 当前 default quota {quota(snapshot.capacity.default_gpu_quota)} GPU</p><p className="rule-note">Monitor 对 Clusterx 只读；认证管理员只能写入本机资源和分组配置。节点 effective/blocked 均相对于标准调度画像。</p><div className="config-grid">{sections.map(([title, values]) => <article key={title}><h4>{title}</h4><dl>{Object.entries(values).map(([key, value]) => <div key={key}><dt>{policyLabel(key)}</dt><dd>{number(value)}</dd></div>)}</dl></article>)}<article><h4>节点归属约束</h4><dl><div><dt>状态</dt><dd>{snapshot.node_allocation?.enabled ? "已启用（advisory）" : "已关闭（全部节点可用）"}</dd></div><div><dt>访问范围</dt><dd>{snapshot.node_allocation?.access_scope ?? "all"}</dd></div></dl></article></div></section>
     <section className="rules-section"><h3>规则目录</h3><div className="rule-catalog">{response.rule_catalog.map((rule) => <article key={rule.code}><div><code>{rule.code}</code><span>{rule.category}</span><span>{rule.applies_to}</span></div><h4>{rule.title}</h4>{rule.description && <p>{rule.description}</p>}</article>)}</div></section>
-    <section className="rules-section"><h3>分组 Quota</h3><div className="policy-groups"><table><thead><tr><th>Group ID</th><th>GPU quota</th><th>CPU quota</th><th>内存 quota GiB</th><th>成员数</th></tr></thead><tbody>{Object.entries(policy.groups).map(([group, config]) => <tr key={group}><td>{group}</td><td>{config.gpu_quota === "remainder" ? `remainder（当前 ${quota(snapshot.capacity.default_gpu_quota)}）` : quota(config.gpu_quota)}</td><td>{quota(config.cpu_quota)}</td><td>{quota(config.memory_quota_gib)}</td><td>{number(config.member_count)}</td></tr>)}</tbody></table></div></section>
+    <section className="rules-section"><h3>分组 Quota</h3><div className="policy-groups"><table><thead><tr><th>Group ID</th><th>GPU quota</th><th>CPU quota</th><th>内存 quota GiB</th><th>成员数</th><th>有效节点</th><th>节点 GPU</th></tr></thead><tbody>{Object.entries(policy.groups).map(([group, config]) => { const nodes = allocationEnabled ? (effectiveAssignments[group] ?? []) : []; return <tr key={group}><td>{group}</td><td>{config.gpu_quota === "remainder" ? `remainder（当前 ${quota(snapshot.capacity.default_gpu_quota)}）` : quota(config.gpu_quota)}</td><td>{quota(config.cpu_quota)}</td><td>{quota(config.memory_quota_gib)}</td><td>{number(config.member_count)}</td><td>{allocationEnabled ? nodes.join(", ") || "无" : "全部 queue 节点可用"}</td><td>{allocationEnabled ? number(nodeGpuCapacity(nodes)) : "—"}</td></tr>; })}</tbody></table></div></section>
     <section className="rules-section"><h3>失败与缺失数据</h3><div className="behavior-list">{Object.entries(response.evaluation_behavior).map(([key, description]) => <article key={key}><code>{policyLabel(key)}</code><p>{description}</p></article>)}</div></section>
   </div>;
 }
@@ -511,11 +547,12 @@ export default function App() {
       const nodes = Math.max(1, (workload.num_nodes ?? placementNodes.length) || 1);
       const gpusPerNode = Math.max(1, workload.gpus_per_node ?? Math.ceil((workload.total_gpu || 1) / nodes));
       const pending = workload.policy_status === "pending" || workload.placements.length === 0;
+      const group = workload.group && workload.group !== "unattributed" ? [workload.group] : [];
       return {
         ...defaults, sourceLabel: workload.workload_name, nodes, gpusPerNode,
         cpusTotal: workload.total_cpu ?? null, memoryTotalGib: workload.total_memory_gib ?? null,
-        note: pending ? "目标资源按该 Pending Workload 的请求画像预填；模拟会寻找可释放任意合适节点的协调方案。" : "目标资源按该运行中 Workload 的画像预填，并将候选限定为它，用于验证协调后的释放效果。",
-        workloads: pending ? [] : [workload.workload_id], workloadTypes: pending ? [] : [workload.type],
+        note: pending ? `目标资源按该 Pending Workload 的请求画像预填；已预填分组 ${workload.group}，默认使用该组节点；模拟会寻找可释放的协调方案。` : `目标资源按该运行中 Workload 的画像预填；已预填分组 ${workload.group}，默认使用该组节点；候选限定为它，用于验证协调后的释放效果。`,
+        groups: group, workloads: pending ? [] : [workload.workload_id], workloadTypes: pending ? [] : [workload.type],
       };
     }
     if (ref.kind === "alert") {

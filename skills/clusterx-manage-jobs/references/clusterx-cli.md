@@ -41,7 +41,7 @@ clusterx stats
 clusterx stop
 ```
 
-Run Clusterx through `scripts/clusterx_exec.py` so configuration precedence is
+Run Clusterx through `clusterx-exec` so configuration precedence is
 preserved and stdout/stderr are redacted.
 
 ## `clusterx run`
@@ -68,6 +68,16 @@ The positional argument is the command to run. The verified option surface is:
 | `--image` | Container image | config/default |
 | `--mount`, `--empty-mount` | Repeatable volume mount | config/default |
 | `--shm-size-gib` | Shared memory | `64` |
+
+When `CLUSTERX_MONITOR_URL` is configured, the Skill wrapper performs an
+advisory group-node check before `run`. Pass `--cluster-user <name>` before the
+wrapper's `--`, set `CLUSTERX_USER`, or configure the protected local identity
+mapping. Explicit `--cluster-user` wins over the environment and mapping. The
+name is the caller-supplied Clusterx identity and is never inferred from
+`$USER`.
+If the Monitor reports node allocation disabled, the wrapper skips node
+recommendations and treats the queue as fully accessible. The wrapper never
+rewrites `--include` or `--exclude`.
 | `--storage-ak-id`, `--storage-ak-secret` | Storage credentials | config/default |
 
 Clusterx `2026.8.19` joins positional command tokens without shell quoting.
@@ -84,7 +94,7 @@ request, execute it directly. Do not ask for a redundant confirmation.
 
 ### Training CPU policy
 
-`scripts/clusterx_exec.py` hard-validates the public policy before invoking
+`clusterx-exec` hard-validates the public policy before invoking
 `clusterx run`. For a GPU task, the inclusive per-task limit is:
 
 ```text
@@ -144,22 +154,36 @@ read-only against Clusterx. Authenticated administration writes only local
 policy files. The client never replaces Clusterx job lifecycle commands:
 
 ```bash
-python3 scripts/monitor_cli.py status --format json
-python3 scripts/monitor_cli.py overview --format json
-python3 scripts/monitor_cli.py users --violations-only --format json
-python3 scripts/monitor_cli.py groups --format json
-python3 scripts/monitor_cli.py nodes --classification fragmented --format json
-python3 scripts/monitor_cli.py workloads --status pending --priority high --format json
-python3 scripts/monitor_cli.py alerts \
+clusterx-monitor-cli status --format json
+clusterx-monitor-cli overview --format json
+clusterx-monitor-cli users --violations-only --format json
+clusterx-monitor-cli groups --format json
+clusterx-monitor-cli nodes --classification fragmented --format json
+clusterx-monitor-cli workloads --status pending --priority high --format json
+clusterx-monitor-cli alerts \
   --finding-category utilization \
   --finding-code utilization.low_gpu_activity \
   --tag low-utilization --format json
+
+Node ownership is public to all anonymous Monitor viewers. To resolve a
+caller's effective group pool, provide `--user <cluster-user>` or configure
+`CLUSTERX_USER`:
+
+```bash
+clusterx-monitor-cli nodes --mine --format json
+```
+
+The CLI does not use the local `$USER`. With allocation disabled, the access
+response states that all queue
+nodes are available. Group borrowing remains quota-counted and only adds the
+corresponding advisory placement finding. Pending workloads cannot be assigned
+to nodes and never receive placement findings.
 ```
 
 Scheduling simulation uses an identified cached snapshot:
 
 ```bash
-python3 scripts/monitor_cli.py plan \
+clusterx-monitor-cli plan \
   --nodes 2 --gpus-per-node 8 \
   --strategy min-gpu --strategy min-workloads --strategy min-users \
   --candidate-scope all --alternatives 3 --search-seconds 10 \
@@ -171,7 +195,13 @@ python3 scripts/monitor_cli.py plan \
 
 Candidate filters include repeated `--type`, `--group`, `--user`, `--workload`,
 `--exclude-workload`, `--exclude-user`, `--violation-category`,
-`--violation-code`, `--violation-tag`, and `--over-quota-only`. List views use
+`--violation-code`, `--violation-tag`, and `--over-quota-only`. Plan node
+candidate scope is controlled independently with
+`--candidate-node-scope all|selected_groups|outside_selected_groups`; the two
+group-relative values use the selected repeated `--group` filters. Workload
+placement scope is controlled with
+`--placement-scope any|owned_only|borrowed_only|mixed|includes_borrowed`.
+List views use
 comma-separated `--finding-category`, `--finding-code`, and `--tag` values.
 `--violations-only` and `--fail-on violation` read structured findings rather
 than parsing display messages. Suggestions are
@@ -195,6 +225,10 @@ independently recomputed against the pinned snapshot before it is returned;
 the deterministic greedy path is only a verified timeout fallback and is
 always labeled heuristic. `candidate-scope` limits the nodes that may satisfy
 the requested target, including for workloads spanning multiple nodes.
+`candidate-node-scope` further intersects that range with effective public node
+ownership. `placement-scope` filters the release workload domain by its
+placement relationship to its group. If node allocation is disabled, both
+effective ownership restrictions are unrestricted.
 
 The Web workload drawer lets any Monitor viewer fetch a bounded realtime
 training log preview after explicitly selecting a Worker and clicking the load
@@ -227,10 +261,10 @@ Unknown-owner/unattributed resources are never release candidates.
 For bounded monitoring use:
 
 ```bash
-python3 scripts/monitor_cli.py watch --view alerts --count 10 --format jsonl
+clusterx-monitor-cli watch --view alerts --count 10 --format jsonl
 ```
 
-The client resolves its endpoint from `--endpoint`, then
+Install `clusterx-monitor-cli` before using these commands. The client resolves its endpoint from `--endpoint`, then
 `CLUSTERX_MONITOR_URL`, then the backwards-compatible default
 `http://127.0.0.1:8765`. The service may be shared from another development
 machine. It never falls back to a live Clusterx query. Exit status `0` means

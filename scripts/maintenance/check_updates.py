@@ -17,9 +17,9 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SKILL_SCRIPTS = ROOT / "skill/clusterx-manage-jobs/scripts"
-sys.path.insert(0, str(SKILL_SCRIPTS))
-from redact import redact  # noqa: E402
+CLIENT_SRC = ROOT / "client/src"
+sys.path.insert(0, str(CLIENT_SRC))
+from clusterx_monitor_cli.redact import redact  # noqa: E402
 
 
 DEFAULT_MANIFEST = Path(__file__).with_name("sources.json")

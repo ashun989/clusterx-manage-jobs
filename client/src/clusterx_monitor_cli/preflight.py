@@ -13,8 +13,12 @@ import shutil
 import subprocess
 import sys
 
-from config_resolver import inspect_config, resolve_config
-from redact import redact
+try:
+    from .config_resolver import inspect_config, resolve_config
+    from .redact import redact
+except ImportError:  # pragma: no cover - supports direct local script execution
+    from config_resolver import inspect_config, resolve_config
+    from redact import redact
 
 
 TESTED_CLUSTERX_VERSION = "2026.8.19"

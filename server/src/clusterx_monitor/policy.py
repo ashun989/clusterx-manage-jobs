@@ -54,6 +54,10 @@ RULE_CATALOG = [
     {"code": "node.cpu_memory_blocked", "category": "node-classification", "applies_to": "node", "title": "CPU/memory-blocked node", "description": "Raw free GPUs exceed the number usable for the configured standard planning profile; smaller explicit requests may still fit."},
     {"code": "attribution.resource_excess", "category": "attribution", "applies_to": "node", "title": "Inconsistent resource attribution", "description": "Pod-attributed resources exceed node allocated resources; the node and touching workloads are excluded from planning."},
     {"code": "quota.pending_pressure", "category": "quota", "applies_to": "queue", "title": "Pending pressure", "description": "Pressure becomes active when the configured number of pending training jobs individually reach the wait threshold; 0-GPU jobs count. Missing queue timestamps make pressure unknown."},
+    {"code": "placement.outside_owned_pool", "category": "placement", "applies_to": "running workload", "title": "Outside owned node pool", "description": "A group with quota headroom is running on a node owned by another group; the finding becomes a violation when the owner group has active pending pressure."},
+    {"code": "placement.borrowed_node", "category": "placement", "applies_to": "running workload", "title": "Borrowed node", "description": "A group at or above its GPU quota is running on a node owned by another group; the finding becomes a violation when the owner group has active pending pressure, and borrowing does not waive quota findings."},
+    {"code": "placement.assignment_stale", "category": "placement", "applies_to": "node allocation", "title": "Stale node assignment", "description": "A configured node is not present in the current queue inventory."},
+    {"code": "placement.assignment_capacity_insufficient", "category": "placement", "applies_to": "group", "title": "Assigned node capacity insufficient", "description": "The effective nodes assigned to a group have less GPU capacity than its finite quota."},
 ]
 
 
@@ -118,12 +122,20 @@ def load_policy(path: str | Path, group_path: str | Path) -> PolicyConfig:
     group_payload = _load_mapping(groups_path, "group policy")
     if "groups" in policy_payload:
         raise ValueError("resource policy must not contain private groups")
-    unexpected = set(group_payload) - {"schema_version", "groups"}
+    unexpected = set(group_payload) - {"schema_version", "node_allocation", "groups"}
     if unexpected:
         raise ValueError("group policy contains unsupported fields: " + ", ".join(sorted(unexpected)))
     if group_payload.get("schema_version") != policy_payload.get("schema_version"):
         raise ValueError("resource and group policy schema versions do not match")
-    merged = {**policy_payload, "groups": group_payload.get("groups")}
+    merged = {
+        **policy_payload,
+        "node_allocation": (
+            group_payload.get("node_allocation")
+            or policy_payload.get("node_allocation")
+            or {"enabled": False}
+        ),
+        "groups": group_payload.get("groups"),
+    }
     return PolicyConfig.model_validate(merged)
 
 
@@ -136,14 +148,23 @@ def _default_resource_mapping() -> dict[str, Any]:
         "default": GroupConfig(gpu_quota="remainder", members=()),
     }).model_dump(mode="json")
     payload.pop("groups")
+    payload.pop("node_allocation")
     return payload
 
 
 def _default_group_mapping() -> dict[str, Any]:
     return {
         "schema_version": 1,
+        "node_allocation": {"enabled": False},
         "groups": {"default": {"gpu_quota": "remainder", "members": []}},
     }
+
+
+def _serialized_group(group: GroupConfig) -> dict[str, Any]:
+    value = group.model_dump(mode="json", exclude_none=True)
+    if not group.nodes:
+        value.pop("nodes", None)
+    return value
 
 
 MISSING_CONFIG = b"clusterx-monitor:missing-config:v1"
@@ -220,16 +241,30 @@ class PolicyManager:
             self.error = None
         return True
 
-    def public_status(self) -> dict[str, Any]:
+    def public_status(self, *, known_users: Iterable[str] | None = None) -> dict[str, Any]:
         with self._lock:
             policy = self._policy.model_dump(mode="json") if self._policy else None
             if policy is not None:
+                normalized_known_users = {
+                    str(user).strip().lower() for user in (known_users or ()) if str(user).strip()
+                }
+                explicit_members = {
+                    member
+                    for name, group in self._policy.groups.items()
+                    if name != "default"
+                    for member in group.members
+                }
                 policy["groups"] = {
                     name: {
                         "gpu_quota": group.gpu_quota,
                         "cpu_quota": group.cpu_quota,
                         "memory_quota_gib": group.memory_quota_gib,
-                        "member_count": len(group.members),
+                        "nodes": list(group.nodes),
+                        "member_count": (
+                            len(normalized_known_users - explicit_members)
+                            if name == "default" and known_users is not None
+                            else len(group.members)
+                        ),
                     }
                     for name, group in self._policy.groups.items()
                 }
@@ -247,7 +282,8 @@ class PolicyManager:
                     "historical_telemetry_unavailable": "The snapshot is still published, historical low-utilization evaluation is skipped, and a telemetry warning is emitted.",
                     "historical_scope": "Only currently running GPU trainingJob, aid, and air workloads are evaluated; no completed-workload history is stored.",
                     "development_instance_limit": "Only active aid workloads with known owners count toward the per-user development instance limit; the finding remains user-scoped.",
-                    "group_quotas": "GPU, CPU, and memory quotas are independent; an omitted or null resource quota is unlimited.",
+                    "group_quotas": "GPU, CPU, and memory quotas are independent; an omitted or null resource quota is unlimited. Numeric GPU quotas must be multiples of 8. The default group's members are the current known users left after explicit group assignment.",
+                    "node_allocation": "When enabled, each queue node has one public group owner; unassigned nodes effectively belong to default. Placement findings are advisory by default, but become violations when the owner group has active group-local pending pressure. Pending workloads do not receive node placement findings.",
                     "default_group": "When default.gpu_quota is remainder, its effective quota is max(0, current bound GPU capacity minus all other explicit group GPU quotas).",
                     "planning_profile": "Node effective/blocked capacity and omitted plan CPU/memory use the configurable standard planning profile; training ratios remain submission limits.",
                     "cluster_access": "Monitoring and planning are read-only against Clusterx; authenticated administrators may write only the configured local policy files.",
@@ -263,6 +299,7 @@ class PolicyManager:
             return _default_resource_mapping()
         payload = self._policy.model_dump(mode="json")
         payload.pop("groups")
+        payload.pop("node_allocation")
         return payload
 
     def _effective_group_mapping(self) -> dict[str, Any]:
@@ -271,9 +308,10 @@ class PolicyManager:
         return {
             "schema_version": self._policy.schema_version,
             "groups": {
-                name: group.model_dump(mode="json", exclude_none=True)
+                name: _serialized_group(group)
                 for name, group in self._policy.groups.items()
             },
+            "node_allocation": self._policy.node_allocation.model_dump(mode="json"),
         }
 
     def _admin_file(self, kind: str, path: Path) -> dict[str, Any]:
@@ -408,10 +446,14 @@ class PolicyManager:
                     raise ValueError("resource policy must not contain private groups")
                 PolicyConfig.model_validate({**value, "groups": _default_group_mapping()["groups"]})
             else:
-                unexpected = set(value) - {"schema_version", "groups"}
+                unexpected = set(value) - {"schema_version", "node_allocation", "groups"}
                 if unexpected:
                     raise ValueError("group policy contains unsupported fields")
-                PolicyConfig.model_validate({**_default_resource_mapping(), "groups": value.get("groups")})
+                PolicyConfig.model_validate({
+                    **_default_resource_mapping(),
+                    "node_allocation": value.get("node_allocation", {"enabled": False}),
+                    "groups": value.get("groups"),
+                })
             return value
         except (UnicodeDecodeError, ValueError, ValidationError):
             return None
@@ -440,7 +482,7 @@ class PolicyManager:
                     or self._effective_group_mapping()
                 )
             else:
-                unexpected = set(payload) - {"schema_version", "groups"}
+                unexpected = set(payload) - {"schema_version", "node_allocation", "groups"}
                 if unexpected:
                     raise ValueError("group policy contains unsupported fields: " + ", ".join(sorted(unexpected)))
                 candidate_resource = (
@@ -448,17 +490,23 @@ class PolicyManager:
                     or self._effective_resource_mapping()
                 )
                 candidate_groups = payload
-            merged = {**candidate_resource, "groups": candidate_groups.get("groups")}
+            merged = {
+                **candidate_resource,
+                "node_allocation": candidate_groups.get("node_allocation", {"enabled": False}),
+                "groups": candidate_groups.get("groups"),
+            }
             validated = PolicyConfig.model_validate(merged)
             if kind == "resource":
                 normalized = validated.model_dump(mode="json")
                 normalized.pop("groups")
+                normalized.pop("node_allocation")
                 content = json.dumps(normalized, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
             else:
                 normalized = {
                     "schema_version": validated.schema_version,
+                    "node_allocation": validated.node_allocation.model_dump(mode="json"),
                     "groups": {
-                        name: group.model_dump(mode="json", exclude_none=True)
+                        name: _serialized_group(group)
                         for name, group in validated.groups.items()
                     },
                 }
@@ -534,6 +582,29 @@ def _normalize_workload_resources(workload: dict[str, Any]) -> None:
         workload.setdefault("total_memory_gib", None)
     workload.setdefault("resource_basis", "attributed")
     workload.setdefault("task_resources", [])
+
+
+def _node_ownership(
+    nodes: Iterable[dict[str, Any]], policy: PolicyConfig,
+) -> tuple[dict[str, str], dict[str, list[str]], list[str]]:
+    """Resolve one effective owner for every node in this queue.
+
+    Explicit assignments win; live nodes without an explicit assignment belong
+    to default. The third return value is the configured-but-missing inventory.
+    """
+    explicit: dict[str, str] = {}
+    configured: dict[str, list[str]] = {}
+    for group_name, group in policy.groups.items():
+        configured[group_name] = list(group.nodes)
+        for node in group.nodes:
+            explicit[node] = group_name
+    live = {str(node.get("node")) for node in nodes}
+    stale = sorted(node for node in explicit if node not in live)
+    owners = {
+        str(node.get("node")): explicit.get(str(node.get("node")), "default")
+        for node in nodes if str(node.get("node"))
+    }
+    return owners, configured, stale
 
 
 def _telemetry_summary(workloads: Iterable[dict[str, Any]], power_limit_w: float) -> dict[str, Any]:
@@ -820,6 +891,10 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
     now = datetime.now(timezone.utc)
     nodes = snapshot.get("nodes") or []
     workloads = snapshot.get("workloads") or []
+    allocation_enabled = policy.node_allocation.enabled
+    node_owners, configured_node_groups, stale_assignments = _node_ownership(nodes, policy)
+    for node in nodes:
+        node["assigned_group"] = node_owners.get(str(node.get("node"))) if allocation_enabled else None
     planning_excluded_nodes = {
         str(node.get("node")) for node in nodes
         if not bool(node.get("planning_eligible", True))
@@ -896,9 +971,38 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         "active" if len(eligible_pending) >= policy.pending_pressure.min_jobs else
         "inactive"
     )
+    pending_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for pending_item in pending_workloads:
+        pending_by_group[str(pending_item.get("group") or "unattributed")].append(pending_item)
+    group_pending_pressure: dict[str, dict[str, Any]] = {}
+    pressure_groups = {*policy.groups, *pending_by_group}
+    for group_name in sorted(pressure_groups):
+        group_pending = pending_by_group.get(group_name, [])
+        group_unknown_age = [
+            item for item in group_pending
+            if item.get("queue_age_seconds") is None
+        ]
+        group_eligible = [
+            item for item in group_pending
+            if item.get("queue_age_seconds") is not None
+            and float(item.get("queue_age_seconds") or 0)
+            >= policy.pending_pressure.min_wait_minutes * 60
+        ]
+        group_pending_pressure[group_name] = {
+            "state": (
+                "unknown" if not pending_complete or group_unknown_age else
+                "active" if len(group_eligible) >= policy.pending_pressure.min_jobs else
+                "inactive"
+            ),
+            "eligible_jobs": len(group_eligible),
+            "unknown_age_jobs": len(group_unknown_age),
+            "min_jobs": policy.pending_pressure.min_jobs,
+            "min_wait_minutes": policy.pending_pressure.min_wait_minutes,
+        }
 
     by_user: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    alerts: list[dict[str, Any]] = []
     for workload in workloads:
         user = str(workload.get("user") or "unknown").strip().lower()
         workload["user"] = user
@@ -925,8 +1029,104 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         by_user[user].append(workload)
         by_group[group].append(workload)
 
+    # Placement findings are advisory by default and apply only to observed
+    # running placements. Pending workloads have no node placement to assess.
+    if allocation_enabled:
+        group_allocated_gpu = {
+            group_name: _sum(item.get("total_gpu") for item in items)
+            for group_name, items in by_group.items()
+        }
+        group_gpu_quota = {
+            "default": default_gpu_quota,
+            **{
+                name: int(group.gpu_quota)
+                for name, group in policy.groups.items()
+                if name != "default" and isinstance(group.gpu_quota, int)
+            },
+        }
+        group_owned_free_gpu = {
+            group_name: _sum(
+                max(0, float(node.get("total_gpu") or 0) - float(node.get("allocated_gpu") or 0))
+                for node in nodes
+                if node_owners.get(str(node.get("node"))) == group_name
+            )
+            for group_name in policy.groups
+        }
+        for workload in workloads:
+            group = str(workload.get("group") or "")
+            if group in {"", "unattributed"}:
+                continue
+            external_nodes_by_owner: dict[str, set[str]] = defaultdict(set)
+            for placement in workload.get("placements") or []:
+                node_name = str(placement.get("node"))
+                owner = node_owners.get(node_name)
+                if owner is not None and owner != group:
+                    external_nodes_by_owner[owner].add(node_name)
+            if not external_nodes_by_owner:
+                continue
+            quota = group_gpu_quota.get(group)
+            quota_full = quota is not None and group_allocated_gpu.get(group, 0) >= quota
+            required_gpu = float(workload.get("total_gpu") or 0)
+            if not quota_full and group_owned_free_gpu.get(group, 0) < required_gpu:
+                continue
+            for owner_group, owner_nodes in sorted(external_nodes_by_owner.items()):
+                owner_pressure = group_pending_pressure.get(owner_group, {
+                    "state": "unknown",
+                    "eligible_jobs": 0,
+                    "unknown_age_jobs": 0,
+                    "min_jobs": policy.pending_pressure.min_jobs,
+                    "min_wait_minutes": policy.pending_pressure.min_wait_minutes,
+                })
+                pressure_status = owner_pressure["state"]
+                finding_status = "violation" if pressure_status == "active" else "warning"
+                code = "placement.borrowed_node" if quota_full else "placement.outside_owned_pool"
+                message = (
+                    "running workload is using nodes owned by another group while that group's pending pressure is active"
+                    if finding_status == "violation" and quota_full else
+                    "running workload is outside its group-owned node pool while that group's pending pressure is active"
+                    if finding_status == "violation" else
+                    "running workload is using nodes owned by another group after GPU quota is full"
+                    if quota_full else
+                    "running workload is using nodes outside its group-owned node pool while GPU quota has headroom"
+                )
+                tags = (
+                    "placement", "node", "borrowed" if quota_full else "outside-owned-pool",
+                    "pending-pressure" if pressure_status == "active" else
+                    "pending-pressure-unknown" if pressure_status == "unknown" else
+                    "pending-pressure-inactive",
+                )
+                finding = _finding(
+                    code, "placement", finding_status, message,
+                    tags=tags,
+                    observed={
+                        "group": group,
+                        "owner_group": owner_group,
+                        "nodes": sorted(owner_nodes),
+                        "allocated_gpu": _clean(group_allocated_gpu.get(group, 0)),
+                        "owned_free_gpu": _clean(group_owned_free_gpu.get(group, 0)),
+                        "required_gpu": _clean(required_gpu),
+                        "owner_pending_pressure": owner_pressure,
+                    },
+                    limit={"gpu_quota": quota},
+                )
+                workload["policy_findings"] = [*workload.get("policy_findings", []), finding]
+                if finding_status == "violation":
+                    workload["policy_status"] = "violation"
+                if finding_status == "warning":
+                    alerts_message = (
+                        "workload is borrowing nodes from another group; GPU quota findings remain active"
+                        if quota_full else
+                        "workload is outside its group-owned node pool while GPU quota has headroom"
+                    )
+                    alerts.append(_alert(
+                        "warning", "placement", workload.get("workload_id"), alerts_message,
+                        code=code, category="placement", subject_type="workload",
+                        tags=finding["tags"],
+                    ))
+            workload["policy_reasons"] = [item["message"] for item in workload["policy_findings"]]
+            _set_finding_facets(workload)
+
     group_summaries: list[dict[str, Any]] = []
-    alerts: list[dict[str, Any]] = []
     for group_name in [*policy.groups, *(name for name in by_group if name not in policy.groups)]:
         group_workloads = by_group.get(group_name, [])
         gpu = _sum(w.get("total_gpu") for w in group_workloads)
@@ -995,6 +1195,13 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             "members": sorted({str(w["user"]) for w in group_workloads}),
             "status": status,
             "over_resources": over,
+            "pending_pressure": group_pending_pressure.get(group_name, {
+                "state": "unknown",
+                "eligible_jobs": 0,
+                "unknown_age_jobs": 0,
+                "min_jobs": policy.pending_pressure.min_jobs,
+                "min_wait_minutes": policy.pending_pressure.min_wait_minutes,
+            }),
             "policy_findings": quota_findings,
             "policy_reasons": [item["message"] for item in quota_findings],
             "telemetry": _telemetry_summary(group_workloads, policy.low_utilization.gpu_power_limit_w),
@@ -1092,6 +1299,35 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
                 category=finding["category"], subject_type="workload",
                 tags=finding.get("tags", []),
             ))
+    if allocation_enabled:
+        for node_name in stale_assignments:
+            alerts.append(_alert(
+                "warning", "placement", node_name,
+                "configured node assignment is not present in the current queue inventory",
+                code="placement.assignment_stale", category="placement",
+                subject_type="node", tags=("placement", "assignment", "stale"),
+            ))
+        for group_name, group_config in policy.groups.items():
+            quota = (
+                default_gpu_quota
+                if group_name == "default" and group_config.gpu_quota == "remainder"
+                else int(group_config.gpu_quota)
+                if isinstance(group_config.gpu_quota, int)
+                else None
+            )
+            if quota is None:
+                continue
+            assigned_capacity = _sum(
+                node.get("total_gpu") for node in nodes
+                if node_owners.get(str(node.get("node"))) == group_name
+            )
+            if assigned_capacity < quota:
+                alerts.append(_alert(
+                    "warning", "placement", group_name,
+                    "effective assigned node GPU capacity is below the group GPU quota",
+                    code="placement.assignment_capacity_insufficient", category="placement",
+                    subject_type="group", tags=("placement", "assignment", "capacity"),
+                ))
     if bound_gpu < explicit_gpu_quota:
         alerts.append(_alert(
             "error", "pool-capacity", "queue",
@@ -1205,6 +1441,21 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         "min_wait_minutes": policy.pending_pressure.min_wait_minutes,
     }
     snapshot["workloads"] = workloads
+    snapshot["node_allocation"] = {
+        "enabled": allocation_enabled,
+        "access_scope": "group-owned" if allocation_enabled else "all",
+        "assignments": {
+            group_name: sorted(
+                node_name for node_name, owner in node_owners.items()
+                if owner == group_name
+            )
+            for group_name in policy.groups
+        } if allocation_enabled else {},
+        "configured_assignments": {
+            group_name: sorted(nodes_for_group)
+            for group_name, nodes_for_group in configured_node_groups.items()
+        },
+    }
     snapshot["users"] = user_summaries
     snapshot["groups"] = group_summaries
     snapshot["alerts"] = alerts

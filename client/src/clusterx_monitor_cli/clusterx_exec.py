@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from decimal import Decimal, InvalidOperation
+from importlib.resources import files as resource_files
 import json
 import os
 from pathlib import Path
@@ -12,12 +13,31 @@ import shutil
 import subprocess
 import sys
 
-from config_resolver import inspect_config, resolve_config
-from redact import redact
+import requests
+import yaml
+
+try:
+    from .config_resolver import inspect_config, resolve_config
+    from .redact import redact
+except ImportError:  # pragma: no cover - supports direct local script execution
+    from config_resolver import inspect_config, resolve_config
+    from redact import redact
 
 
 SHELL_INTERPRETERS = {"bash", "dash", "ksh", "sh", "zsh"}
-DEFAULT_RESOURCE_POLICY = Path(__file__).resolve().parents[1] / "assets" / "resource-policy.json"
+try:
+    DEFAULT_RESOURCE_POLICY = Path(
+        resource_files("clusterx_monitor_cli_assets").joinpath("resource-policy.json")
+    )
+except (ModuleNotFoundError, FileNotFoundError):
+    DEFAULT_RESOURCE_POLICY = (
+        Path(__file__).resolve().parents[1]
+        / "clusterx_monitor_cli_assets"
+        / "resource-policy.json"
+    )
+DEFAULT_IDENTITY_CONFIG = Path("~/.config/clusterx-manage-jobs/identity.yaml").expanduser()
+MONITOR_URL_ENV = "CLUSTERX_MONITOR_URL"
+CLUSTERX_USER_ENV = "CLUSTERX_USER"
 
 
 def _resource_option(clusterx_args: list[str], name: str, default: str) -> str:
@@ -101,6 +121,106 @@ def _unsafe_shell_command(clusterx_args: list[str]) -> tuple[str, str] | None:
     return None
 
 
+def _configured_cluster_user(endpoint: str, explicit: str | None, path: Path) -> str | None:
+    if explicit is not None and explicit.strip():
+        return explicit.strip()
+    configured = os.environ.get(CLUSTERX_USER_ENV, "").strip()
+    if configured:
+        return configured
+    if not path.is_file():
+        return None
+    if path.is_symlink():
+        raise ValueError(f"cluster user identity configuration must not be a symlink: {path}")
+    mode = path.stat().st_mode & 0o777
+    if mode & 0o077:
+        raise ValueError(f"cluster user identity configuration permissions are unsafe: {path}; require 600")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("cluster user identity configuration must have schema_version 1")
+    users = payload.get("cluster_users")
+    if not isinstance(users, dict):
+        raise ValueError("cluster user identity configuration must contain cluster_users")
+    value = users.get(endpoint.rstrip("/"))
+    return str(value).strip() if value is not None and str(value).strip() else None
+
+
+def _monitor_request(endpoint: str, user: str | None = None) -> dict[str, object]:
+    params = {} if user is None else {"user": user}
+    response = requests.get(
+        endpoint.rstrip("/") + "/api/v1/access/nodes",
+        params=params, timeout=(5, 20),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"monitor returned HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("monitor returned invalid access response")
+    return payload
+
+
+def _monitor_snapshot(endpoint: str) -> dict[str, object]:
+    response = requests.get(
+        endpoint.rstrip("/") + "/api/v1/snapshots/latest", timeout=(5, 20),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"monitor returned HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("monitor returned invalid snapshot response")
+    return payload
+
+
+def _placement_values(clusterx_args: list[str], name: str) -> set[str]:
+    raw = _resource_option(clusterx_args, name, "")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _check_node_policy(
+    clusterx_args: list[str], *, explicit_user: str | None,
+    identity_path: Path,
+) -> str | None:
+    if not clusterx_args or clusterx_args[0] != "run":
+        return None
+    endpoint = os.environ.get(MONITOR_URL_ENV, "").strip()
+    if not endpoint:
+        return None
+    try:
+        state = _monitor_snapshot(endpoint)
+        allocation = state.get("node_allocation") or {}
+        if not isinstance(allocation, dict) or not allocation.get("enabled"):
+            return None
+        user = _configured_cluster_user(endpoint, explicit_user, identity_path)
+        if not user:
+            return "node allocation is enabled but no cluster user was provided; pass --cluster-user or configure identity.yaml"
+        access = _monitor_request(endpoint, user)
+        owned = {
+            str(node.get("node")) for node in (access.get("nodes") or [])
+            if isinstance(node, dict) and node.get("node")
+        }
+        include = _placement_values(clusterx_args, "--include")
+        exclude = _placement_values(clusterx_args, "--exclude")
+        if include and not include.intersection(owned):
+            print(
+                f"warning: explicit --include does not contain any node in the {access.get('identity', {}).get('group', 'resolved')} owned pool; owned nodes: {', '.join(sorted(owned)) or '-'}",
+                file=sys.stderr,
+            )
+        elif exclude and owned.intersection(exclude):
+            print(
+                "warning: explicit --exclude removes nodes from the resolved group-owned pool: "
+                + ", ".join(sorted(owned.intersection(exclude))),
+                file=sys.stderr,
+            )
+        elif not include:
+            print(
+                "node policy recommendation: owned nodes="
+                + (", ".join(sorted(owned)) or "-"),
+                file=sys.stderr,
+            )
+    except (OSError, ValueError, RuntimeError, requests.RequestException, yaml.YAMLError) as error:
+        print(f"warning: node policy check unavailable; continuing without placement constraint: {error}", file=sys.stderr)
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", help="Explicit Clusterx YAML path")
@@ -110,6 +230,8 @@ def main() -> int:
         default=os.environ.get("CLUSTERX_RESOURCE_POLICY", str(DEFAULT_RESOURCE_POLICY)),
         help="Public resource policy used for Clusterx run validation",
     )
+    parser.add_argument("--cluster-user", help="explicit Clusterx workload owner used for node policy checks")
+    parser.add_argument("--identity-config", default=str(DEFAULT_IDENTITY_CONFIG), help="local cluster user identity mapping")
     parser.add_argument("clusterx_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -136,6 +258,14 @@ def main() -> int:
     resource_error = _validate_training_cpu(clusterx_args, Path(args.resource_policy))
     if resource_error is not None:
         print(resource_error, file=sys.stderr)
+        return 2
+
+    node_policy_error = _check_node_policy(
+        clusterx_args, explicit_user=args.cluster_user,
+        identity_path=Path(args.identity_config).expanduser(),
+    )
+    if node_policy_error is not None:
+        print(node_policy_error, file=sys.stderr)
         return 2
 
     binary = shutil.which("clusterx")

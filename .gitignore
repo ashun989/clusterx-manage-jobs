@@ -13,6 +13,7 @@ build/
 !.env.example
 .clusterx/
 .clusterx-monitor/
+tmp/
 clusterx.yaml
 *.pem
 *.key
@@ -33,7 +34,7 @@ web/coverage/
 chrome-extension/node_modules/
 chrome-extension/coverage/
 *.tsbuildinfo
-src/clusterx_monitor/static/
+server/src/clusterx_monitor/static/
 config/groups.local.yaml
 config/resource-policy.local.json
 config/admin.local.yaml

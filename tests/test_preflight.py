@@ -9,7 +9,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "skill/clusterx-manage-jobs/scripts/preflight.py"
+SCRIPT = ROOT / "client/src/clusterx_monitor_cli/preflight.py"
 
 
 class PreflightTests(unittest.TestCase):

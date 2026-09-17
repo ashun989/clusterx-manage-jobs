@@ -89,6 +89,10 @@ def main() -> int:
         "--allowed-host", action="append", default=[],
         help="trusted HTTP Host for non-loopback/NAT access; repeat as needed",
     )
+    serve.add_argument(
+        "--allowed-origin", action="append", default=[],
+        help="allowed Web origin for standalone frontend access; repeat as needed",
+    )
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--static-dir")
     args = parser.parse_args()
@@ -135,7 +139,7 @@ def main() -> int:
         auth = AdminAuth(args.auth_config, allow_missing=True)
         app = create_app(
             runtime, static_dir=args.static_dir, auth=auth,
-            allowed_hosts=trusted_hosts,
+            allowed_hosts=trusted_hosts, allowed_origins=args.allowed_origin,
         )
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")
         return 0

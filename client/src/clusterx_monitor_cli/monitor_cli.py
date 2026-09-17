@@ -16,6 +16,7 @@ import requests
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
 ENDPOINT_ENV = "CLUSTERX_MONITOR_URL"
+USER_ENV = "CLUSTERX_USER"
 EXIT_USAGE = 2
 EXIT_UNAVAILABLE = 3
 EXIT_FAIL_ON = 4
@@ -35,6 +36,14 @@ def _configured_endpoint() -> str:
     the loopback address remains a backwards-compatible local default.
     """
     return os.environ.get(ENDPOINT_ENV, "").strip() or DEFAULT_ENDPOINT
+
+
+def _configured_user(explicit: str | None) -> str | None:
+    """Resolve an explicitly supplied Clusterx identity without using $USER."""
+    if explicit is not None and explicit.strip():
+        return explicit.strip()
+    configured = os.environ.get(USER_ENV, "").strip()
+    return configured or None
 
 
 def _url(endpoint: str, path: str) -> str:
@@ -157,6 +166,12 @@ def _scalar(value: Any) -> str:
 def _table_scalar(key: str, value: Any) -> str:
     if key in {"gpu_quota", "cpu_quota", "memory_quota_gib"} and value is None:
         return "不限"
+    if key == "pending_pressure" and isinstance(value, dict):
+        return (
+            f"{value.get('state', 'unknown')} "
+            f"({value.get('eligible_jobs', 0)}/{value.get('min_jobs', 0)} 个, "
+            f">={value.get('min_wait_minutes', 0)} 分钟)"
+        )
     return _scalar(value)
 
 
@@ -180,6 +195,7 @@ def _render_table(payload: Any, *, no_color: bool = False) -> str:
         preferred = [
             "user", "group", "node", "workload_name", "type", "classification",
             "priority", "status", "policy_status", "gpu_quota", "cpu_quota", "memory_quota_gib",
+            "pending_pressure",
             "allocated_gpu", "allocated_cpu", "allocated_memory_gib", "total_gpu",
             "total_cpu", "total_memory_gib",
             "resource_basis", "resource_create_time", "queue_age_seconds", "start_time",
@@ -266,7 +282,7 @@ def build_parser() -> argparse.ArgumentParser:
             child,
             fail_on=("stale",) if command == "nodes" else ("violation", "stale"),
         )
-        child.add_argument("--user")
+        child.add_argument("--user", help="Clusterx user identity; CLUSTERX_USER is used when omitted for --mine")
         child.add_argument("--group")
         child.add_argument("--status")
         child.add_argument("--type")
@@ -275,6 +291,8 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--classification")
         child.add_argument("--node")
         child.add_argument("--workload")
+        if command == "nodes":
+            child.add_argument("--mine", action="store_true", help="show nodes for an explicitly named cluster user")
         if command != "nodes":
             child.add_argument("--violations-only", action="store_true")
             child.add_argument("--finding-category", help="comma-separated structured finding categories")
@@ -288,6 +306,18 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--memory-per-node-gib", type=float)
     plan.add_argument("--strategy", action="append", choices=("min-gpu", "min-workloads", "min-users"), default=[])
     plan.add_argument("--candidate-scope", choices=("fragmented", "full", "all"), default="fragmented")
+    plan.add_argument(
+        "--candidate-node-scope",
+        choices=("all", "selected_groups", "outside_selected_groups"),
+        default="all",
+        help="restrict candidate nodes to selected groups or nodes outside them",
+    )
+    plan.add_argument(
+        "--placement-scope",
+        choices=("any", "owned_only", "borrowed_only", "mixed", "includes_borrowed"),
+        default="any",
+        help="restrict workloads by owned/borrowed node placement",
+    )
     plan.add_argument("--alternatives", type=int, default=1)
     plan.add_argument(
         "--search-seconds", type=float, default=10,
@@ -385,6 +415,8 @@ def main() -> int:
                     "exclude_workloads": args.exclude_workload,
                     "exclude_users": args.exclude_user,
                     "over_quota_only": args.over_quota_only,
+                    "candidate_node_scope": args.candidate_node_scope,
+                    "placement_scope": args.placement_scope,
                     "violation_categories": args.violation_category,
                     "violation_codes": args.violation_code,
                     "violation_tags": args.violation_tag,
@@ -394,8 +426,15 @@ def main() -> int:
                 body["snapshot_id"] = _snapshot(args.endpoint, "latest")["snapshot_id"]
             payload = _request(args.endpoint, "POST", "/api/v1/plans", json=body)
         else:
-            source_snapshot = _snapshot(args.endpoint, args.snapshot)
-            payload = _select_view(source_snapshot, args.command, args)
+            if args.command == "nodes" and args.mine:
+                params: dict[str, str] = {}
+                user = _configured_user(args.user)
+                if user:
+                    params["user"] = user
+                payload = _request(args.endpoint, "GET", "/api/v1/access/nodes", params=params)
+            else:
+                source_snapshot = _snapshot(args.endpoint, args.snapshot)
+                payload = _select_view(source_snapshot, args.command, args)
         _emit(payload, args)
         return EXIT_FAIL_ON if _has_failure(payload, getattr(args, "fail_on", None), snapshot=source_snapshot) else 0
     except KeyboardInterrupt:

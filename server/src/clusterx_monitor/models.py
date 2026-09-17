@@ -50,22 +50,34 @@ class LowUtilizationConfig(FrozenModel):
     gpu_memory_threshold_pct: float = Field(default=20, ge=0, le=100)
 
 
+class NodeAllocationConfig(FrozenModel):
+    enabled: bool = False
+
+
 class GroupConfig(FrozenModel):
     gpu_quota: int | Literal["remainder"] | None = None
     cpu_quota: float | None = None
     memory_quota_gib: float | None = None
     members: tuple[str, ...] = ()
+    nodes: tuple[str, ...] = ()
 
     @field_validator("members", mode="before")
     @classmethod
     def normalize_members(cls, value: object) -> tuple[str, ...]:
         return tuple(str(item).strip().lower() for item in (value or []))
 
+    @field_validator("nodes", mode="before")
+    @classmethod
+    def normalize_nodes(cls, value: object) -> tuple[str, ...]:
+        return tuple(str(item).strip() for item in (value or []))
+
     @field_validator("gpu_quota")
     @classmethod
     def validate_gpu_quota(cls, value: int | str | None) -> int | str | None:
         if isinstance(value, int) and not 0 <= value <= 100_000:
             raise ValueError("gpu_quota must be between 0 and 100000")
+        if isinstance(value, int) and value % 8 != 0:
+            raise ValueError("gpu_quota must be a multiple of 8")
         return value
 
     @field_validator("cpu_quota", "memory_quota_gib")
@@ -85,6 +97,7 @@ class PolicyConfig(FrozenModel):
     training: TrainingConfig = TrainingConfig()
     planning: PlanningConfig = PlanningConfig()
     low_utilization: LowUtilizationConfig = LowUtilizationConfig()
+    node_allocation: NodeAllocationConfig = NodeAllocationConfig()
     groups: dict[str, GroupConfig]
 
     @model_validator(mode="after")
@@ -106,7 +119,12 @@ class PolicyConfig(FrozenModel):
         if any(name != "default" for name in remainder_groups):
             raise ValueError("only the default group may use remainder quota")
         owners: dict[str, str] = {}
+        node_owners: dict[str, str] = {}
         for group_name, group in self.groups.items():
+            if not isinstance(group_name, str) or not group_name.strip():
+                raise ValueError("group names must not be empty")
+            if any(ord(character) < 32 or ord(character) == 127 for character in group_name):
+                raise ValueError(f"group name {group_name!r} contains control characters")
             for user in group.members:
                 if not user:
                     raise ValueError(f"empty member in group {group_name}")
@@ -116,6 +134,17 @@ class PolicyConfig(FrozenModel):
                         f"user {user!r} appears in both {previous!r} and {group_name!r}"
                     )
                 owners[user] = group_name
+            for node in group.nodes:
+                if not node:
+                    raise ValueError(f"empty node in group {group_name}")
+                previous = node_owners.get(node)
+                if previous is not None:
+                    raise ValueError(
+                        f"node {node!r} appears in both {previous!r} and {group_name!r}"
+                    )
+                node_owners[node] = group_name
+        if self.groups["default"].members:
+            raise ValueError("default group members are derived and must be empty")
         return self
 
 
@@ -134,6 +163,10 @@ class PlanFilters(FrozenModel):
     exclude_workloads: tuple[str, ...] = ()
     exclude_users: tuple[str, ...] = ()
     over_quota_only: bool = False
+    placement_scope: Literal[
+        "any", "owned_only", "borrowed_only", "mixed", "includes_borrowed"
+    ] = "any"
+    candidate_node_scope: Literal["all", "selected_groups", "outside_selected_groups"] = "all"
     violation_categories: tuple[str, ...] = ()
     violation_codes: tuple[str, ...] = ()
     violation_tags: tuple[str, ...] = ()
@@ -180,4 +213,12 @@ class PlanRequest(FrozenModel):
             values = getattr(self.filters, field_name)
             if len(values) > 1000 or any(len(str(value)) > 256 for value in values):
                 raise ValueError(f"filters.{field_name} is too large")
+        return self
+
+    @model_validator(mode="after")
+    def validate_candidate_node_scope(self) -> "PlanRequest":
+        if self.filters.candidate_node_scope != "all" and not self.filters.groups:
+            raise ValueError(
+                "filters.groups is required when candidate_node_scope is not all"
+            )
         return self
