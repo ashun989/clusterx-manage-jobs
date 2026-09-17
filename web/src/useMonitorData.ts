@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorMessage } from "./api";
+import { api, errorMessage, monitorApiUrl } from "./api";
 import type { HistoryResponse, PolicyResponse, ServiceStatus, Snapshot } from "./types";
 import type { TrendRange } from "./navigation";
 
@@ -103,7 +103,7 @@ export function useMonitorData(historyRange: TrendRange) {
 
   useEffect(() => {
     void refresh();
-    const stream = new EventSource("/api/v1/events");
+    const stream = new EventSource(monitorApiUrl("/events"), { withCredentials: true });
     stream.onopen = () => setConnection("live");
     stream.addEventListener("snapshot", () => { setConnection("live"); void refresh(); });
     stream.onerror = () => {

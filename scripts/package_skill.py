@@ -13,8 +13,9 @@ import tarfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skill" / "clusterx-manage-jobs"
-ARCHIVE_NAME = "clusterx-manage-jobs.tar.gz"
+SKILL = ROOT / "skills" / "clusterx-manage-jobs"
+SKILL_VERSION = (SKILL / "VERSION").read_text(encoding="utf-8").strip()
+ARCHIVE_NAME = f"clusterx-manage-jobs-{SKILL_VERSION}.tar.gz"
 EXCLUDED_PARTS = {"__pycache__"}
 FORBIDDEN_RUNTIME_TEXT = (
     "lark-cli",
@@ -77,6 +78,7 @@ def build_archive(output_dir: Path) -> dict[str, object]:
         "archive": str(archive),
         "checksum": str(checksum),
         "sha256": digest,
+        "version": SKILL_VERSION,
         "files": len(included_files()),
     }
 

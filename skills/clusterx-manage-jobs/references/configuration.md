@@ -1,0 +1,153 @@
+# Clusterx 配置分层
+
+## 配置位置与优先级
+
+Clusterx 本身通过 `CLUSTERX_CFG_PATH` 读取指定配置。使用本 Skill 时，按以下
+顺序选择一份完整配置：
+
+1. 包装器的 `--config`；
+2. 环境变量 `CLUSTERX_CFG_PATH`；
+3. 从当前工作目录向上找到的最近 `.clusterx/clusterx.yaml`；
+4. 显式设置 `DEV_ENV` 时的 `${DEV_ENV}/clusterx/clusterx.yaml`；
+5. 原生默认路径 `~/.config/clusterx.yaml`。
+
+项目配置完整替换全局配置，不做字段合并，也不生成包含密钥的临时文件。
+可从 `assets/clusterx.example.yaml` 复制一份无密钥 SSP 模板，在本机填写
+占位符后设置为 `600`。不要把填写后的配置加入 Git。
+
+模板中的 `mount` 演示一份完整的多挂载配置：两个 `PV_AFS` 文件存储和两个
+`PV_AOSS` 对象存储。按实际需求删除多余条目；文件存储填写 `id` 和
+`mount_path`，对象存储填写 `name`、`endpoint`、`mount_path` 以及受保护的
+`metadata.items` 凭据。不要把真实挂载 ID、内部 endpoint、路径或凭据写回模板。
+
+## 全局配置
+
+默认将跨项目共用的持久化配置保存到：
+
+```text
+~/.config/clusterx.yaml
+```
+
+如团队开发环境显式设置了 `DEV_ENV`，也可保存到
+`${DEV_ENV}/clusterx/clusterx.yaml`。文件及链接最终目标必须仅允许所有者访问：
+
+```bash
+chmod 600 ~/.config/clusterx.yaml
+```
+
+## 项目配置
+
+项目需要不同集群、队列、镜像、挂载或凭据时，在项目根目录创建：
+
+```text
+.clusterx/clusterx.yaml
+```
+
+它必须包含一份完整有效的 Clusterx 配置，并设置为 `600`。将 `.clusterx/`
+加入项目 `.gitignore`，不要提交真实配置。
+
+## Skill 命令入口
+
+先安装独立客户端（它提供 Monitor CLI 和 Clusterx 包装器），再检查配置：
+
+```bash
+python3 -m pip install clusterx-monitor-cli
+```
+
+```bash
+clusterx-preflight --cwd <project-dir> --tmpdir <shared-tmpdir>
+```
+
+通过统一包装器调用 Clusterx：
+
+```bash
+clusterx-exec --cwd <project-dir> -- list
+clusterx-exec --cwd <project-dir> -- run <arguments>
+clusterx-exec --cwd <project-dir> -- get-job <job-id> --workers
+clusterx-exec --cwd <project-dir> -- log <job-id> --worker <worker-name>
+clusterx-exec --cwd <project-dir> -- log <job-id> --hours 6
+```
+
+包装器只报告配置来源和路径，不输出配置值。
+
+训练任务提交还读取不含用户或分组信息的
+`assets/resource-policy.json`。有 GPU 时 CPU 上限为
+`GPU × cpu_per_gpu`，0 GPU 时使用 `zero_gpu_max_cpu_per_node`。可在包装器的
+`--` 之前传 `--resource-policy <path>`，也可设置
+`CLUSTERX_RESOURCE_POLICY`；显式参数优先于环境变量，环境变量优先于 Skill
+内置策略。该校验不依赖 monitor 服务。
+
+队列监控和调度模拟只访问配置的 `clusterx-monitor` 服务缓存，不读取上述
+Clusterx 配置，也不会在服务不可用时回退到实时采集。Monitor 可以部署在一台
+开发机上，由其他开发机共享：
+
+```bash
+clusterx-monitor-cli status --format json
+clusterx-monitor-cli overview
+clusterx-monitor-cli groups --violations-only
+clusterx-monitor-cli plan --nodes 2 --gpus-per-node 8 \
+  --strategy min-gpu --strategy min-workloads \
+  --candidate-scope all --candidate-node-scope outside_selected_groups \
+  --group research --placement-scope borrowed_only --alternatives 3
+clusterx-monitor-cli watch --view alerts --count 10 --format jsonl
+```
+
+服务地址按以下优先级解析：命令行 `--endpoint`、环境变量
+`CLUSTERX_MONITOR_URL`、默认值 `http://127.0.0.1:8765`。团队应通过统一的
+dev-env 环境配置在每台开发机注入共享地址，例如：
+
+```bash
+export CLUSTERX_MONITOR_URL=http://monitor-dev.example:8765
+export CLUSTERX_USER=<cluster-user>
+```
+
+`CLUSTERX_USER` is the caller-supplied Clusterx identity used by
+`clusterx-monitor-cli nodes --mine` and the Skill wrapper's node-policy check.
+It is read only when no explicit `--user` or `--cluster-user` is supplied and
+is never inferred from `$USER`. The shared `env.sh` loader should source these
+values from the machine's private dev-env file rather than duplicating them in
+the Skill package or repository.
+
+调度模拟的 `--candidate-scope` 仍表示资源负载形态；节点归属范围单独由
+`--candidate-node-scope all|selected_groups|outside_selected_groups` 控制，后两者
+复用重复的 `--group` 参数。Workload 的节点使用关系由
+`--placement-scope any|owned_only|borrowed_only|mixed|includes_borrowed` 控制。
+这些条件都基于固定快照的有效公开节点归属。节点归属约束关闭时，服务端将有效
+范围报告为全部节点。
+
+不要把真实内部地址写入 Skill 包或项目仓库。安装 Skill 后从任意目录调用时，
+使用安装后的 `clusterx-monitor-cli` 命令；客户端包和 Skill 包可以独立升级。
+
+Monitor 服务端另外要求一份权限为 `600` 的本地私有分组文件。仓库开发时从
+`config/groups.example.yaml` 复制为被 Git 忽略的
+`config/groups.local.yaml`，只在本机填写真实组名、quota 和拼音用户名。
+每个 group 的 `gpu_quota`、`cpu_quota`、`memory_quota_gib` 相互独立且均可省略；
+省略或填写 `null` 表示对应资源不限。`remainder` 只允许用于
+`default.gpu_quota`，`groups.default` 本身仍然必需。现有仅填写 GPU quota 的配置
+无需迁移，CPU 和内存不会从 GPU quota 派生。
+服务通过 `--policy-config` 加载公共策略，通过 `--group-config` 加载私有分组；
+首次缺失或校验失败时服务进入受认证的 `setup-required`，管理员可在 Web 中查看
+损坏文件的原始 JSON/YAML 并修复；两份文件均有效后开始采集，无需重启。运行中
+的错误继续使用完整 last-known-good 组合。Monitor 对 Clusterx 只读，但管理员
+界面会以 revision 校验、备份和原子替换方式写入这两份本地配置。
+
+分组文件还可包含：
+
+```yaml
+node_allocation:
+  enabled: false
+groups:
+  team-a:
+    gpu_quota: 8
+    members: [alice]
+    nodes: [node-001]
+```
+
+该开关只作用于当前 Monitor 配置的 queue。开启时节点归属公开且互斥，未显式分配的在线节点有效
+归属 `default`；placement 规则只产生 advisory 告警。关闭时 Skill 不添加节点限制，Monitor CLI
+访问范围为全部 queue 节点。Pending workload 没有节点 placement，不产生节点归属告警。
+
+公共策略中的 `planning.default_cpu_per_gpu` 与
+`planning.default_memory_gib_per_gpu` 是标准调度画像。方案未显式给出 CPU/内存
+时由快照内画像推导；节点的 `effective_free_gpu`、`stranded_gpu` 和
+`cpu-memory-blocked` 也相对于该画像，不表示更小的显式任务一定无法调度。

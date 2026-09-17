@@ -4,7 +4,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "skill/clusterx-manage-jobs/scripts/redact.py"
+MODULE_PATH = ROOT / "client/src/clusterx_monitor_cli/redact.py"
 SPEC = importlib.util.spec_from_file_location("clusterx_redact", MODULE_PATH)
 redact_module = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader

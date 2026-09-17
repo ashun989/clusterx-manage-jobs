@@ -63,8 +63,8 @@ const baseSnapshot: Snapshot = {
     { severity: "warning", kind: "telemetry", subject: "node-a", message: "partial telemetry", code: "telemetry.partial", category: "telemetry", subject_type: "node", tags: ["partial"], finding_categories: ["telemetry"], finding_codes: ["telemetry.partial"], finding_tags: ["partial"] },
   ],
   groups: [
-    { group: "group-a", status: "compliant", gpu_quota: 16, cpu_quota: null, memory_quota_gib: null, allocated_gpu: 4, allocated_cpu: 56, allocated_memory_gib: 960, members: ["alice"], over_resources: [], policy_findings: [], finding_categories: [], finding_codes: [], finding_tags: [], telemetry: telemetry(4, 50, 1000) },
-    { group: "group-b", status: "violation", gpu_quota: 4, cpu_quota: 56, memory_quota_gib: 960, allocated_gpu: 8, allocated_cpu: 112, allocated_memory_gib: 1920, members: ["bob"], over_resources: ["gpu", "cpu", "memory"], policy_findings: [quotaFinding], finding_categories: ["quota"], finding_codes: ["quota.gpu"], finding_tags: ["quota", "gpu"], telemetry: telemetry(8, 80, 2600) },
+    { group: "group-a", status: "compliant", pending_pressure: { state: "inactive", eligible_jobs: 0, unknown_age_jobs: 0, min_jobs: 1, min_wait_minutes: 10 }, gpu_quota: 16, cpu_quota: null, memory_quota_gib: null, allocated_gpu: 4, allocated_cpu: 56, allocated_memory_gib: 960, members: ["alice"], over_resources: [], policy_findings: [], finding_categories: [], finding_codes: [], finding_tags: [], telemetry: telemetry(4, 50, 1000) },
+    { group: "group-b", status: "violation", pending_pressure: { state: "active", eligible_jobs: 1, unknown_age_jobs: 0, min_jobs: 1, min_wait_minutes: 10 }, gpu_quota: 4, cpu_quota: 56, memory_quota_gib: 960, allocated_gpu: 8, allocated_cpu: 112, allocated_memory_gib: 1920, members: ["bob"], over_resources: ["gpu", "cpu", "memory"], policy_findings: [quotaFinding], finding_categories: ["quota"], finding_codes: ["quota.gpu"], finding_tags: ["quota", "gpu"], telemetry: telemetry(8, 80, 2600) },
   ],
   users: [
     { user: "alice", group: "group-a", workload_count: 1, development_instance_count: 0, allocated_gpu: 4, allocated_cpu: 56, allocated_memory_gib: 960, status: "compliant", policy_findings: [], finding_categories: [], finding_codes: [], finding_tags: [], telemetry: telemetry(4, 50, 1000) },
@@ -122,6 +122,7 @@ let emitSnapshot: (() => void) | undefined;
 let adminAuthenticated: boolean;
 let adminResourceRevision: string;
 let adminResourceText: string;
+let adminGroupsRevision: string;
 let logContent: string;
 let logError: string;
 const adminGroupsText = "schema_version: 1\ngroups:\n  group-a:\n    gpu_quota: 16\n    members: [alice]\n  default:\n    gpu_quota: remainder\n    members: []\n";
@@ -140,6 +141,7 @@ describe("Clusterx monitor dashboard", () => {
     adminAuthenticated = false;
     adminResourceRevision = "resource-r1";
     adminResourceText = JSON.stringify(adminResource, null, 2) + "\n";
+    adminGroupsRevision = "group-r1";
     logContent = "first log line\nsecond log line";
     logError = "";
     vi.stubGlobal("EventSource", FakeEventSource);
@@ -148,14 +150,17 @@ describe("Clusterx monitor dashboard", () => {
       if (path.endsWith("/admin/session")) return adminAuthenticated ? { ok: true, status: 200, json: async () => ({ authenticated: true, username: "admin", csrf_token: "csrf-token", expires_at: "2026-08-14T12:00:00Z" }) } : { ok: false, status: 401, statusText: "Unauthorized", json: async () => ({ detail: "administrator authentication required" }) };
       if (path.endsWith("/admin/login")) { adminAuthenticated = true; return { ok: true, status: 200, json: async () => ({ authenticated: true, username: "admin", csrf_token: "csrf-token", expires_at: "2026-08-14T12:00:00Z" }) }; }
       if (path.endsWith("/admin/logout")) { adminAuthenticated = false; return { ok: true, status: 200, json: async () => ({ ok: true }) }; }
-      if (path.endsWith("/admin/config") && !init?.method) return { ok: true, status: 200, json: async () => ({ configured: true, effective_config_valid: true, resource: { format: "json", text: adminResourceText, revision: adminResourceRevision, parse_error: null }, groups: { format: "yaml", text: adminGroupsText, revision: "group-r1", parse_error: null }, validation_error: null, audit_error: null }) };
-      if (path.endsWith("/admin/config/resource") && init?.method === "PUT") { const body = JSON.parse(String(init.body)); adminResourceRevision = "resource-r2"; adminResourceText = body.text; return { ok: true, status: 200, json: async () => ({ configured: true, effective_config_valid: true, resource: { format: "json", text: adminResourceText, revision: adminResourceRevision, parse_error: null }, groups: { format: "yaml", text: adminGroupsText, revision: "group-r1", parse_error: null }, validation_error: null, audit_error: null }) }; }
+      const adminConfig = () => ({ configured: true, effective_config_valid: true, snapshot_id: latestSnapshot.snapshot_id, resource: { format: "json", text: adminResourceText, revision: adminResourceRevision, parse_error: null }, groups: { format: "yaml", text: adminGroupsText, revision: adminGroupsRevision, parse_error: null }, groups_structured: { node_allocation: { enabled: false }, groups: { "group-a": { gpu_quota: 16, cpu_quota: null, memory_quota_gib: null, members: ["alice"], nodes: [] }, default: { gpu_quota: "remainder", cpu_quota: null, memory_quota_gib: null, members: [], nodes: [] } } }, node_options: [{ node: "node-a", id: "node-id-a", state: "RUNNING", total_gpu: 8, allocated_gpu: 4 }, { node: "node-b", id: "node-id-b", state: "RUNNING", total_gpu: 8, allocated_gpu: 8 }], member_options: ["alice", "bob"], validation_error: null, audit_error: null });
+      if (path.endsWith("/admin/config") && !init?.method) return { ok: true, status: 200, json: async () => adminConfig() };
+      if (path.endsWith("/admin/config/resource") && init?.method === "PUT") { const body = JSON.parse(String(init.body)); adminResourceRevision = "resource-r2"; adminResourceText = body.text; return { ok: true, status: 200, json: async () => adminConfig() }; }
+      if (path.endsWith("/admin/config/groups-structured") && init?.method === "PUT") { const body = JSON.parse(String(init.body)); adminGroupsRevision = "group-r2"; return { ok: true, status: 200, json: async () => ({ ...adminConfig(), groups_structured: body }) }; }
+      if (path.endsWith("/admin/node-allocation/plans") && init?.method === "POST") return { ok: true, status: 200, json: async () => ({ snapshot_id: latestSnapshot.snapshot_id, groups_revision: adminGroupsRevision, node_allocation_enabled: true, proposals: [{ strategy: "workload-first", status: "OPTIMAL", feasible: true, groups: { "group-a": { gpu_quota: 16, cpu_quota: null, memory_quota_gib: null, members: ["alice"], nodes: ["node-a"] }, default: { gpu_quota: "remainder", cpu_quota: null, memory_quota_gib: null, members: [], nodes: ["node-b"] } }, assignment: [{ node: "node-a", group: "group-a" }, { node: "node-b", group: "default" }], metrics: { affected_workloads: 0, affected_gpu: 0, affected_users: 0 }, capacity_coverage: [{ group: "group-a", quota: 16, assigned_gpu: 16, deficit: 0, covered: true }], capacity_deficits: [], diagnostics: [] }, { strategy: "gpu-first", status: "OPTIMAL", feasible: true, groups: { "group-a": { gpu_quota: 16, cpu_quota: null, memory_quota_gib: null, members: ["alice"], nodes: ["node-a"] }, default: { gpu_quota: "remainder", cpu_quota: null, memory_quota_gib: null, members: [], nodes: ["node-b"] } }, assignment: [{ node: "node-a", group: "group-a" }, { node: "node-b", group: "default" }], metrics: { affected_workloads: 0, affected_gpu: 0, affected_users: 0 }, capacity_coverage: [{ group: "group-a", quota: 16, assigned_gpu: 16, deficit: 0, covered: true }], capacity_deficits: [], diagnostics: [] }, { strategy: "user-first", status: "OPTIMAL", feasible: true, groups: { "group-a": { gpu_quota: 16, cpu_quota: null, memory_quota_gib: null, members: ["alice"], nodes: ["node-a"] }, default: { gpu_quota: "remainder", cpu_quota: null, memory_quota_gib: null, members: [], nodes: ["node-b"] } }, assignment: [{ node: "node-a", group: "group-a" }, { node: "node-b", group: "default" }], metrics: { affected_workloads: 0, affected_gpu: 0, affected_users: 0 }, capacity_coverage: [{ group: "group-a", quota: 16, assigned_gpu: 16, deficit: 0, covered: true }], capacity_deficits: [], diagnostics: [] }] }) };
       if (path.includes("/workloads/") && path.includes("/logs?")) {
         if (logError) return { ok: false, status: 502, statusText: "Bad Gateway", json: async () => ({ detail: logError }) };
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "1.1.1", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "2.0.0", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       if (path.includes("/history?")) return { ok: true, status: 200, json: async () => ({ retained_snapshots: 2, history_capacity: 2880, window_started_at: "2026-08-14T00:59:30Z", newest_at: "2026-08-14T01:00:00Z", points: [
         { snapshot_id: "snapshot-0", generated_at: "2026-08-14T00:59:30Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: { fragmented: 1, "gpu-full": 1 } },
         { snapshot_id: "snapshot-1", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 12, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: { fragmented: 1, "gpu-full": 1 } },
@@ -224,12 +229,12 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
 
-    fireEvent.click(screen.getByLabelText("查看 v1.1.1 更新内容"));
+    fireEvent.click(screen.getByLabelText("查看 v2.0.0 更新内容"));
 
     expect(screen.getByText("本版更新")).toBeInTheDocument();
-    expect(screen.getByText(/低利用率判定增加历史平均每卡功率/)).toBeInTheDocument();
-    expect(screen.getByText(/缺失功率不阻断原有 Compute \/ Mem 判定/)).toBeInTheDocument();
-    expect(screen.getByText(/低利用率检查覆盖运行中的 trainingJob/)).toBeInTheDocument();
+    expect(screen.getByText(/Monitor 拆分为可独立发布/)).toBeInTheDocument();
+    expect(screen.getByText(/组节点归属支持管理员开关/)).toBeInTheDocument();
+    expect(screen.getByText(/独立 Web 支持通过 config.js/)).toBeInTheDocument();
   });
 
   it("provides an operational overview and global entity search", async () => {
@@ -333,7 +338,7 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(document.body);
     expect(menu).toHaveProperty("open", false);
 
-    const versionSummary = screen.getByLabelText("查看 v1.1.1 更新内容");
+    const versionSummary = screen.getByLabelText("查看 v2.0.0 更新内容");
     const versionMenu = versionSummary.closest("details")!;
     fireEvent.click(versionSummary);
     expect(versionMenu).toHaveProperty("open", true);
@@ -419,7 +424,7 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "groups" }));
-    expect(screen.getByText("v1.1.1")).toBeInTheDocument();
+    expect(screen.getByText("v2.0.0")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);
@@ -781,6 +786,29 @@ describe("Clusterx monitor dashboard", () => {
     expect(payload.filters.violation_codes).toEqual(["quota.gpu"]);
   });
 
+  it("combines resource, group-owned node and placement scopes when allocation is enabled", async () => {
+    latestSnapshot.node_allocation = {
+      enabled: true, access_scope: "group-owned",
+      assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+      configured_assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+    };
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "planner" }));
+    const nodeScope = screen.getByRole("combobox", { name: "节点归属范围" });
+    expect(nodeScope).toBeDisabled();
+    fireEvent.click(screen.getByText("分组", { selector: ".planner-multi > summary > span" }));
+    fireEvent.click(screen.getByLabelText("分组：group-a"));
+    expect(nodeScope).not.toBeDisabled();
+    fireEvent.change(nodeScope, { target: { value: "outside_selected_groups" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "节点使用关系" }), { target: { value: "borrowed_only" } });
+    fireEvent.click(screen.getByRole("button", { name: "计算方案" }));
+    await screen.findByRole("button", { name: /min-gpu #1/ });
+    const call = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).endsWith("/plans") && init?.method === "POST");
+    const payload = JSON.parse(String(call?.[1]?.body));
+    expect(payload.filters).toMatchObject({ groups: ["group-a"], candidate_node_scope: "outside_selected_groups", placement_scope: "borrowed_only" });
+  });
+
   it("enters an editable exact-node simulation from problem details", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
@@ -805,6 +833,54 @@ describe("Clusterx monitor dashboard", () => {
     expect(payload.target).toEqual({ nodes: 1, gpus_per_node: 8, cpus_per_node: 112, memory_per_node_gib: 1920 });
   });
 
+  it("prefills workload group and owned node scope in the planner", async () => {
+    latestSnapshot.node_allocation = {
+      enabled: true, access_scope: "group-owned",
+      assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+      configured_assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+    };
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "workloads" }));
+    fireEvent.click(screen.getByRole("row", { name: "查看 train-a 详情" }));
+    const drawer = screen.getByRole("dialog", { name: "train-a 详情" });
+    fireEvent.click(within(drawer).getByRole("button", { name: "进入调度模拟" }));
+
+    const groupFilter = screen.getByText("分组", { selector: ".planner-multi > summary > span" }).closest("details")!;
+    expect(groupFilter.querySelector("summary")).toHaveTextContent("group-a");
+    expect(screen.getByRole("combobox", { name: "节点归属范围" })).toHaveValue("selected_groups");
+    expect(screen.getByText("范围会基于已选 group 的节点归属计算。")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "清除上下文" }));
+    expect(screen.getByText("分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
+    expect(screen.getByRole("combobox", { name: "节点归属范围" })).toHaveValue("all");
+  });
+
+  it("prefills a pending workload group without selecting the pending workload as a release candidate", async () => {
+    const pending: Workload = {
+      ...workload("pending-a", "pending-a", "charlie", "group-a", 3, "unused"),
+      policy_status: "pending", placements: [], gpus: [], telemetry: telemetry(0, null, null),
+      total_gpu: 3, total_cpu: null, total_memory_gib: 700, resource_basis: "requested",
+    };
+    latestSnapshot = { ...latestSnapshot, pending_workloads: [pending] };
+    latestSnapshot.node_allocation = {
+      enabled: true, access_scope: "group-owned",
+      assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+      configured_assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+    };
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "workloads" }));
+    fireEvent.click(screen.getByRole("row", { name: "查看 pending-a 详情" }));
+    const drawer = screen.getByRole("dialog", { name: "pending-a 详情" });
+    fireEvent.click(within(drawer).getByRole("button", { name: "进入调度模拟" }));
+
+    expect(screen.getByText("分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("group-a");
+    expect(screen.getByRole("combobox", { name: "节点归属范围" })).toHaveValue("selected_groups");
+    expect(screen.getByText("指定 Workload", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
+    expect(screen.getByText("类型", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
+  });
+
   it("filters array-valued finding facets and renders finding details", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
@@ -823,6 +899,7 @@ describe("Clusterx monitor dashboard", () => {
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "rules" }));
     expect(screen.getByRole("heading", { name: "规则说明" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /Monitor 规则产生层级与传播/ })).toBeInTheDocument();
     expect(screen.getByText("utilization.low_gpu_activity")).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "CPU quota" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "内存 quota GiB" })).toBeInTheDocument();
@@ -830,6 +907,26 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByText("window hours")).toBeInTheDocument();
     expect(screen.getByText(/remainder（当前 504）/)).toBeInTheDocument();
     expect(screen.queryByText("alice")).not.toBeInTheDocument();
+  });
+
+  it("shows effective node assignments in rules and group/node details", async () => {
+    latestSnapshot.node_allocation = {
+      enabled: true, access_scope: "group-owned",
+      assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+      configured_assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+    };
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "rules" }));
+    expect(screen.getByRole("columnheader", { name: "有效节点" })).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: /group-a/ })).toHaveTextContent("node-a");
+    fireEvent.click(screen.getByRole("button", { name: "groups" }));
+    fireEvent.click(screen.getByRole("row", { name: "查看 group-a 详情" }));
+    expect(screen.getByRole("dialog", { name: "group-a 详情" })).toHaveTextContent("有效节点 GPU");
+    expect(screen.getByRole("dialog", { name: "group-a 详情" })).toHaveTextContent("node-a");
+    fireEvent.click(within(screen.getByRole("dialog", { name: "group-a 详情" })).getByRole("button", { name: /node-a/ }));
+    expect(screen.getByRole("dialog", { name: "node-a 详情" })).toHaveTextContent("有效归属组");
+    expect(screen.getByRole("dialog", { name: "node-a 详情" })).toHaveTextContent("group-a");
   });
 
   it("authenticates in the admin drawer and saves configuration with CSRF and revision", async () => {
@@ -859,5 +956,87 @@ describe("Clusterx monitor dashboard", () => {
     expect(JSON.parse(String(request?.[1]?.body)).revision).toBe("resource-r1");
     expect(JSON.parse(JSON.parse(String(request?.[1]?.body)).text).low_utilization).toMatchObject({ gpu_power_threshold_pct: 25, gpu_power_limit_w: 300 });
     expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
+  });
+
+  it("edits group membership, node allocation and toggle through structured controls", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "管理员配置" }));
+    fireEvent.change(await screen.findByLabelText("管理员用户名"), { target: { value: "admin" } });
+    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "a-strong-test-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+    await screen.findByText("组与节点分配");
+    fireEvent.click(screen.getByRole("checkbox", { name: /启用节点归属约束/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "节点：node-a" }));
+    expect(vi.mocked(fetch).mock.calls.some(([input, init]) => String(input).endsWith("/admin/config/groups-structured") && init?.method === "PUT")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "确认应用组与节点分配" }));
+    expect(screen.getByRole("dialog", { name: "确认应用组与节点分配" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认并应用" }));
+    await screen.findByText("私有分组与节点分配已校验并写入本地配置。");
+    const request = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).endsWith("/admin/config/groups-structured") && init?.method === "PUT");
+    expect(request?.[1]?.headers).toMatchObject({ "X-CSRF-Token": "csrf-token" });
+    expect(JSON.parse(String(request?.[1]?.body))).toMatchObject({ revision: "group-r1", node_allocation: { enabled: true } });
+  });
+
+  it("previews cold-start allocation alternatives and only applies a selected draft on save", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "管理员配置" }));
+    fireEvent.change(await screen.findByLabelText("管理员用户名"), { target: { value: "admin" } });
+    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "a-strong-test-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+    fireEvent.click(await screen.findByRole("button", { name: "计算冷启动分配建议" }));
+    expect(await screen.findByText("冷启动分配建议")).toBeInTheDocument();
+    expect(screen.getByText("workload 优先")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "回填此方案" })).toHaveLength(3);
+    fireEvent.click(screen.getAllByRole("button", { name: "回填此方案" })[0]);
+    expect(await screen.findByText(/已将“workload-first”方案回填到草稿/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认应用组与节点分配" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认并应用" }));
+    await screen.findByText("私有分组与节点分配已校验并写入本地配置。");
+    const request = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).endsWith("/admin/config/groups-structured") && init?.method === "PUT");
+    expect(JSON.parse(String(request?.[1]?.body)).groups["group-a"].nodes).toEqual(["node-a"]);
+  });
+
+  it("keeps group edits local, renames groups, and moves deleted group assets to default", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "管理员配置" }));
+    fireEvent.change(await screen.findByLabelText("管理员用户名"), { target: { value: "admin" } });
+    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "a-strong-test-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+    await screen.findByText("组与节点分配");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "新增组" })[0]);
+    const name = screen.getByRole("textbox", { name: "组名" });
+    fireEvent.change(name, { target: { value: "temporary-team" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "成员：bob" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "节点：node-b" }));
+    expect(vi.mocked(fetch).mock.calls.some(([input, init]) => String(input).endsWith("/admin/config/groups-structured") && init?.method === "PUT")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: /temporary-team/ }));
+    fireEvent.click(screen.getByRole("button", { name: "删除此组" }));
+    expect(screen.getByRole("button", { name: /default/ })).toHaveClass("active");
+    expect(screen.getByRole("checkbox", { name: "成员：bob" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "节点：node-b" })).toBeChecked();
+  });
+
+  it("allows temporary cross-group conflicts and validates them only on confirmation", async () => {
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "管理员配置" }));
+    fireEvent.change(await screen.findByLabelText("管理员用户名"), { target: { value: "admin" } });
+    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "a-strong-test-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+    await screen.findByText("组与节点分配");
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "节点：node-a" }));
+    fireEvent.click(screen.getByRole("button", { name: /default/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "节点：node-a" }));
+    expect(screen.getByText(/节点“node-a”同时属于/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认应用组与节点分配" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认并应用" }));
+    expect(screen.getByText("应用前校验未通过，草稿仍保留：")).toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([input, init]) => String(input).endsWith("/admin/config/groups-structured") && init?.method === "PUT")).toBe(false);
   });
 });

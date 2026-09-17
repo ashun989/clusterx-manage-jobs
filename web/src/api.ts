@@ -7,8 +7,14 @@ export class ApiError extends Error {
   }
 }
 
+const configuredBase = typeof window !== "undefined"
+  ? window.__CLUSTERX_MONITOR_CONFIG__?.apiBaseUrl
+  : "";
+const apiBase = (configuredBase ?? "").trim().replace(/\/$/, "");
+export const monitorApiUrl = (path: string) => `${apiBase}/api/v1${path}`;
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api/v1${path}`, init);
+  const response = await fetch(monitorApiUrl(path), { credentials: "include", ...init });
   if (!response.ok) {
     let message = response.statusText;
     try {

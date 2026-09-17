@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { monitorApiUrl } from "./api";
 import { formatPowerPercent, statusClass } from "./Table";
 import { useDialogFocus } from "./useDialogFocus";
 import type { Alert, DetailRef, GroupSummary, NodeSummary, PolicyFinding, Snapshot, Telemetry, UserSummary, Workload, WorkloadLogResponse } from "./types";
@@ -72,8 +73,33 @@ function RelatedList({ title, items, kind, open }: { title: string; items: Array
   </section>;
 }
 
+type PlacementRelation = "owned" | "borrowed" | "unknown";
+
+function placementRelations(workload: Workload, snapshot: Snapshot): PlacementRelation[] {
+  if (!snapshot.node_allocation?.enabled) return workload.placements.map(() => "owned");
+  const owners = new Map<string, string>();
+  Object.entries(snapshot.node_allocation.assignments ?? {}).forEach(([group, nodes]) => nodes.forEach((node) => owners.set(node, group)));
+  return workload.placements.map((placement) => {
+    const owner = owners.get(placement.node);
+    if (!owner) return "unknown";
+    return owner === workload.group ? "owned" : "borrowed";
+  });
+}
+
+function placementSummary(workload: Workload, snapshot: Snapshot): string {
+  const relations = placementRelations(workload, snapshot);
+  const labels = new Set(relations.map((relation) => ({ owned: "本组", borrowed: "借用", unknown: "未知" }[relation])));
+  return [...labels].join(" + ") || "无 placement";
+}
+
 function GroupDetail({ group, snapshot, open, planFrom }: { group: GroupSummary; snapshot: Snapshot; open: (ref: DetailRef) => void; planFrom: (ref: DetailRef) => void }) {
   const workloads = allWorkloads(snapshot).filter((item) => item.group === group.group);
+  const allocationEnabled = snapshot.node_allocation?.enabled === true;
+  const effectiveNodes = allocationEnabled ? (snapshot.node_allocation?.assignments?.[group.group] ?? []) : [];
+  const configuredNodes = allocationEnabled ? (snapshot.node_allocation?.configured_assignments?.[group.group] ?? []) : [];
+  const nodeDetails = snapshot.nodes.filter((node) => effectiveNodes.includes(node.node));
+  const nodeGpu = nodeDetails.reduce((total, node) => total + node.total_gpu, 0);
+  const borrowedWorkloads = workloads.filter((item) => placementRelations(item, snapshot).includes("borrowed"));
   return <>
     <span className="eyebrow">Group</span><h2>{group.group}</h2><DetailActions detailRef={{ kind: "group", id: group.group, label: group.group }} planFrom={planFrom} /><span className={statusClass(group.status)}>{group.status}</span>
     <Metrics>
@@ -81,9 +107,19 @@ function GroupDetail({ group, snapshot, open, planFrom }: { group: GroupSummary;
       <Metric label="CPU" value={`${number(group.allocated_cpu)} / ${quota(group.cpu_quota)}`} />
       <Metric label="内存 GiB" value={`${number(group.allocated_memory_gib)} / ${quota(group.memory_quota_gib)}`} />
       <Metric label="超限资源" value={group.over_resources.length ? group.over_resources.join(", ") : "无"} />
+      <Metric label="Pending 压力" value={<span className={statusClass(group.pending_pressure?.state)}>{group.pending_pressure?.state ?? "unknown"}</span>} />
     </Metrics>
+    <p className="muted">本组有效排队任务：{number(group.pending_pressure?.eligible_jobs)}；等待时间未知：{number(group.pending_pressure?.unknown_age_jobs)}；阈值：{number(group.pending_pressure?.min_jobs)} 个、{number(group.pending_pressure?.min_wait_minutes)} 分钟。</p>
+    <section className="detail-section"><h3>节点归属</h3><Metrics>
+      <Metric label="有效节点" value={allocationEnabled ? number(effectiveNodes.length) : "全部 queue 节点"} />
+      <Metric label="有效节点 GPU" value={allocationEnabled ? number(nodeGpu) : "—"} />
+      <Metric label="配置节点" value={allocationEnabled ? number(configuredNodes.length) : "—"} />
+      <Metric label="借用中的 Workload" value={allocationEnabled ? number(borrowedWorkloads.length) : "—"} />
+    </Metrics>{allocationEnabled && configuredNodes.join(", ") !== effectiveNodes.join(", ") && <p className="muted">配置节点：{configuredNodes.join(", ") || "无"}；有效节点：{effectiveNodes.join(", ") || "无"}</p>}</section>
+    {allocationEnabled && <RelatedList title="有效节点" kind="node" open={open} items={nodeDetails.map((node) => ({ id: node.node, label: node.node, meta: `${number(node.allocated_gpu)}/${number(node.total_gpu)} GPU · ${node.state}` }))} />}
     <RelatedList title="当前活跃用户" kind="user" open={open} items={group.members.map((user) => ({ id: user, label: user, meta: snapshot.users.some((item) => item.user === user) ? undefined : "当前无资源" }))} />
     <RelatedList title="关联 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.user} · ${workloadResources(item)}` }))} />
+    {allocationEnabled && <RelatedList title="使用借用节点的 Workload" kind="workload" open={open} items={borrowedWorkloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.user} · ${placementSummary(item, snapshot)}` }))} />}
     <FindingsPanel findings={group.policy_findings} />
     <TelemetryPanel telemetry={group.telemetry} />
   </>;
@@ -108,8 +144,11 @@ function UserDetail({ user, snapshot, open, planFrom }: { user: UserSummary; sna
 function NodeDetail({ node, snapshot, open, planFrom }: { node: NodeSummary; snapshot: Snapshot; open: (ref: DetailRef) => void; planFrom: (ref: DetailRef) => void }) {
   const workloadIds = new Set(Object.keys(node.workloads));
   const workloads = allWorkloads(snapshot).filter((item) => workloadIds.has(item.workload_id) || item.placements.some((placement) => placement.node === node.node));
+  const allocationEnabled = snapshot.node_allocation?.enabled === true;
+  const configuredOwners = allocationEnabled ? Object.entries(snapshot.node_allocation?.configured_assignments ?? {}).filter(([, nodes]) => nodes.includes(node.node)).map(([group]) => group) : [];
+  const ownerGroup = allocationEnabled ? snapshot.groups.find((group) => group.group === node.assigned_group) : undefined;
   return <>
-    <span className="eyebrow">Node · {node.state}</span><h2>{node.node}</h2><DetailActions detailRef={{ kind: "node", id: node.node, label: node.node }} planFrom={planFrom} /><span className={statusClass(node.classification)}>{node.classification}</span><p className="muted">{node.host_ip || "无 Host IP"}</p>
+    <span className="eyebrow">Node · {node.state}</span><h2>{node.node}</h2><DetailActions detailRef={{ kind: "node", id: node.node, label: node.node }} planFrom={planFrom} /><span className={statusClass(node.classification)}>{node.classification}</span><p className="muted">{node.host_ip || "无 Host IP"}</p><p className="muted">节点归属：{allocationEnabled ? node.assigned_group ?? "未知归属" : "节点约束已关闭，全部 queue 节点可用"}</p>
     {!node.planning_eligible && <p className="banner">该节点资源归属不一致，仅用于监控，不参与调度模拟。{(node.planning_exclusion_reasons ?? []).join(", ")}</p>}
     <Metrics>
       <Metric label="GPU" value={`${number(node.allocated_gpu)} / ${number(node.total_gpu)}`} />
@@ -119,11 +158,17 @@ function NodeDetail({ node, snapshot, open, planFrom }: { node: NodeSummary; sna
       <Metric label="受阻 GPU" value={number(node.stranded_gpu)} />
       <Metric label="原始空闲 GPU" value={number(node.free_gpu)} />
     </Metrics>
+    {allocationEnabled && <section className="detail-section"><h3>归属信息</h3><Metrics>
+      <Metric label="有效归属组" value={ownerGroup ? <button className="inline-link" type="button" onClick={() => open({ kind: "group", id: ownerGroup.group, label: ownerGroup.group })}>{ownerGroup.group}</button> : "未知"} />
+      <Metric label="显式配置归属" value={configuredOwners.join(", ") || "无（默认归属）"} />
+      <Metric label="归属组 GPU quota" value={ownerGroup ? quota(ownerGroup.gpu_quota) : "—"} />
+      <Metric label="归属组已用 GPU" value={ownerGroup ? number(ownerGroup.allocated_gpu) : "—"} />
+    </Metrics></section>}
     <section className="detail-section"><h3>资源归属</h3><Metrics>
       <Metric label="未归属 GPU / CPU / GiB" value={`${number(node.unattributed.gpu)} / ${number(node.unattributed.cpu)} / ${number(node.unattributed.memory_gib)}`} />
       <Metric label="归属超额 GPU / CPU / GiB" value={`${number(node.attribution_excess.gpu)} / ${number(node.attribution_excess.cpu)} / ${number(node.attribution_excess.memory_gib)}`} />
     </Metrics></section>
-    <RelatedList title="节点 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.user} · ${workloadResources(item)}` }))} />
+    <RelatedList title="节点 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.user} · ${workloadResources(item)}${allocationEnabled ? ` · ${placementSummary(item, snapshot)}` : ""}` }))} />
     <TelemetryPanel telemetry={node.telemetry} />
   </>;
 }
@@ -192,7 +237,7 @@ function WorkloadLogPanel({ workload, snapshotId }: { workload: Workload; snapsh
     try {
       const query = new URLSearchParams({ snapshot_id: snapshotId, worker, lines: String(LOG_FETCH_LINES) });
       const response = await fetch(
-        `/api/v1/workloads/${encodeURIComponent(workload.workload_id)}/logs?${query}`,
+        monitorApiUrl(`/workloads/${encodeURIComponent(workload.workload_id)}/logs?${query}`),
         { cache: "no-store", headers: { Accept: "application/json" } },
       );
       if (!response.ok) {

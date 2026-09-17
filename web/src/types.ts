@@ -38,7 +38,7 @@ export type TaskResource = {
 export type PolicyFinding = {
   code: string;
   category: string;
-  status: "violation" | "burst" | "unknown" | string;
+  status: "violation" | "burst" | "warning" | "unknown" | string;
   message: string;
   tags: string[];
   observed: Record<string, unknown>;
@@ -120,6 +120,13 @@ export type WorkloadLogResponse = {
 export type GroupSummary = FindingFacets & {
   group: string;
   status: string;
+  pending_pressure: {
+    state: "active" | "inactive" | "unknown" | string;
+    eligible_jobs: number;
+    unknown_age_jobs: number;
+    min_jobs: number;
+    min_wait_minutes: number;
+  };
   gpu_quota: number | null;
   cpu_quota: number | null;
   memory_quota_gib: number | null;
@@ -148,6 +155,7 @@ export type NodeSummary = {
   id: string;
   host_ip: string;
   state: string;
+  assigned_group?: string | null;
   allocated_gpu: number;
   total_gpu: number;
   allocated_cpu: number;
@@ -209,6 +217,7 @@ export type PolicyResponse = {
       cpu_quota: number | null;
       memory_quota_gib: number | null;
       member_count: number;
+      effective_member_count?: number;
     }>;
   } | null;
 };
@@ -226,6 +235,12 @@ export type Snapshot = {
   planning_profile: { default_cpu_per_gpu: number; default_memory_gib_per_gpu: number };
   freshness: { stale: boolean; age_seconds: number; last_error: string | null };
   policy_config?: { valid: boolean; using_last_known_good: boolean; error: string | null };
+  node_allocation?: {
+    enabled: boolean;
+    access_scope: "group-owned" | "all" | string;
+    assignments?: Record<string, string[]>;
+    configured_assignments?: Record<string, string[]>;
+  };
   warnings: string[];
   alerts: Alert[];
   users: UserSummary[];
@@ -311,6 +326,15 @@ export type PlanResult = {
   resolved_target: { nodes: number; gpus_per_node: number; cpus_per_node: number; memory_per_node_gib: number };
   defaults_applied: string[];
   planning_profile: { default_cpu_per_gpu: number; default_memory_gib_per_gpu: number };
+  candidate_selection?: {
+    resource_scope: "fragmented" | "full" | "all" | string;
+    node_ownership_scope: "all" | "selected_groups" | "outside_selected_groups" | string;
+    effective_node_ownership_scope: "all" | "selected_groups" | "outside_selected_groups" | string;
+    placement_scope: "any" | "owned_only" | "borrowed_only" | "mixed" | "includes_borrowed" | string;
+    effective_placement_scope: "any" | "owned_only" | "borrowed_only" | "mixed" | "includes_borrowed" | string;
+    groups: string[];
+    node_allocation_enabled: boolean;
+  };
   planning_exclusions: {
     node_count: number;
     workload_count: number;

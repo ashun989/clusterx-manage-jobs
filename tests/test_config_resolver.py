@@ -7,18 +7,23 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "skill/clusterx-manage-jobs/scripts"
+SCRIPTS = ROOT / "client/src"
 sys.path.insert(0, str(SCRIPTS))
+MODULE_ROOT = SCRIPTS / "clusterx_monitor_cli"
 SPEC = importlib.util.spec_from_file_location(
-    "clusterx_config_resolver", SCRIPTS / "config_resolver.py"
+    "clusterx_config_resolver", MODULE_ROOT / "config_resolver.py"
 )
 resolver = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
 sys.modules[SPEC.name] = resolver
 SPEC.loader.exec_module(resolver)
+
+from clusterx_monitor_cli import clusterx_exec
+from clusterx_monitor_cli import monitor_cli
 
 
 class ConfigResolverTests(unittest.TestCase):
@@ -136,7 +141,7 @@ class ConfigResolverTests(unittest.TestCase):
             run = subprocess.run(
                 [
                     sys.executable,
-                    str(SCRIPTS / "clusterx_exec.py"),
+                    str(MODULE_ROOT / "clusterx_exec.py"),
                     "--cwd",
                     str(project),
                     "--",
@@ -152,6 +157,51 @@ class ConfigResolverTests(unittest.TestCase):
                 output.read_text(encoding="utf-8").splitlines(),
                 [str(config.resolve()), "log", "job-1"],
             )
+
+    def test_node_policy_uses_explicit_or_protected_identity_and_never_user_env(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            identity = temp / "identity.yaml"
+            identity.write_text(
+                "schema_version: 1\ncluster_users:\n  https://monitor.test: alice\n",
+                encoding="utf-8",
+            )
+            identity.chmod(0o600)
+            self.assertEqual(
+                clusterx_exec._configured_cluster_user(
+                    "https://monitor.test/", None, identity,
+                ),
+                "alice",
+            )
+            self.assertEqual(
+                clusterx_exec._configured_cluster_user(
+                    "https://monitor.test/", " Bob ", identity,
+                ),
+                "Bob",
+            )
+            with mock.patch.dict(os.environ, {"USER": "wrong-user"}, clear=False):
+                self.assertIsNone(
+                    clusterx_exec._configured_cluster_user(
+                        "https://other.test", None, identity,
+                    )
+                )
+
+    def test_node_policy_warns_on_include_without_rewriting_arguments(self):
+        responses = [
+            mock.Mock(status_code=200, json=lambda: {"node_allocation": {"enabled": True}}),
+            mock.Mock(status_code=200, json=lambda: {
+                "identity": {"group": "team"}, "nodes": [{"node": "team-1"}],
+            }),
+        ]
+        with mock.patch.dict(os.environ, {"CLUSTERX_MONITOR_URL": "https://monitor.test"}, clear=False), \
+             mock.patch.object(clusterx_exec.requests, "get", side_effect=responses), \
+             mock.patch("sys.stderr", new_callable=__import__("io").StringIO) as stderr:
+            error = clusterx_exec._check_node_policy(
+                ["run", "--include", "other-1", "runner.sh"],
+                explicit_user="alice", identity_path=Path("/missing/identity.yaml"),
+            )
+        self.assertIsNone(error)
+        self.assertIn("does not contain any node", stderr.getvalue())
 
     def test_wrapper_redacts_clusterx_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -172,7 +222,7 @@ class ConfigResolverTests(unittest.TestCase):
             run = subprocess.run(
                 [
                     sys.executable,
-                    str(SCRIPTS / "clusterx_exec.py"),
+                    str(MODULE_ROOT / "clusterx_exec.py"),
                     "--cwd",
                     str(project),
                     "--",
@@ -220,7 +270,7 @@ class ConfigResolverTests(unittest.TestCase):
                     run = subprocess.run(
                         [
                             sys.executable,
-                            str(SCRIPTS / "clusterx_exec.py"),
+                            str(MODULE_ROOT / "clusterx_exec.py"),
                             "--cwd",
                             str(project),
                             "--",
@@ -257,7 +307,7 @@ class ConfigResolverTests(unittest.TestCase):
             run = subprocess.run(
                 [
                     sys.executable,
-                    str(SCRIPTS / "clusterx_exec.py"),
+                    str(MODULE_ROOT / "clusterx_exec.py"),
                     "--cwd",
                     str(project),
                     "--",
@@ -313,7 +363,7 @@ class ConfigResolverTests(unittest.TestCase):
                 env["WRAPPER_INVOKED"] = str(invoked)
                 run = subprocess.run(
                     [
-                        sys.executable, str(SCRIPTS / "clusterx_exec.py"),
+                        sys.executable, str(MODULE_ROOT / "clusterx_exec.py"),
                         "--cwd", str(project), "--", "run", *resource_args, "true",
                     ],
                     text=True, capture_output=True, env=env,
@@ -339,7 +389,7 @@ class ConfigResolverTests(unittest.TestCase):
             env["PATH"] = f"{temp}{os.pathsep}{env.get('PATH', '')}"
             env["CLUSTERX_RESOURCE_POLICY"] = str(restrictive)
             command = [
-                sys.executable, str(SCRIPTS / "clusterx_exec.py"),
+                sys.executable, str(MODULE_ROOT / "clusterx_exec.py"),
                 "--cwd", str(project), "--resource-policy", str(permissive), "--",
                 "run", "--gpus-per-task", "1", "--cpus-per-task", "2", "true",
             ]
@@ -350,6 +400,32 @@ class ConfigResolverTests(unittest.TestCase):
                 text=True, capture_output=True, env=env,
             )
             self.assertEqual(environment.returncode, 2)
+
+    def test_cluster_user_precedence_uses_environment_without_falling_back_to_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "identity.yaml"
+            identity.write_text(
+                "schema_version: 1\ncluster_users:\n  http://monitor: mapped-user\n",
+                encoding="utf-8",
+            )
+            identity.chmod(0o600)
+            with mock.patch.dict(os.environ, {"CLUSTERX_USER": "env-user"}, clear=False):
+                self.assertEqual(
+                    clusterx_exec._configured_cluster_user("http://monitor", None, identity),
+                    "env-user",
+                )
+                self.assertEqual(
+                    clusterx_exec._configured_cluster_user("http://monitor", "explicit-user", identity),
+                    "explicit-user",
+                )
+                self.assertEqual(monitor_cli._configured_user(None), "env-user")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("CLUSTERX_USER", None)
+                self.assertEqual(
+                    clusterx_exec._configured_cluster_user("http://monitor", None, identity),
+                    "mapped-user",
+                )
+                self.assertIsNone(monitor_cli._configured_user(None))
 
 
 if __name__ == "__main__":

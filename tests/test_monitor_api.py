@@ -9,17 +9,72 @@ import tempfile
 import unittest
 from unittest import mock
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-RESOURCE_POLICY = ROOT / "skill/clusterx-manage-jobs/assets/resource-policy.json"
+SRC = ROOT / "server/src"
+RESOURCE_POLICY = ROOT / "skills/clusterx-manage-jobs/assets/resource-policy.json"
 GROUP_POLICY = ROOT / "config/groups.example.yaml"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 try:
-    from fastapi.testclient import TestClient
+    import httpx2
 except ImportError:  # pragma: no cover - dependency installation is tested in CI
+    httpx2 = None
+
+
+if httpx2 is not None:
+    class TestClient:
+        """Small synchronous facade over httpx2's async ASGI transport.
+
+        Starlette's blocking-portal TestClient can hang on the Python 3.14
+        environments used by the mixed unittest job.  The application tests
+        do not need lifespan management, so using the ASGI transport directly
+        keeps each request in a bounded event loop without that portal.
+        """
+
+        def __init__(self, app):
+            self.app = app
+            self.cookies = httpx2.Cookies()
+
+        def request(self, method, url, **kwargs):
+            content = kwargs.get("content")
+            if (
+                content is not None
+                and hasattr(content, "__iter__")
+                and not isinstance(content, (bytes, bytearray, str))
+                and not hasattr(content, "__aiter__")
+            ):
+                async def async_content():
+                    for chunk in content:
+                        yield chunk
+
+                kwargs["content"] = async_content()
+
+            async def send():
+                async with httpx2.AsyncClient(
+                    transport=httpx2.ASGITransport(app=self.app),
+                    base_url="http://testserver",
+                    cookies=self.cookies,
+                    follow_redirects=True,
+                ) as client:
+                    response = await client.request(method, url, **kwargs)
+                    self.cookies.update(client.cookies)
+                    return response
+
+            return asyncio.run(send())
+
+        def get(self, url, **kwargs):
+            return self.request("GET", url, **kwargs)
+
+        def post(self, url, **kwargs):
+            return self.request("POST", url, **kwargs)
+
+        def put(self, url, **kwargs):
+            return self.request("PUT", url, **kwargs)
+else:  # pragma: no cover - dependency installation is tested in CI
     TestClient = None
 
 from clusterx_monitor.auth import AdminAuth, initialize_auth_config
@@ -94,7 +149,7 @@ class MonitorApiTests(unittest.TestCase):
     def test_status_snapshot_policy_and_read_only_routes(self):
         client = TestClient(self.app)
         status_response = client.get("/api/v1/status")
-        self.assertEqual(status_response.json()["version"], "1.1.1")
+        self.assertEqual(status_response.json()["version"], "2.0.0")
         self.assertTrue(status_response.json()["snapshot"]["ready"])
         self.assertIn("default-src 'self'", status_response.headers["content-security-policy"])
         self.assertEqual(status_response.headers["x-content-type-options"], "nosniff")
@@ -132,8 +187,47 @@ class MonitorApiTests(unittest.TestCase):
         self.assertNotIn("delete", {method for spec in paths.values() for method in spec})
         self.assertEqual(
             {path for path, spec in paths.items() if "put" in spec},
-            {"/api/v1/admin/config/resource", "/api/v1/admin/config/groups"},
+            {"/api/v1/admin/config/resource", "/api/v1/admin/config/groups", "/api/v1/admin/config/groups-structured"},
         )
+
+    def test_api_only_mode_and_standalone_web_cors(self):
+        api_only = TestClient(create_app(self.runtime, auth=self.auth))
+        self.assertEqual(api_only.get("/").status_code, 404)
+        standalone = TestClient(create_app(
+            self.runtime, static_dir=Path(self.temp.name) / "missing-cors",
+            auth=self.auth, allowed_origins=["https://monitor.example"],
+        ))
+        response = standalone.get(
+            "/api/v1/status", headers={"Origin": "https://monitor.example"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["access-control-allow-origin"], "https://monitor.example",
+        )
+        self.assertEqual(response.headers["access-control-allow-credentials"], "true")
+
+    def test_access_nodes_is_public_and_explicit_user_scoped(self):
+        client = TestClient(self.app)
+        disabled = client.get("/api/v1/access/nodes")
+        self.assertEqual(disabled.status_code, 200)
+        self.assertEqual(disabled.json()["node_allocation"]["access_scope"], "all")
+        self.assertEqual(disabled.json()["identity"]["status"], "not-required")
+
+        groups = yaml.safe_load(self.policy.group_path.read_text(encoding="utf-8"))
+        groups["node_allocation"] = {"enabled": True}
+        groups["groups"]["example-team"]["nodes"] = ["n1"]
+        current = self.policy.admin_config()
+        self.policy.update_config(
+            "groups", yaml.safe_dump(groups), current["groups"]["revision"], actor="admin",
+        )
+        self.runtime.snapshots.publish(apply_policy(raw_snapshot(), self.policy.policy))
+
+        missing = client.get("/api/v1/access/nodes")
+        self.assertEqual(missing.status_code, 422)
+        owned = client.get("/api/v1/access/nodes", params={"user": " Alice "})
+        self.assertEqual(owned.status_code, 200)
+        self.assertEqual(owned.json()["identity"]["group"], "example-team")
+        self.assertEqual([item["node"] for item in owned.json()["nodes"]], ["n1"])
 
     def test_snapshot_index_history_and_comparison_are_additive_and_read_only(self):
         client = TestClient(self.app)
@@ -224,6 +318,8 @@ class MonitorApiTests(unittest.TestCase):
         self.assertEqual(first_payload["snapshot_id"], "api-snapshot")
         self.assertEqual(first_payload["solver"]["backend"], "cp-sat")
         self.assertEqual(first_payload["strategy_results"][0]["status"], "OPTIMAL")
+        self.assertEqual(first_payload["candidate_selection"]["effective_node_ownership_scope"], "all")
+        self.assertEqual(first_payload["candidate_selection"]["effective_placement_scope"], "any")
         second = client.post("/api/v1/plans", json=body).json()
         self.assertTrue(second["cache_hit"])
         missing = dict(body, snapshot_id="missing")
@@ -405,6 +501,39 @@ class MonitorApiTests(unittest.TestCase):
         csrf = login.json()["csrf_token"]
         private = client.get("/api/v1/admin/config").json()
         self.assertIn("alice", str(private["groups"]))
+        structured = private["groups_structured"]
+        structured["node_allocation"]["enabled"] = True
+        structured["groups"]["example-team"]["nodes"] = ["n1"]
+        updated_groups = client.put(
+            "/api/v1/admin/config/groups-structured", json={
+                "revision": private["groups"]["revision"], **structured,
+            }, headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+        )
+        self.assertEqual(updated_groups.status_code, 200, updated_groups.text)
+        saved_groups = yaml.safe_load(self.policy.group_path.read_text(encoding="utf-8"))
+        self.assertTrue(saved_groups["node_allocation"]["enabled"])
+        self.assertEqual(saved_groups["groups"]["example-team"]["nodes"], ["n1"])
+        current_groups = client.get("/api/v1/admin/config").json()
+        allocation_plan = client.post(
+            "/api/v1/admin/node-allocation/plans",
+            json={
+                "snapshot_id": "api-snapshot",
+                "groups_revision": current_groups["groups"]["revision"],
+                "search_seconds": 1,
+            },
+            headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+        )
+        self.assertEqual(allocation_plan.status_code, 200, allocation_plan.text)
+        body = allocation_plan.json()
+        self.assertEqual([item["strategy"] for item in body["proposals"]], ["workload-first", "gpu-first", "user-first"])
+        self.assertTrue(all(item["feasible"] for item in body["proposals"]))
+        self.assertEqual(body["groups_revision"], current_groups["groups"]["revision"])
+        stale_plan = client.post(
+            "/api/v1/admin/node-allocation/plans",
+            json={"snapshot_id": "api-snapshot", "groups_revision": "stale"},
+            headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+        )
+        self.assertEqual(stale_plan.status_code, 409)
         resource = json.loads(private["resource"]["text"])
         resource["refresh_seconds"] = 31
         resource["low_utilization"].update(gpu_power_limit_w=300, gpu_power_threshold_pct=25)

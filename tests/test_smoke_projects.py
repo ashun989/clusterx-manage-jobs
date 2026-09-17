@@ -4,6 +4,10 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility
+    import tomli as tomllib
 import unittest
 
 
@@ -118,7 +122,7 @@ class SmokeProjectTests(unittest.TestCase):
             self.assertEqual(result["steps"], 2)
 
     def test_skill_documents_ssp_runtime_behavior(self):
-        skill_root = ROOT / "skill" / "clusterx-manage-jobs"
+        skill_root = ROOT / "skills" / "clusterx-manage-jobs"
         skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
         reference_text = (
             skill_root / "references" / "clusterx-cli.md"
@@ -134,7 +138,7 @@ class SmokeProjectTests(unittest.TestCase):
             self.assertIn("--streaming", text)
 
     def test_skill_documents_2026_8_19_features(self):
-        skill_root = ROOT / "skill" / "clusterx-manage-jobs"
+        skill_root = ROOT / "skills" / "clusterx-manage-jobs"
         skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
         reference_text = (
             skill_root / "references" / "clusterx-cli.md"
@@ -153,7 +157,7 @@ class SmokeProjectTests(unittest.TestCase):
         self.assertIn("--job <exact-job-name>", combined)
 
     def test_skill_uses_risk_based_confirmation(self):
-        skill_root = ROOT / "skill" / "clusterx-manage-jobs"
+        skill_root = ROOT / "skills" / "clusterx-manage-jobs"
         skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
         reference_text = (
             skill_root / "references" / "clusterx-cli.md"
@@ -181,37 +185,74 @@ class SmokeProjectTests(unittest.TestCase):
         self.assertNotIn("user approval is required", skill_text)
 
     def test_monitor_documentation_is_complete_and_version_matches(self):
-        skill_root = ROOT / "skill" / "clusterx-manage-jobs"
+        skill_root = ROOT / "skills" / "clusterx-manage-jobs"
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-        self.assertEqual(version, "1.1.1")
+        server_readme = (ROOT / "server/README.md").read_text(encoding="utf-8")
+        client_readme = (ROOT / "client/README.md").read_text(encoding="utf-8")
+        web_readme = (ROOT / "web/README.md").read_text(encoding="utf-8")
+        deploy_readme = (ROOT / "deploy/README.md").read_text(encoding="utf-8")
+        release_doc = (ROOT / "docs/release.md").read_text(encoding="utf-8")
+        version = (ROOT / "server/VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(version, "2.0.0")
         self.assertIn(
             f'version = "{version}"',
-            (ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+            (ROOT / "server/pyproject.toml").read_text(encoding="utf-8"),
         )
         self.assertEqual(
             version,
             json.loads((ROOT / "web" / "package.json").read_text(encoding="utf-8"))["version"],
         )
+        self.assertEqual(
+            version,
+            (ROOT / "server/VERSION").read_text(encoding="utf-8").strip(),
+        )
+        self.assertEqual(
+            version,
+            tomllib.loads(
+                (ROOT / "client/pyproject.toml").read_text(encoding="utf-8")
+            )["project"]["version"],
+        )
+        self.assertEqual(
+            version,
+            (skill_root / "VERSION").read_text(encoding="utf-8").strip(),
+        )
         cli_reference = (
             skill_root / "references" / "clusterx-cli.md"
         ).read_text(encoding="utf-8")
-        self.assertIn(f"`{version}`", readme)
+        self.assertNotIn(version, readme)
+        self.assertNotIn(version, server_readme)
+        self.assertNotIn(version, client_readme)
+        self.assertNotIn(version, web_readme)
+        self.assertNotIn(version, deploy_readme)
+        self.assertNotIn(version, release_doc)
         for marker in (
-            "requirements.txt",
-            "${CODEX_HOME:-$HOME/.codex}/skills/clusterx-manage-jobs",
-            "--candidate-scope all",
-            "--alternatives 3",
-            "monitor_cli.py",
-            "clusterx-monitor serve",
-            "clusterx-monitor admin init",
-            "--auth-config config/admin.local.yaml",
-            "setup-required",
-            "Argon2id",
-            "CLUSTERX_MONITOR_URL",
-            "共享",
+            "server/README.md",
+            "client/README.md",
+            "web/README.md",
+            "deploy/README.md",
+            "SKILL.md",
+            "docs/release.md",
         ):
             self.assertIn(marker, readme)
+        for marker in (
+            "clusterx-monitor serve",
+            "clusterx-monitor admin init",
+            "setup-required",
+            "Argon2id",
+            "--static-dir",
+        ):
+            self.assertIn(marker, server_readme)
+        for marker in (
+            "clusterx-monitor-cli",
+            "clusterx-exec",
+            "--cluster-user",
+            "CLUSTERX_MONITOR_URL",
+            "--user",
+        ):
+            self.assertIn(marker, client_readme)
+        for marker in ("config.js", "--allowed-origin", "npm run build"):
+            self.assertIn(marker, web_readme)
+        self.assertIn("release-manifest.json", release_doc)
         for marker in (
             "Exit status `0`",
             "service unavailable",
@@ -225,8 +266,9 @@ class SmokeProjectTests(unittest.TestCase):
             "CLUSTERX_MONITOR_URL",
         ):
             self.assertIn(marker, cli_reference)
-        self.assertFalse((skill_root / "scripts" / "queue_plan.py").exists())
-        self.assertTrue((skill_root / "scripts" / "monitor_cli.py").exists())
+        self.assertFalse((skill_root / "scripts").exists())
+        self.assertTrue((ROOT / "client/src/clusterx_monitor_cli/monitor_cli.py").exists())
+        self.assertTrue((ROOT / "client" / "pyproject.toml").exists())
 
 
 if __name__ == "__main__":

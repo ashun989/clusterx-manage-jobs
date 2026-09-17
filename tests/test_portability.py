@@ -14,7 +14,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skill/clusterx-manage-jobs"
+SKILL = ROOT / "skills/clusterx-manage-jobs"
 PACKAGER = ROOT / "scripts/package_skill.py"
 INSTALLER = ROOT / "scripts/maintenance/install_clusterx.py"
 
@@ -87,6 +87,7 @@ class PortabilityTests(unittest.TestCase):
 
     def test_repository_retains_feishu_maintenance_outside_skill(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        development = (ROOT / "docs/development.md").read_text(encoding="utf-8")
         reference = (SKILL / "references/clusterx-cli.md").read_text(encoding="utf-8")
         for relative in (
             "scripts/maintenance/check_updates.py",
@@ -94,7 +95,7 @@ class PortabilityTests(unittest.TestCase):
             "scripts/maintenance/sources.json",
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
-            self.assertIn(Path(relative).name, readme)
+            self.assertIn(Path(relative).name, development)
         for marker in (
             "Installation and configuration",
             "Training CPU policy",
@@ -183,6 +184,7 @@ class PortabilityTests(unittest.TestCase):
                     for name in names
                 )
             )
+            self.assertFalse(any("/scripts/" in name for name in names))
             for marker in module.FORBIDDEN_RUNTIME_TEXT:
                 self.assertNotIn(marker, archived_text)
 
