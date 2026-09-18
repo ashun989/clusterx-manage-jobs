@@ -44,43 +44,37 @@ def _effective_scopes(
 ) -> tuple[str, str, dict[str, str]]:
     allocation_enabled = bool((snapshot.get("node_allocation") or {}).get("enabled"))
     requested_node_scope = request.filters.candidate_node_scope
-    requested_placement_scope = request.filters.placement_scope
-    if not allocation_enabled:
-        return "all", "any", {}
+    requested_placement_scope = request.filters.placement_relation_scope
+    if not allocation_enabled and (requested_node_scope != "all" or requested_placement_scope != "any"):
+        raise ValueError("node allocation is disabled; ownership scopes must use their default values")
     return requested_node_scope, requested_placement_scope, _node_owners(snapshot)
 
 
-def _placement_scope_matches(
-    workload: dict[str, Any], placement_scope: str, owners: dict[str, str],
+def _placement_relation_matches(
+    workload: dict[str, Any], relation_scope: str,
 ) -> bool:
-    if placement_scope == "any":
+    if relation_scope == "any":
         return True
     placements = list(workload.get("placements") or [])
     if not placements:
         return False
-    group = str(workload.get("group") or "")
-    owned = False
-    borrowed = False
-    unknown = False
+    relations: set[str] = set()
     for placement in placements:
-        node = str(placement.get("node") or "")
-        owner = owners.get(node)
-        if owner is None:
-            unknown = True
-        elif owner == group:
-            owned = True
+        ownership = placement.get("ownership")
+        if ownership in {"owned", "foreign", "unknown"}:
+            relations.add(str(ownership))
         else:
-            borrowed = True
-    if unknown:
+            relations.add("unknown")
+    if "unknown" in relations:
         return False
-    if placement_scope == "owned_only":
-        return owned and not borrowed
-    if placement_scope == "borrowed_only":
-        return borrowed and not owned
-    if placement_scope == "mixed":
-        return owned and borrowed
-    if placement_scope == "includes_borrowed":
-        return borrowed
+    if relation_scope == "owned_only":
+        return relations == {"owned"}
+    if relation_scope == "foreign_only":
+        return relations == {"foreign"}
+    if relation_scope == "mixed":
+        return relations == {"owned", "foreign"}
+    if relation_scope == "includes_foreign":
+        return "foreign" in relations
     return False
 
 
@@ -173,8 +167,7 @@ def _passes_filters(
     group_findings: dict[str, list[dict[str, Any]]],
     user_findings: dict[str, list[dict[str, Any]]],
     snapshot: dict[str, Any],
-    placement_scope: str,
-    placement_owners: dict[str, str],
+    placement_relation_scope: str,
 ) -> bool:
     filters = request.filters
     user = str(workload.get("user") or "")
@@ -190,7 +183,7 @@ def _passes_filters(
         return False
     if workload_id in filters.exclude_workloads or user in filters.exclude_users:
         return False
-    if not _placement_scope_matches(workload, placement_scope, placement_owners):
+    if not _placement_relation_matches(workload, placement_relation_scope):
         return False
     if filters.over_quota_only:
         state = next(
@@ -205,15 +198,15 @@ def _passes_filters(
             *group_findings.get(group, []),
             *(user_findings.get(user, []) if kind == "aid" else []),
         ]
-        if item.get("status") == "violation"
+        if item.get("status") in {"warning", "violation"}
     ]
     categories = {str(item.get("category")) for item in findings}
     codes = {str(item.get("code")) for item in findings}
     tags = {str(tag) for item in findings for tag in item.get("tags", [])}
     return not (
-        (filters.violation_categories and not categories.intersection(filters.violation_categories))
-        or (filters.violation_codes and not codes.intersection(filters.violation_codes))
-        or (filters.violation_tags and not tags.intersection(filters.violation_tags))
+        (filters.finding_categories and not categories.intersection(filters.finding_categories))
+        or (filters.finding_codes and not codes.intersection(filters.finding_codes))
+        or (filters.finding_tags and not tags.intersection(filters.finding_tags))
     )
 
 
@@ -287,7 +280,7 @@ def _fit_nodes(problem: PlanningProblem, selected: set[str]) -> set[str]:
 def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan:
     requested, resolved, defaults, target = _target(request, snapshot)
     exclusions, excluded_node_ids = _exclusions(snapshot)
-    node_scope, placement_scope, placement_owners = _effective_scopes(snapshot, request)
+    node_scope, placement_relation_scope, placement_owners = _effective_scopes(snapshot, request)
     allocation_enabled = bool((snapshot.get("node_allocation") or {}).get("enabled"))
     common = {
         "requested_target": requested,
@@ -299,10 +292,11 @@ def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan
         "candidate_selection": {
             "resource_scope": request.candidate_scope,
             "node_ownership_scope": request.filters.candidate_node_scope,
-            "effective_node_ownership_scope": node_scope,
-            "placement_scope": request.filters.placement_scope,
-            "effective_placement_scope": placement_scope,
+            "placement_relation_scope": request.filters.placement_relation_scope,
             "groups": list(request.filters.groups),
+            "finding_categories": list(request.filters.finding_categories),
+            "finding_codes": list(request.filters.finding_codes),
+            "finding_tags": list(request.filters.finding_tags),
             "node_allocation_enabled": allocation_enabled,
         },
     }
@@ -316,12 +310,12 @@ def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan
         return PreparedPlan(None, common, (), "target-node-unavailable")
     ownership_node_ids = set(nodes)
     if node_scope != "all":
-        selected_groups = set(request.filters.groups)
+        selected_group_ids = set(request.filters.groups)
         ownership_node_ids = {
             node_id for node_id in nodes
             if placement_owners.get(node_id) is not None
-            and (placement_owners.get(node_id) in selected_groups)
-            == (node_scope == "selected_groups")
+            and (placement_owners.get(node_id) in selected_group_ids)
+            == (node_scope == "selected_group_nodes")
         }
     if requested_node_ids and not requested_node_ids.issubset(ownership_node_ids):
         return PreparedPlan(None, common, (), "target-node-outside-ownership-scope")
@@ -365,7 +359,7 @@ def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan
         unfiltered_ids.add(workload_id)
         if not _passes_filters(
             workload_id, raw, request, group_findings, user_findings, snapshot,
-            placement_scope, placement_owners,
+            placement_relation_scope,
         ):
             continue
         placement_gpu = sum(item.gpu for item in releases.values())

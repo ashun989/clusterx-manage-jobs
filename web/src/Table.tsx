@@ -12,6 +12,7 @@ export type ColumnDef<T> = {
   value: (row: T) => unknown;
   format?: (value: unknown, row: T) => ReactNode;
   filterable?: boolean;
+  sortable?: boolean;
   hidden?: boolean;
 };
 
@@ -54,7 +55,9 @@ function compareValues(left: unknown, right: unknown, direction: "asc" | "desc")
     if (leftMissing && rightMissing) return 0;
     return leftMissing ? 1 : -1;
   }
-  const result = Number(left) - Number(right);
+  const result = typeof left === "number" && typeof right === "number"
+    ? left - right
+    : display(left).localeCompare(display(right), undefined, { numeric: true, sensitivity: "base" });
   return direction === "asc" ? result : -result;
 }
 
@@ -143,7 +146,7 @@ export function DataTable<T>({ rows, columns, state, onState, rowKey, rowLabel, 
       </div>
       <div className="result-count"><span>{visibleRows.length}/{rows.length}</span>{(activeFilterCount > 0 || state.sort || state.query || (state.hiddenColumns?.length ?? 0) > 0) && <button type="button" onClick={reset}>重置</button>}</div>
     </div>
-    <div className={`table-wrap data-table-wrap density-${state.density ?? "comfortable"}`}><table className="data-table"><thead><tr>{visibleColumns.map((column) => <th key={column.key}>{column.kind === "number" ? <button type="button" aria-label={`排序 ${column.label}`} className={state.sort?.key === column.key ? "sort active" : "sort"} onClick={() => onState({ ...state, sort: cycleSort(state.sort, column.key) })}>{column.label}<span>{state.sort?.key === column.key ? state.sort.direction === "asc" ? "↑" : "↓" : "↕"}</span></button> : column.label}</th>)}</tr></thead>
+    <div className={`table-wrap data-table-wrap density-${state.density ?? "comfortable"}`}><table className="data-table"><thead><tr>{visibleColumns.map((column) => <th key={column.key}>{column.kind === "number" || column.sortable ? <button type="button" aria-label={`排序 ${column.label}`} className={state.sort?.key === column.key ? "sort active" : "sort"} onClick={() => onState({ ...state, sort: cycleSort(state.sort, column.key) })}>{column.label}<span>{state.sort?.key === column.key ? state.sort.direction === "asc" ? "↑" : "↓" : "↕"}</span></button> : column.label}</th>)}</tr></thead>
       <tbody>{visibleRows.map((row, index) => <tr key={rowKey(row, index)} className="clickable" tabIndex={0} aria-label={`查看 ${rowLabel(row)} 详情`} onClick={() => onRow(row)} onKeyDown={(event) => keyOpen(event, row)}>
         {visibleColumns.map((column) => {
           const value = column.value(row);

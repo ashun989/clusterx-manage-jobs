@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class FrozenModel(BaseModel):
@@ -163,13 +163,13 @@ class PlanFilters(FrozenModel):
     exclude_workloads: tuple[str, ...] = ()
     exclude_users: tuple[str, ...] = ()
     over_quota_only: bool = False
-    placement_scope: Literal[
-        "any", "owned_only", "borrowed_only", "mixed", "includes_borrowed"
+    placement_relation_scope: Literal[
+        "any", "owned_only", "foreign_only", "mixed", "includes_foreign"
     ] = "any"
-    candidate_node_scope: Literal["all", "selected_groups", "outside_selected_groups"] = "all"
-    violation_categories: tuple[str, ...] = ()
-    violation_codes: tuple[str, ...] = ()
-    violation_tags: tuple[str, ...] = ()
+    candidate_node_scope: Literal["all", "selected_group_nodes", "other_group_nodes"] = "all"
+    finding_categories: tuple[str, ...] = ()
+    finding_codes: tuple[str, ...] = ()
+    finding_tags: tuple[str, ...] = ()
 
 
 class PlanRequest(FrozenModel):
@@ -209,7 +209,7 @@ class PlanRequest(FrozenModel):
 
     @model_validator(mode="after")
     def validate_candidate_size(self) -> "PlanRequest":
-        for field_name in ("workload_types", "groups", "users", "workloads", "exclude_workloads", "exclude_users", "violation_categories", "violation_codes", "violation_tags"):
+        for field_name in ("workload_types", "groups", "users", "workloads", "exclude_workloads", "exclude_users", "finding_categories", "finding_codes", "finding_tags"):
             values = getattr(self.filters, field_name)
             if len(values) > 1000 or any(len(str(value)) > 256 for value in values):
                 raise ValueError(f"filters.{field_name} is too large")

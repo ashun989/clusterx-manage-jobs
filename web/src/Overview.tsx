@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { alertIdentity } from "./DetailDrawer";
+import { PlacementBadge } from "./PlacementBadge";
 import { formatPowerPercent, statusClass } from "./Table";
 import type { DetailRef, HistoryPoint, HistoryResponse, Snapshot, Workload } from "./types";
 import {
@@ -47,7 +48,6 @@ function axisLabel(value: string, spanMs: number) {
 }
 
 const trendNumber = (value: unknown) => typeof value === "number" ? number(Math.round(value * 10) / 10) : "—";
-
 function Sparkline({ points, field, label, activeSnapshotId, onActivate }: {
   points: HistoryPoint[];
   field: keyof HistoryPoint;
@@ -186,10 +186,18 @@ export function Overview({ snapshot, history, open, navigate, range, onRange, hi
   const capacity = snapshot.capacity;
   const pending = [...(snapshot.pending_workloads ?? [])].sort((a, b) => Number(b.queue_age_seconds ?? 0) - Number(a.queue_age_seconds ?? 0));
   const lowUtilization = snapshot.workloads.filter((workload) => workload.finding_codes?.includes("utilization.low_gpu_activity"));
+  const placementIssues = snapshot.workloads.filter((workload) => workload.placement_context?.issue && workload.placement_context.issue !== "none");
   const nodeCounts = snapshot.nodes.reduce<Record<string, number>>((result, node) => ({ ...result, [node.classification]: (result[node.classification] ?? 0) + 1 }), {});
   const attentionNodes = snapshot.nodes.filter((node) => ["fragmented", "cpu-memory-blocked", "unavailable"].includes(node.classification));
   const severeAlerts = snapshot.alerts.filter((alert) => ["critical", "error", "warning"].includes(alert.severity));
   const openWorkload = (workload: Workload) => open({ kind: "workload", id: workload.workload_id, label: workload.workload_name });
+  const openAlertTarget = (alert: Snapshot["alerts"][number]) => {
+    const workload = alert.subject_type === "workload"
+      ? [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])].find((item) => item.workload_id === alert.subject)
+      : undefined;
+    if (workload) openWorkload(workload);
+    else open({ kind: "alert", id: alertIdentity(alert), label: alert.subject });
+  };
   const resolution = history?.resolution_seconds ?? 1;
   const resolutionLabel = resolution < 60 ? "原始点" : resolution < 3600 ? `${Math.round(resolution / 60)} 分钟聚合` : resolution < 86_400 ? `${Math.round(resolution / 3600)} 小时聚合` : `${Math.round(resolution / 86_400)} 天聚合`;
   const activePoint = activeSnapshotId == null ? null : points.find((point) => point.snapshot_id === activeSnapshotId) ?? null;
@@ -232,13 +240,14 @@ export function Overview({ snapshot, history, open, navigate, range, onRange, hi
         {!attentionNodes.length && <p className="overview-empty">节点状态良好</p>}
       </InsightList>
 
-      <InsightList title="策略与利用率" action={<button type="button" onClick={() => navigate("workloads")}>Workload 视图</button>}>
+      <InsightList title="策略问题" action={<button type="button" onClick={() => navigate("workloads")}>Workload 视图</button>}>
+        {placementIssues.map((workload) => <button type="button" className="low-utilization-item" key={`placement:${workload.workload_id}`} onClick={() => openWorkload(workload)}><span><b>{workload.workload_name}</b><small>{workload.user} · {workload.group}</small><PlacementBadge workload={workload} showOwner={false} /></span><em className="low-utilization-readout"><small>Owner group</small><b>{workload.placement_context.owner_groups.join(", ") || "—"}</b></em></button>)}
         {lowUtilization.map((workload) => <button type="button" className="low-utilization-item" key={workload.workload_id} onClick={() => openWorkload(workload)}><span><b>{workload.workload_name}</b><small>{workload.user} · 低 GPU/显存利用率或功率</small></span><em className="low-utilization-readout" role="group" aria-label="GPU、显存与功率预览"><small>最近 {number(workload.historical_telemetry?.window_hours)} 小时</small><b>GPU {number(workload.historical_telemetry?.gpu_compute_util_avg_pct, "%")} · 显存 {number(workload.historical_telemetry?.gpu_memory_util_avg_pct, "%")} · 功率 {formatPowerPercent(workload.historical_telemetry?.gpu_power_util_avg_pct)}</b></em></button>)}
-        {!lowUtilization.length && <p className="overview-empty">当前没有低利用率策略发现</p>}
+        {!lowUtilization.length && !placementIssues.length && <p className="overview-empty">当前没有策略问题</p>}
       </InsightList>
 
       <InsightList title="最新告警" action={<button type="button" onClick={() => navigate("alerts")}>告警中心</button>}>
-        {severeAlerts.map((alert) => <button type="button" key={alertIdentity(alert)} onClick={() => open({ kind: "alert", id: alertIdentity(alert), label: alert.subject })}><span><b>{alert.subject}</b><small>{alert.code ?? alert.kind}</small></span><em><span className={statusClass(alert.severity)}>{alert.severity}</span></em></button>)}
+        {severeAlerts.map((alert) => <button type="button" key={alertIdentity(alert)} onClick={() => openAlertTarget(alert)}><span><b>{alert.subject}</b><small>{alert.code ?? alert.kind}</small></span><em><span className={statusClass(alert.severity)}>{alert.severity}</span></em></button>)}
         {!severeAlerts.length && <p className="overview-empty">当前没有需要关注的告警</p>}
       </InsightList>
     </section>

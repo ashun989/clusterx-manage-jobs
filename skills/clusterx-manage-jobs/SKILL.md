@@ -44,11 +44,12 @@ that reason. When it is enabled, `clusterx-monitor-cli nodes --mine` uses
 `--user` or `CLUSTERX_USER` and returns the caller's effective group pool.
 Placement findings
 are advisory by default; when the owner group has active group-local pending
-pressure, both outside-owned-pool and borrowed-node findings become
-violations and propagate to the workload's user and alerts. Unknown pressure
-keeps the finding as a warning with unknown evidence. Borrowing another
-group's nodes does not waive quota. Pending workloads have no node placement
-and therefore do not produce placement warnings.
+pressure, both `placement.outside_owned_pool` and
+`placement.quota_borrowed` findings become violations and propagate to the
+Workload's user and alerts. Unknown pressure keeps the finding as a warning
+with unknown evidence. Cross-group placement does not waive quota. Pending
+Workloads have no node placement and therefore do not produce placement
+warnings.
 
 ## Act on user authorization
 
@@ -167,9 +168,10 @@ and therefore do not produce placement warnings.
 - Node allocation is queue-wide and advisory. Every live queue node has one
   public effective owner when enabled; an unassigned node belongs to `default`.
   A running workload with quota headroom on another group's node produces a
-  placement warning; a workload at or above quota on another group's node
-  produces a borrowed-node warning. These findings become violations when the
-  owner group reaches group-local pending pressure, computed with the same
+  `placement.outside_owned_pool` warning only when its own pool has sufficient
+  free capacity; a workload at or above quota on another group's node produces
+  a `placement.quota_borrowed` warning. These findings become violations when
+  the owner group reaches group-local pending pressure, computed with the same
   `min_wait_minutes` and `min_jobs` thresholds as queue pressure. Unknown
   pressure remains a warning. Borrowing never suppresses quota findings.
   Pending workloads have no node placement and never receive placement
@@ -196,12 +198,12 @@ and therefore do not produce placement warnings.
   only when the requested workload specifies them. Use repeated `--strategy`
   values from `min-gpu|min-workloads|min-users`, plus
   `--candidate-scope fragmented|full|all`, `--candidate-node-scope
-  all|selected_groups|outside_selected_groups`, `--placement-scope
-  any|owned_only|borrowed_only|mixed|includes_borrowed`, `--alternatives 1..10`,
+  all|selected_group_nodes|other_group_nodes`, `--placement-relation
+  any|owned_only|foreign_only|mixed|includes_foreign`, `--alternatives 1..10`,
   and workload, user, group, or over-quota filters as requested. The two
-  selected-group node scopes reuse the repeated `--group` filters. To restrict coordination
-  candidates by active structured violations, add repeated
-  `--violation-category`, `--violation-code`, or `--violation-tag`. Every result is based on an
+  group-relative node scopes require repeated `--group` filters. To restrict
+  coordination candidates by structured warnings or violations, add repeated
+  `--finding-category`, `--finding-code`, or `--finding-tag`. Every result is based on an
   identified cached snapshot and is a coordination candidate, never permission
   to stop anything. Exact and heuristic results must be labeled accurately.
 - Plan search uses CP-SAT. Treat `search_seconds` as the total budget shared by
@@ -210,10 +212,10 @@ and therefore do not produce placement warnings.
   a greedy fallback remains heuristic. `candidate_scope` limits nodes that may
   satisfy the target even when a selected workload spans other nodes.
   `candidate_node_scope` independently limits effective group ownership, while
-  `placement_scope` selects workloads by owned, borrowed, or mixed placements.
-  With node allocation disabled, the effective scopes are unrestricted; do not
-  add node restrictions. Pending workloads have no placement and do not match
-  placement filters.
+  `placement_relation_scope` selects workloads by owned, foreign, or mixed
+  placements. With node allocation disabled, only `all` and `any` are valid;
+  non-default ownership filters are rejected. Pending workloads have no
+  placement and do not match placement filters.
 - When plan CPU or memory is omitted, report the resolved target derived from
   the planning profile pinned in that snapshot. Explain that node effective,
   stranded, and blocked values are relative to this standard profile and are

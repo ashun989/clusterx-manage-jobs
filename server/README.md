@@ -19,15 +19,21 @@ optionally serve a built Web directory.
   user-impact priorities.
 
 The Server never creates, stops or mutates Clusterx jobs. Pending workloads do
-not receive node placement findings. Borrowing another group's node does not
-waive quota. Placement findings are warnings by default; when the owner group
-has active group-local pending pressure, both outside-owned-pool and borrowed
-placements become violations. Unknown owner-group pressure keeps the finding
-as a warning and records the unknown state. When node allocation is disabled,
-the access API reports that state and exposes all nodes in the configured queue.
+not receive node placement findings. Every running Workload has an authoritative
+`placement_context`; every placement records its `owner_group` and ownership
+relation. `placement.outside_owned_pool` means the Workload had enough capacity
+in its own pool but ran on another group's node. `placement.quota_borrowed`
+means its GPU quota was already full. Both are warnings by default and become
+violations when the owner group has active group-local pending pressure. Unknown
+owner-group pressure remains a warning with explicit evidence. When allocation
+is disabled, placements are marked `unmanaged` rather than treated as owned.
+
 The planning API keeps resource candidate scope separate from node ownership
-and workload placement scope; ownership filters are evaluated against the
-pinned snapshot's effective public assignments.
+and Workload placement relation. Non-default ownership filters are rejected
+when allocation is disabled, and group-relative node scopes require an explicit
+group. No invalid request is silently broadened to all nodes or all Workloads.
+The evaluated snapshot/API schema is version `2`; Server, Web, CLI and Skill
+version `3.x` must be deployed together and are not compatible with 2.x clients.
 
 The administrator endpoint `POST /api/v1/admin/node-allocation/plans` accepts a
 retained `snapshot_id` and the current group-file revision, then returns three

@@ -438,8 +438,9 @@ class PolicyTests(unittest.TestCase):
         )
         by_id = {item["workload_id"]: item for item in result["workloads"]}
         self.assertEqual(by_id["aid"]["policy_status"], "violation")
-        self.assertIn("development CPU per node exceeds limit", by_id["aid"]["policy_reasons"])
-        self.assertIn("one-GPU development runtime exceeds limit", by_id["aid"]["policy_reasons"])
+        aid_messages = {item["message"] for item in by_id["aid"]["policy_findings"]}
+        self.assertIn("development CPU per node exceeds limit", aid_messages)
+        self.assertIn("one-GPU development runtime exceeds limit", aid_messages)
         runtime_finding = next(
             item for item in by_id["aid"]["policy_findings"]
             if item["code"] == "runtime.development.one_gpu_limit"
@@ -448,9 +449,13 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(runtime_finding["observed"]["runtime_source"], "pod_create_time")
         self.assertTrue(by_id["aid"]["runtime_estimated"])
         self.assertEqual(by_id["aid-zero-ok"]["policy_status"], "compliant")
-        self.assertIn("development CPU per node exceeds limit", by_id["aid-zero-over"]["policy_reasons"])
-        self.assertIn("development memory per node exceeds limit", by_id["aid-zero-over"]["policy_reasons"])
-        self.assertIn("training CPU per node exceeds resource ratio", by_id["cpu"]["policy_reasons"])
+        zero_over_messages = {item["message"] for item in by_id["aid-zero-over"]["policy_findings"]}
+        self.assertIn("development CPU per node exceeds limit", zero_over_messages)
+        self.assertIn("development memory per node exceeds limit", zero_over_messages)
+        self.assertIn(
+            "training CPU per node exceeds resource ratio",
+            {item["message"] for item in by_id["cpu"]["policy_findings"]},
+        )
 
     def test_development_instance_limit_is_user_scoped(self):
         items = [
@@ -836,13 +841,43 @@ class PolicyTests(unittest.TestCase):
         item = workload("outside", "alice", "trainingJob", [placement("other", 1)])
         result = apply_policy(snapshot([node("owned", 0), node("other", 1)], [item]), policy)
         observed = result["workloads"][0]
+        self.assertEqual(result["schema_version"], 2)
         self.assertEqual(result["nodes"][0]["assigned_group"], "example-team")
         self.assertEqual(result["nodes"][1]["assigned_group"], "default")
         self.assertIn("placement.outside_owned_pool", observed["finding_codes"])
+        self.assertEqual(observed["policy_status"], "warning")
+        self.assertEqual(observed["placement_context"], {
+            "mode": "managed",
+            "relations": ["foreign"],
+            "issue": "outside_owned_pool",
+            "owner_groups": ["default"],
+        })
+        self.assertEqual(observed["placements"][0]["owner_group"], "default")
+        self.assertEqual(observed["placements"][0]["ownership"], "foreign")
         self.assertTrue(any(item["code"] == "placement.outside_owned_pool" for item in result["alerts"]))
 
         owned_full = apply_policy(snapshot([node("owned", 8), node("other", 1)], [item]), policy)
         self.assertNotIn("placement.outside_owned_pool", owned_full["workloads"][0]["finding_codes"])
+
+        owned_cpu_blocked = apply_policy(
+            snapshot([node("owned", 0, 112, 0), node("other", 1, 14, 240)], [item]),
+            policy,
+        )
+        self.assertNotIn(
+            "placement.outside_owned_pool",
+            owned_cpu_blocked["workloads"][0]["finding_codes"],
+        )
+
+        mixed_item = workload(
+            "mixed", "alice", "trainingJob",
+            [placement("owned", 1), placement("other", 1)],
+        )
+        mixed = apply_policy(
+            snapshot([node("owned", 1), node("other", 1)], [mixed_item]), policy,
+        )["workloads"][0]
+        self.assertEqual(mixed["placement_context"]["relations"], ["owned", "foreign"])
+        self.assertEqual(mixed["placement_context"]["issue"], "outside_owned_pool")
+        self.assertIn("placement.outside_owned_pool", mixed["finding_codes"])
 
         payload["groups"]["example-team"]["nodes"] = ["same"]
         payload["groups"]["default"]["nodes"] = ["same"]
@@ -859,11 +894,12 @@ class PolicyTests(unittest.TestCase):
         item = workload("borrowed", "alice", "trainingJob", [placement("borrowed", 8)])
         result = apply_policy(snapshot([node("owned", 0), node("borrowed", 8)], [item]), policy)
         finding_codes = result["workloads"][0]["finding_codes"]
-        self.assertIn("placement.borrowed_node", finding_codes)
+        self.assertIn("placement.quota_borrowed", finding_codes)
+        self.assertEqual(result["workloads"][0]["placement_context"]["issue"], "quota_borrowed")
         self.assertIn("quota.gpu", next(item for item in result["groups"] if item["group"] == "example-team")["finding_codes"])
 
         pending = apply_policy(snapshot([node("owned", 0), node("borrowed", 0)], [], [{"workload_id": "pending", "queue_age_seconds": 1}]), policy)
-        self.assertFalse(any(item["code"] in {"placement.outside_owned_pool", "placement.borrowed_node"} for item in pending["alerts"]))
+        self.assertFalse(any(item["code"] in {"placement.outside_owned_pool", "placement.quota_borrowed"} for item in pending["alerts"]))
 
     def test_group_pending_pressure_escalates_cross_group_placement_and_propagates(self):
         payload = self.policy.model_dump(mode="json")
@@ -884,12 +920,12 @@ class PolicyTests(unittest.TestCase):
 
         finding = next(
             item for item in result["workloads"][0]["policy_findings"]
-            if item["code"] == "placement.borrowed_node"
+            if item["code"] == "placement.quota_borrowed"
         )
         self.assertEqual(finding["status"], "violation")
         self.assertEqual(finding["observed"]["owner_group"], "default")
         self.assertEqual(finding["observed"]["owner_pending_pressure"]["state"], "active")
-        alert = next(item for item in result["alerts"] if item["code"] == "placement.borrowed_node")
+        alert = next(item for item in result["alerts"] if item["code"] == "placement.quota_borrowed")
         self.assertEqual(alert["severity"], "error")
         self.assertEqual(next(item for item in result["users"] if item["user"] == "alice")["status"], "violation")
         self.assertEqual(next(item for item in result["groups"] if item["group"] == "default")["pending_pressure"]["state"], "active")
@@ -939,6 +975,24 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertEqual(unknown_finding["status"], "warning")
         self.assertEqual(unknown_finding["observed"]["owner_pending_pressure"]["state"], "unknown")
+
+    def test_unknown_node_owner_is_an_unknown_workload_finding(self):
+        payload = self.policy.model_dump(mode="json")
+        payload["node_allocation"] = {"enabled": True}
+        payload["groups"]["example-team"]["nodes"] = ["owned"]
+        policy = PolicyConfig.model_validate(payload)
+        result = apply_policy(snapshot(
+            [node("owned", 0)],
+            [workload("unknown-owner", "alice", "trainingJob", [placement("missing-node", 1)])],
+        ), policy)
+        observed = result["workloads"][0]
+        self.assertEqual(observed["placement_context"]["issue"], "unknown")
+        self.assertEqual(observed["placement_context"]["relations"], ["unknown"])
+        self.assertEqual(observed["policy_status"], "unknown")
+        self.assertIn("placement.owner_unknown", observed["finding_codes"])
+        alert = next(item for item in result["alerts"] if item["code"] == "placement.owner_unknown")
+        self.assertEqual(alert["subject"], "unknown-owner")
+        self.assertEqual(alert["observed"]["nodes"], ["missing-node"])
 
     def test_cold_start_node_allocation_returns_three_complete_mutually_exclusive_plans(self):
         payload = self.policy.model_dump(mode="json")
@@ -1160,7 +1214,7 @@ class PlannerTests(unittest.TestCase):
                 "target_nodes": ["n1"],
             })
 
-    def test_planner_filters_owned_borrowed_and_mixed_placements(self):
+    def test_planner_filters_owned_foreign_and_mixed_placements(self):
         payload = self.policy.model_dump(mode="json")
         payload["node_allocation"] = {"enabled": True}
         payload["groups"]["example-team"]["nodes"] = ["owned"]
@@ -1181,15 +1235,36 @@ class PlannerTests(unittest.TestCase):
         }
         for scope, expected in (
             ("owned_only", {"owned-job"}),
-            ("borrowed_only", {"borrowed-job"}),
+            ("foreign_only", {"borrowed-job"}),
             ("mixed", {"mixed-job"}),
-            ("includes_borrowed", {"borrowed-job", "mixed-job"}),
+            ("includes_foreign", {"borrowed-job", "mixed-job"}),
         ):
-            request = {**base, "filters": {**base["filters"], "placement_scope": scope}}
+            request = {**base, "filters": {**base["filters"], "placement_relation_scope": scope}}
             prepared = prepare_plan(evaluated, PlanRequest.model_validate(request))
             self.assertIsNotNone(prepared.problem, scope)
             candidates = {item.workload_id for item in prepared.problem.workloads}
             self.assertEqual(candidates, expected, scope)
+
+    def test_planner_finding_filter_includes_placement_warnings(self):
+        payload = self.policy.model_dump(mode="json")
+        payload["node_allocation"] = {"enabled": True}
+        payload["groups"]["example-team"]["nodes"] = ["owned"]
+        payload["groups"]["default"]["nodes"] = ["other"]
+        policy = PolicyConfig.model_validate(payload)
+        evaluated = apply_policy(snapshot(
+            [node("owned", 0), node("other", 1)],
+            [workload("outside", "alice", "trainingJob", [placement("other", 1)])],
+        ), policy)
+        self.assertEqual(evaluated["workloads"][0]["policy_status"], "warning")
+        prepared = prepare_plan(evaluated, PlanRequest.model_validate({
+            "snapshot_id": "s1", "target": {"nodes": 2, "gpus_per_node": 8},
+            "strategies": ["min-gpu"], "candidate_scope": "fragmented",
+            "filters": {"finding_codes": ["placement.outside_owned_pool"]},
+        }))
+        self.assertIsNotNone(prepared.problem)
+        self.assertEqual(
+            {item.workload_id for item in prepared.problem.workloads}, {"outside"},
+        )
 
     def test_planner_candidate_node_scope_uses_effective_group_ownership(self):
         payload = self.policy.model_dump(mode="json")
@@ -1205,43 +1280,44 @@ class PlannerTests(unittest.TestCase):
         request = {
             "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
             "target_nodes": ["other"], "strategies": ["min-gpu"], "candidate_scope": "fragmented",
-            "filters": {"groups": ["example-team"], "candidate_node_scope": "outside_selected_groups"},
+            "filters": {"groups": ["example-team"], "candidate_node_scope": "other_group_nodes"},
         }
         result = solve_plan(evaluated, request)
         self.assertEqual(result["plans"][0]["workloads"], ["borrowed-job"])
-        self.assertEqual(result["candidate_selection"]["effective_node_ownership_scope"], "outside_selected_groups")
+        self.assertEqual(result["candidate_selection"]["node_ownership_scope"], "other_group_nodes")
 
         request["target_nodes"] = ["owned"]
-        request["filters"]["candidate_node_scope"] = "selected_groups"
+        request["filters"]["candidate_node_scope"] = "selected_group_nodes"
         result = solve_plan(evaluated, request)
         self.assertEqual(result["plans"][0]["workloads"], ["owned-job"])
 
         request["target_nodes"] = ["owned"]
-        request["filters"]["candidate_node_scope"] = "outside_selected_groups"
+        request["filters"]["candidate_node_scope"] = "other_group_nodes"
         result = solve_plan(evaluated, request)
         self.assertEqual(result["no_plan_reason"], "target-node-outside-ownership-scope")
 
-    def test_planner_disables_node_scopes_when_node_allocation_is_disabled(self):
+    def test_planner_rejects_node_scopes_when_node_allocation_is_disabled(self):
         evaluated = apply_policy(
             snapshot([node("n1", 1)], [workload("job", "alice", "trainingJob", [placement("n1", 1)])]),
             self.policy,
         )
-        result = solve_plan(evaluated, {
-            "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
-            "strategies": ["min-gpu"], "candidate_scope": "full",
-            "filters": {
-                "groups": ["example-team"], "candidate_node_scope": "selected_groups",
-                "placement_scope": "borrowed_only",
-            },
-        })
-        self.assertEqual(result["candidate_selection"]["effective_node_ownership_scope"], "all")
-        self.assertEqual(result["candidate_selection"]["effective_placement_scope"], "any")
+        self.assertEqual(evaluated["workloads"][0]["placement_context"]["mode"], "unmanaged")
+        self.assertEqual(evaluated["workloads"][0]["placements"][0]["ownership"], "unmanaged")
+        with self.assertRaisesRegex(ValueError, "node allocation is disabled"):
+            solve_plan(evaluated, {
+                "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
+                "strategies": ["min-gpu"], "candidate_scope": "full",
+                "filters": {
+                    "groups": ["example-team"], "candidate_node_scope": "selected_group_nodes",
+                    "placement_relation_scope": "foreign_only",
+                },
+            })
 
     def test_planner_requires_groups_for_group_node_scope(self):
         with self.assertRaisesRegex(ValueError, "filters.groups is required"):
             PlanRequest.model_validate({
                 "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
-                "filters": {"candidate_node_scope": "selected_groups"},
+                "filters": {"candidate_node_scope": "selected_group_nodes"},
             })
 
     def test_planner_never_counts_an_unavailable_node_as_schedulable(self):
@@ -1259,7 +1335,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result["plans"][0]["cpus"], 4)
         self.assertEqual(result["plans"][0]["memory_gib"], 10)
 
-    def test_planner_filters_structured_violations(self):
+    def test_planner_filters_structured_findings(self):
         old = datetime.now(timezone.utc) - timedelta(hours=2)
         low = workload("low", "u1", "trainingJob", [placement("n1", 1)], created=old)
         low["historical_telemetry"] = {
@@ -1276,7 +1352,7 @@ class PlannerTests(unittest.TestCase):
         result = solve_plan(evaluated, {
             "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
             "strategies": ["min-gpu"], "candidate_scope": "fragmented",
-            "filters": {"violation_categories": ["utilization"], "violation_tags": ["low-utilization"]},
+            "filters": {"finding_categories": ["utilization"], "finding_tags": ["low-utilization"]},
         })
         self.assertEqual(result["plans"][0]["workloads"], ["low"])
 
@@ -1293,7 +1369,7 @@ class PlannerTests(unittest.TestCase):
         result = solve_plan(evaluated, {
             "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
             "strategies": ["min-gpu"], "candidate_scope": "fragmented",
-            "filters": {"violation_codes": ["quota.development.instances_per_user"]},
+            "filters": {"finding_codes": ["quota.development.instances_per_user"]},
         })
         self.assertTrue(result["plans"])
         self.assertTrue(all(
@@ -2268,22 +2344,22 @@ class SkillCliTests(unittest.TestCase):
         self.assertEqual([item["workload_id"] for item in rows], ["low"])
         self.assertTrue(self.module._has_failure(rows, "violation"))
 
-    def test_plan_sends_structured_violation_filters(self):
+    def test_plan_sends_structured_finding_filters(self):
         with mock.patch.object(self.module, "_snapshot", return_value={"snapshot_id": "s1"}), mock.patch.object(
             self.module, "_request", return_value={"plans": []}
         ) as request, mock.patch.object(
             sys, "argv", [
                 "monitor_cli.py", "plan", "--nodes", "1",
-                "--violation-category", "utilization",
-                "--violation-code", "utilization.low_gpu_activity",
-                "--violation-tag", "low-utilization", "--format", "json",
+                "--finding-category", "utilization",
+                "--finding-code", "utilization.low_gpu_activity",
+                "--finding-tag", "low-utilization", "--format", "json",
             ]
         ), mock.patch("sys.stdout"):
             self.assertEqual(self.module.main(), 0)
         filters = request.call_args.kwargs["json"]["filters"]
-        self.assertEqual(filters["violation_categories"], ["utilization"])
-        self.assertEqual(filters["violation_codes"], ["utilization.low_gpu_activity"])
-        self.assertEqual(filters["violation_tags"], ["low-utilization"])
+        self.assertEqual(filters["finding_categories"], ["utilization"])
+        self.assertEqual(filters["finding_codes"], ["utilization.low_gpu_activity"])
+        self.assertEqual(filters["finding_tags"], ["low-utilization"])
 
     def test_plan_sends_node_ownership_and_placement_filters(self):
         with mock.patch.object(self.module, "_snapshot", return_value={"snapshot_id": "s1"}), mock.patch.object(
@@ -2291,15 +2367,15 @@ class SkillCliTests(unittest.TestCase):
         ) as request, mock.patch.object(
             sys, "argv", [
                 "monitor_cli.py", "plan", "--nodes", "1", "--group", "example-team",
-                "--candidate-node-scope", "outside_selected_groups",
-                "--placement-scope", "borrowed_only", "--format", "json",
+                "--candidate-node-scope", "other_group_nodes",
+                "--placement-relation", "foreign_only", "--format", "json",
             ]
         ), mock.patch("sys.stdout"):
             self.assertEqual(self.module.main(), 0)
         filters = request.call_args.kwargs["json"]["filters"]
         self.assertEqual(filters["groups"], ["example-team"])
-        self.assertEqual(filters["candidate_node_scope"], "outside_selected_groups")
-        self.assertEqual(filters["placement_scope"], "borrowed_only")
+        self.assertEqual(filters["candidate_node_scope"], "other_group_nodes")
+        self.assertEqual(filters["placement_relation_scope"], "foreign_only")
 
 
 if __name__ == "__main__":

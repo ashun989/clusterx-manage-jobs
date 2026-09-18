@@ -13,7 +13,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Coroutine
+from typing import Any, AsyncIterator, Callable, Coroutine, Literal
 from urllib.parse import unquote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -329,9 +329,9 @@ class NodeAllocationPlanRequest(BaseModel):
 
 class SnapshotResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
-    schema_version: int | None = None
-    snapshot_id: str | None = None
-    generated_at: str | None = None
+    schema_version: Literal[2]
+    snapshot_id: str
+    generated_at: str
 
 
 class HistoryResponse(BaseModel):
@@ -340,10 +340,24 @@ class HistoryResponse(BaseModel):
     storage: str | None = None
 
 
+class PlanCandidateSelectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resource_scope: Literal["fragmented", "full", "all"]
+    node_ownership_scope: Literal["all", "selected_group_nodes", "other_group_nodes"]
+    placement_relation_scope: Literal[
+        "any", "owned_only", "foreign_only", "mixed", "includes_foreign"
+    ]
+    groups: list[str]
+    finding_categories: list[str]
+    finding_codes: list[str]
+    finding_tags: list[str]
+    node_allocation_enabled: bool
+
+
 class PlanResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
-    status: str | None = None
-    strategy: str | None = None
+    snapshot_id: str
+    candidate_selection: PlanCandidateSelectionResponse
     cache_hit: bool | None = None
 
 
@@ -1069,6 +1083,15 @@ def create_app(
         snapshot = runtime.snapshots.get(request.snapshot_id)
         if snapshot is None:
             raise HTTPException(status_code=404, detail="snapshot is not retained")
+        allocation_enabled = bool((snapshot.get("node_allocation") or {}).get("enabled"))
+        if not allocation_enabled and (
+            request.filters.candidate_node_scope != "all"
+            or request.filters.placement_relation_scope != "any"
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="node allocation is disabled; ownership scopes must use their default values",
+            )
         payload = request.model_dump(mode="json")
         key = hashlib.sha256(json.dumps({
             "planner_model_version": PLANNER_MODEL_VERSION,
