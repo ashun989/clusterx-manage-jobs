@@ -193,7 +193,7 @@ class SmokeProjectTests(unittest.TestCase):
         deploy_readme = (ROOT / "deploy/README.md").read_text(encoding="utf-8")
         release_doc = (ROOT / "docs/release.md").read_text(encoding="utf-8")
         version = (ROOT / "server/VERSION").read_text(encoding="utf-8").strip()
-        self.assertEqual(version, "2.0.0")
+        self.assertEqual(version, "2.1.0")
         self.assertIn(
             f'version = "{version}"',
             (ROOT / "server/pyproject.toml").read_text(encoding="utf-8"),
@@ -261,7 +261,7 @@ class SmokeProjectTests(unittest.TestCase):
             "power telemetry",
             "never claimed as releasable",
             "utilization.low_gpu_activity",
-            "--violation-category",
+            "--finding-category",
             "warming-up",
             "CLUSTERX_MONITOR_URL",
         ):

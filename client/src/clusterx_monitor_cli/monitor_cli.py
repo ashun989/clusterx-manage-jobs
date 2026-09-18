@@ -308,15 +308,15 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--candidate-scope", choices=("fragmented", "full", "all"), default="fragmented")
     plan.add_argument(
         "--candidate-node-scope",
-        choices=("all", "selected_groups", "outside_selected_groups"),
+        choices=("all", "selected_group_nodes", "other_group_nodes"),
         default="all",
         help="restrict candidate nodes to selected groups or nodes outside them",
     )
     plan.add_argument(
-        "--placement-scope",
-        choices=("any", "owned_only", "borrowed_only", "mixed", "includes_borrowed"),
+        "--placement-relation",
+        choices=("any", "owned_only", "foreign_only", "mixed", "includes_foreign"),
         default="any",
-        help="restrict workloads by owned/borrowed node placement",
+        help="restrict workloads by owned/foreign node placement",
     )
     plan.add_argument("--alternatives", type=int, default=1)
     plan.add_argument(
@@ -326,9 +326,9 @@ def build_parser() -> argparse.ArgumentParser:
     for option in ("type", "group", "user", "workload", "exclude-workload", "exclude-user"):
         plan.add_argument(f"--{option}", action="append", default=[])
     plan.add_argument("--over-quota-only", action="store_true")
-    plan.add_argument("--violation-category", action="append", default=[])
-    plan.add_argument("--violation-code", action="append", default=[])
-    plan.add_argument("--violation-tag", action="append", default=[])
+    plan.add_argument("--finding-category", action="append", default=[])
+    plan.add_argument("--finding-code", action="append", default=[])
+    plan.add_argument("--finding-tag", action="append", default=[])
     watch = sub.add_parser("watch")
     watch.add_argument("--view", choices=("overview", "users", "groups", "nodes", "workloads", "alerts"), default="alerts")
     watch.add_argument("--count", type=int)
@@ -398,6 +398,8 @@ def main() -> int:
                 parser.error("alternatives must be between 1 and 10")
             if not 1 <= args.search_seconds <= 30:
                 parser.error("search seconds must be between 1 and 30")
+            if args.candidate_node_scope != "all" and not args.group:
+                parser.error("--group is required when --candidate-node-scope is not all")
             body = {
                 "snapshot_id": args.snapshot,
                 "target": {
@@ -416,10 +418,10 @@ def main() -> int:
                     "exclude_users": args.exclude_user,
                     "over_quota_only": args.over_quota_only,
                     "candidate_node_scope": args.candidate_node_scope,
-                    "placement_scope": args.placement_scope,
-                    "violation_categories": args.violation_category,
-                    "violation_codes": args.violation_code,
-                    "violation_tags": args.violation_tag,
+                    "placement_relation_scope": args.placement_relation,
+                    "finding_categories": args.finding_category,
+                    "finding_codes": args.finding_code,
+                    "finding_tags": args.finding_tag,
                 },
             }
             if body["snapshot_id"] == "latest":

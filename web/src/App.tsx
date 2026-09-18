@@ -10,6 +10,7 @@ import { api } from "./api";
 import { emptyNavigationState, monitorTabs, navigationUrl, readNavigationState, type MonitorTab as Tab, type NodeSortKey, type NodeViewState, type PlannerIntent, type TableTab, type NavigationState, type TrendRange } from "./navigation";
 import { useMonitorData } from "./useMonitorData";
 import { DismissibleDetails, useDismissibleMenu } from "./useDismissibleMenu";
+import { PlacementBadge, placementLabel } from "./PlacementBadge";
 import type { Alert, DetailRef, GroupSummary, NodeSummary, PlanItem, PlanResult, PolicyResponse, Snapshot, UserSummary, Workload } from "./types";
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
@@ -20,8 +21,12 @@ const dateTime = (value: string | null | undefined) => {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
 };
-
 const releaseNotes: Record<string, string[]> = {
+  "2.1.0": [
+    "Placement 统一为 Workload 上下文与结构化策略发现，节点 owner、跨组放置和 quota 满额借用在列表与详情中直接可见。",
+    "调度模拟器采用候选节点范围与 Workload 节点使用关系的新模型，无效组合会明确报错，不再静默降级。",
+    "告警、筛选、CLI 与 API 使用稳定 workload_id 和新的 placement / finding 字段，旧字段与旧枚举已移除。",
+  ],
   "2.0.0": [
     "Monitor 拆分为可独立发布的服务端、Web、客户端和 Skill，客户端提供统一 CLI 入口。",
     "组节点归属支持管理员开关、互斥分配、组员和节点选择器，以及 quota 与借用节点告警。",
@@ -118,7 +123,7 @@ const groupColumns: ColumnDef<GroupSummary>[] = [
   { key: "allocated_gpu", label: "GPU", kind: "number", value: (row) => row.allocated_gpu },
   { key: "allocated_cpu", label: "CPU", kind: "number", value: (row) => row.allocated_cpu },
   { key: "allocated_memory_gib", label: "内存 GiB", kind: "number", value: (row) => row.allocated_memory_gib },
-  { key: "finding_categories", label: "违规分类", kind: "enum", value: (row) => row.finding_categories, hidden: true },
+  { key: "finding_categories", label: "策略发现分类", kind: "enum", value: (row) => row.finding_categories, hidden: true },
   { key: "finding_codes", label: "规则代码", kind: "enum", value: (row) => row.finding_codes, hidden: true },
   { key: "finding_tags", label: "标签", kind: "enum", value: (row) => row.finding_tags, hidden: true },
   ...telemetryColumns<GroupSummary>(),
@@ -133,7 +138,7 @@ const userColumns: ColumnDef<UserSummary>[] = [
   { key: "allocated_gpu", label: "GPU", kind: "number", value: (row) => row.allocated_gpu },
   { key: "allocated_cpu", label: "CPU", kind: "number", value: (row) => row.allocated_cpu },
   { key: "allocated_memory_gib", label: "内存 GiB", kind: "number", value: (row) => row.allocated_memory_gib },
-  { key: "finding_categories", label: "违规分类", kind: "enum", value: (row) => row.finding_categories, hidden: true },
+  { key: "finding_categories", label: "策略发现分类", kind: "enum", value: (row) => row.finding_categories, hidden: true },
   { key: "finding_codes", label: "规则代码", kind: "enum", value: (row) => row.finding_codes, hidden: true },
   { key: "finding_tags", label: "标签", kind: "enum", value: (row) => row.finding_tags, hidden: true },
   ...telemetryColumns<UserSummary>(),
@@ -146,12 +151,13 @@ const workloadColumns: ColumnDef<Workload>[] = [
   { key: "type", label: "类型", kind: "enum", value: (row) => row.type },
   { key: "priority", label: "优先级", kind: "enum", value: (row) => row.priority },
   { key: "policy_status", label: "状态", kind: "enum", value: (row) => row.policy_status },
+  { key: "placement", label: "节点归属", kind: "enum", sortable: true, value: (row) => placementLabel(row), format: (_value, row) => <PlacementBadge workload={row} /> },
   { key: "total_gpu", label: "GPU 总量", kind: "number", value: (row) => row.total_gpu },
   { key: "total_cpu", label: "CPU 总量", kind: "number", value: (row) => row.total_cpu },
   { key: "total_memory_gib", label: "内存 GiB", kind: "number", value: (row) => row.total_memory_gib },
   { key: "resource_create_time", label: "资源创建时间", kind: "number", value: (row) => row.resource_create_time ? Date.parse(row.resource_create_time) : null, format: (_value, row) => dateTime(row.resource_create_time) },
   { key: "runtime_hours", label: "运行小时", kind: "number", value: (row) => row.runtime_hours, format: (value, row) => value == null ? "—" : `${number(value)}${runtimeMark(row)}` },
-  { key: "finding_categories", label: "违规分类", kind: "enum", value: (row) => row.finding_categories, hidden: true },
+  { key: "finding_categories", label: "策略发现分类", kind: "enum", value: (row) => row.finding_categories, hidden: true },
   { key: "finding_codes", label: "规则代码", kind: "enum", value: (row) => row.finding_codes, hidden: true },
   { key: "finding_tags", label: "标签", kind: "enum", value: (row) => row.finding_tags, hidden: true },
   ...telemetryColumns<Workload>(),
@@ -222,14 +228,14 @@ function NodeHeatmap({ nodes, state, onState, onNode }: { nodes: NodeSummary[]; 
   </>;
 }
 
-type PlannerFilterKey = "types" | "groups" | "users" | "workloads" | "excludeWorkloads" | "excludeUsers" | "violationCategories" | "violationCodes" | "violationTags";
+type PlannerFilterKey = "types" | "groups" | "users" | "workloads" | "excludeWorkloads" | "excludeUsers" | "findingCategories" | "findingCodes" | "findingTags";
 type PlannerFilters = Record<PlannerFilterKey, string[]>;
 type PlannerOption = { value: string; label: string; detail?: string };
-type CandidateNodeScope = "all" | "selected_groups" | "outside_selected_groups";
-type PlacementScope = "any" | "owned_only" | "borrowed_only" | "mixed" | "includes_borrowed";
+type CandidateNodeScope = "all" | "selected_group_nodes" | "other_group_nodes";
+type PlacementRelationScope = "any" | "owned_only" | "foreign_only" | "mixed" | "includes_foreign";
 
-const plannerFilterKeys: PlannerFilterKey[] = ["types", "groups", "users", "workloads", "excludeWorkloads", "excludeUsers", "violationCategories", "violationCodes", "violationTags"];
-const emptyPlannerFilters = (): PlannerFilters => ({ types: [], groups: [], users: [], workloads: [], excludeWorkloads: [], excludeUsers: [], violationCategories: [], violationCodes: [], violationTags: [] });
+const plannerFilterKeys: PlannerFilterKey[] = ["types", "groups", "users", "workloads", "excludeWorkloads", "excludeUsers", "findingCategories", "findingCodes", "findingTags"];
+const emptyPlannerFilters = (): PlannerFilters => ({ types: [], groups: [], users: [], workloads: [], excludeWorkloads: [], excludeUsers: [], findingCategories: [], findingCodes: [], findingTags: [] });
 const simpleOptions = (values: string[]): PlannerOption[] => [...new Set(values.filter(Boolean))].sort((left, right) => left.localeCompare(right)).map((value) => ({ value, label: value }));
 
 function PlannerMultiSelect({ label, options, selected, onChange, emptyLabel = "不限" }: { label: string; options: PlannerOption[]; selected: string[]; onChange: (values: string[]) => void; emptyLabel?: string }) {
@@ -269,7 +275,7 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
   const [filters, setFilters] = useState<PlannerFilters>(emptyPlannerFilters);
   const [scope, setScope] = useState<"fragmented" | "full" | "all">("fragmented");
   const [candidateNodeScope, setCandidateNodeScope] = useState<CandidateNodeScope>("all");
-  const [placementScope, setPlacementScope] = useState<PlacementScope>("any");
+  const [placementRelationScope, setPlacementRelationScope] = useState<PlacementRelationScope>("any");
   const nodeAllocationEnabled = snapshot.node_allocation?.enabled === true;
   const filterOptions = useMemo<Record<PlannerFilterKey, PlannerOption[]>>(() => {
     const candidates = snapshot.workloads.filter((workload) => workload.planning_eligible !== false && workload.placements.length > 0 && workload.user && workload.user !== "unknown" && workload.group && workload.group !== "unattributed");
@@ -278,7 +284,7 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
       ...candidates.flatMap((workload) => workload.policy_findings ?? []),
       ...snapshot.groups.flatMap((group) => group.policy_findings ?? []),
       ...snapshot.users.flatMap((user) => (user.policy_findings ?? []).filter((finding) => finding.code === "quota.development.instances_per_user")),
-    ].filter((finding) => finding.status === "violation");
+    ].filter((finding) => finding.status === "warning" || finding.status === "violation");
     return {
       types: simpleOptions(candidates.map((workload) => workload.type)),
       groups: simpleOptions([
@@ -290,14 +296,16 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
       workloads: workloadOptions,
       excludeWorkloads: workloadOptions,
       excludeUsers: simpleOptions(candidates.map((workload) => workload.user)),
-      violationCategories: simpleOptions(findings.map((finding) => finding.category)),
-      violationCodes: simpleOptions(findings.map((finding) => finding.code)),
-      violationTags: simpleOptions(findings.flatMap((finding) => finding.tags)),
+      findingCategories: simpleOptions(findings.map((finding) => finding.category)),
+      findingCodes: simpleOptions(findings.map((finding) => finding.code)),
+      findingTags: simpleOptions(findings.flatMap((finding) => finding.tags)),
     };
   }, [snapshot]);
   useEffect(() => {
-    if (!nodeAllocationEnabled || filters.groups.length === 0) setCandidateNodeScope("all");
-    if (!nodeAllocationEnabled) setPlacementScope("any");
+    if (!nodeAllocationEnabled) {
+      setCandidateNodeScope("all");
+      setPlacementRelationScope("any");
+    }
   }, [nodeAllocationEnabled, filters.groups.length]);
   useEffect(() => {
     if (cpusUseDefault) setCpus(defaultFor(snapshot.planning_profile.default_cpu_per_gpu));
@@ -320,7 +328,7 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
     if (!intent) {
       setFilters(emptyPlannerFilters());
       setCandidateNodeScope("all");
-      setPlacementScope("any");
+      setPlacementRelationScope("any");
       return;
     }
     setNodes(String(intent.nodes));
@@ -331,13 +339,21 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
     setMemoryUsesDefault(intent.memoryTotalGib == null);
     setScope(intent.scope);
     setFilters({ ...emptyPlannerFilters(), types: intent.workloadTypes, groups: intent.groups, users: intent.users, workloads: intent.workloads });
-    setCandidateNodeScope(nodeAllocationEnabled && intent.sourceKind === "workload" && intent.groups.length > 0 ? "selected_groups" : "all");
-    setPlacementScope("any");
+    setCandidateNodeScope(nodeAllocationEnabled && intent.sourceKind === "workload" && intent.groups.length > 0 ? "selected_group_nodes" : "all");
+    setPlacementRelationScope("any");
     setError("");
   }, [intentSignature, nodeAllocationEnabled, snapshot.planning_profile.default_cpu_per_gpu, snapshot.planning_profile.default_memory_gib_per_gpu]);
   const changeFilter = (key: PlannerFilterKey) => (values: string[]) => setFilters((current) => ({ ...current, [key]: values }));
+  const ownershipError = nodeAllocationEnabled && candidateNodeScope !== "all" && filters.groups.length === 0
+    ? "选择该候选节点范围前，请先选择至少一个分组。"
+    : "";
   const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); setBusy(true); setError("");
+    event.preventDefault();
+    if (ownershipError) {
+      setError(ownershipError);
+      return;
+    }
+    setBusy(true); setError("");
     const data = new FormData(event.currentTarget);
     const strategies = data.getAll("strategy") as string[];
     const nodeCount = Number(data.get("nodes"));
@@ -352,8 +368,8 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
           workload_types: filters.types, groups: filters.groups, users: filters.users, workloads: filters.workloads,
           exclude_workloads: filters.excludeWorkloads, exclude_users: filters.excludeUsers, over_quota_only: data.get("overQuota") === "on",
           candidate_node_scope: nodeAllocationEnabled ? candidateNodeScope : "all",
-          placement_scope: nodeAllocationEnabled ? placementScope : "any",
-          violation_categories: filters.violationCategories, violation_codes: filters.violationCodes, violation_tags: filters.violationTags,
+          placement_relation_scope: nodeAllocationEnabled ? placementRelationScope : "any",
+          finding_categories: filters.findingCategories, finding_codes: filters.findingCodes, finding_tags: filters.findingTags,
         },
       }) });
       onResult(result);
@@ -368,22 +384,23 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
     </section>
     <section className="planner-section"><h3>求解设置</h3>
       <label>资源候选范围<select name="scope" value={scope} onChange={(event) => setScope(event.target.value as typeof scope)}><option value="fragmented">碎片节点</option><option value="full">满 GPU 节点</option><option value="all">全部</option></select></label>
-      <label>节点归属范围<select aria-label="节点归属范围" name="candidateNodeScope" value={candidateNodeScope} disabled={!nodeAllocationEnabled || filters.groups.length === 0} onChange={(event) => setCandidateNodeScope(event.target.value as CandidateNodeScope)}><option value="all">全部节点</option><option value="selected_groups">选中分组的节点</option><option value="outside_selected_groups">选中分组之外的节点</option></select><small>{!nodeAllocationEnabled ? "节点归属约束已关闭，全部 queue 节点可用。" : filters.groups.length === 0 ? "请先在“分组”中选择至少一个 group。" : "范围会基于已选 group 的节点归属计算。"}</small></label>
+      <PlannerMultiSelect label="分组" options={filterOptions.groups} selected={filters.groups} onChange={changeFilter("groups")} />
+      <label>候选节点范围<select aria-label="候选节点范围" name="candidateNodeScope" value={candidateNodeScope} disabled={!nodeAllocationEnabled} onChange={(event) => setCandidateNodeScope(event.target.value as CandidateNodeScope)}><option value="all">全部节点</option><option value="selected_group_nodes">所选分组节点</option><option value="other_group_nodes">其他分组节点</option></select><small>{!nodeAllocationEnabled ? "节点归属约束未启用，当前所有 queue 节点可用。" : ownershipError || "范围基于已选分组的节点归属计算。"}</small></label>
       <label>备选数<input name="alternatives" type="number" min="1" max="10" defaultValue="1" required /></label>
       <label>总求解预算（秒）<input name="searchSeconds" type="number" min="1" max="30" defaultValue="10" required /></label>
       <fieldset><legend>策略</legend>{[["min-gpu", "最少 GPU"], ["min-workloads", "最少任务"], ["min-users", "最少用户"]].map(([value, label]) => <label className="check" key={value}><input name="strategy" value={value} type="checkbox" defaultChecked />{label}</label>)}</fieldset>
     </section>
     <section className="planner-section"><h3>候选筛选</h3>
-      <PlannerMultiSelect label="类型" options={filterOptions.types} selected={filters.types} onChange={changeFilter("types")} /><PlannerMultiSelect label="分组" options={filterOptions.groups} selected={filters.groups} onChange={changeFilter("groups")} />
+      <PlannerMultiSelect label="类型" options={filterOptions.types} selected={filters.types} onChange={changeFilter("types")} />
       <PlannerMultiSelect label="用户" options={filterOptions.users} selected={filters.users} onChange={changeFilter("users")} /><PlannerMultiSelect label="指定 Workload" options={filterOptions.workloads} selected={filters.workloads} onChange={changeFilter("workloads")} />
       <PlannerMultiSelect label="排除 Workload" options={filterOptions.excludeWorkloads} selected={filters.excludeWorkloads} onChange={changeFilter("excludeWorkloads")} emptyLabel="不排除" /><PlannerMultiSelect label="排除用户" options={filterOptions.excludeUsers} selected={filters.excludeUsers} onChange={changeFilter("excludeUsers")} emptyLabel="不排除" />
-      <PlannerMultiSelect label="违规分类" options={filterOptions.violationCategories} selected={filters.violationCategories} onChange={changeFilter("violationCategories")} /><PlannerMultiSelect label="规则代码" options={filterOptions.violationCodes} selected={filters.violationCodes} onChange={changeFilter("violationCodes")} />
-      <PlannerMultiSelect label="违规标签" options={filterOptions.violationTags} selected={filters.violationTags} onChange={changeFilter("violationTags")} />
-      <label>节点使用关系<select name="placementScope" value={placementScope} disabled={!nodeAllocationEnabled} onChange={(event) => setPlacementScope(event.target.value as PlacementScope)}><option value="any">不限</option><option value="owned_only">仅本组节点</option><option value="borrowed_only">仅借用其他组节点</option><option value="mixed">本组与借用节点混用</option><option value="includes_borrowed">包含借用节点</option></select></label>
+      <PlannerMultiSelect label="策略发现分类" options={filterOptions.findingCategories} selected={filters.findingCategories} onChange={changeFilter("findingCategories")} /><PlannerMultiSelect label="规则代码" options={filterOptions.findingCodes} selected={filters.findingCodes} onChange={changeFilter("findingCodes")} />
+      <PlannerMultiSelect label="策略发现标签" options={filterOptions.findingTags} selected={filters.findingTags} onChange={changeFilter("findingTags")} />
+      <label>Workload 节点使用关系<select aria-label="Workload 节点使用关系" name="placementRelation" value={placementRelationScope} disabled={!nodeAllocationEnabled} onChange={(event) => setPlacementRelationScope(event.target.value as PlacementRelationScope)}><option value="any">不限</option><option value="owned_only">仅本组节点</option><option value="foreign_only">仅其他组节点</option><option value="mixed">本组与其他组混合</option><option value="includes_foreign">包含其他组节点</option></select></label>
       <label className="check planner-check-card"><input name="overQuota" type="checkbox" />仅超 quota 分组</label>
-      <p className="planner-filter-note">筛选候选来自当前快照；快照更新后，不再存在的选项会自动移除。{nodeAllocationEnabled ? "节点归属范围复用上面的分组筛选。" : "节点归属约束已关闭，所有节点可用，节点使用关系筛选不可用。"}</p>
+      <p className="planner-filter-note">筛选候选来自当前快照；快照更新后，不再存在的选项会自动移除。{nodeAllocationEnabled ? "候选节点范围使用上面选择的分组；Workload 节点关系按快照中的 owner 计算。" : "节点归属约束未启用，所有节点可用，节点关系筛选不可用。"}</p>
     </section>
-    <button disabled={busy}>{busy ? "计算中…" : "计算方案"}</button>{error && <p className="error planner-error">{error}</p>}
+    <button disabled={busy || Boolean(ownershipError)}>{busy ? "计算中…" : "计算方案"}</button>{error && <p className="error planner-error">{error}</p>}
   </form>;
 }
 
@@ -396,13 +413,18 @@ function PlanResults({ plan, currentSnapshotId, onWorkload }: { plan: PlanResult
   if (!plan) return <div className="plan-empty"><p>提交查询后，可在这里比较调度方案。</p></div>;
   const superseded = plan.superseded || plan.snapshot_id !== currentSnapshotId;
   const resourceScopeLabels: Record<string, string> = { fragmented: "碎片节点", full: "满 GPU 节点", all: "全部节点" };
-  const nodeScopeLabels: Record<string, string> = { all: "全部节点", selected_groups: "选中分组节点", outside_selected_groups: "选中分组之外" };
-  const placementScopeLabels: Record<string, string> = { any: "不限", owned_only: "仅本组节点", borrowed_only: "仅借用其他组节点", mixed: "本组与借用混用", includes_borrowed: "包含借用节点" };
+  const nodeScopeLabels: Record<string, string> = { all: "全部节点", selected_group_nodes: "所选分组节点", other_group_nodes: "其他分组节点" };
+  const placementScopeLabels: Record<string, string> = { any: "不限", owned_only: "仅本组节点", foreign_only: "仅其他组节点", mixed: "本组与其他组混合", includes_foreign: "包含其他组节点" };
+  const findingFilterLabel = plan.candidate_selection ? [
+    ...plan.candidate_selection.finding_categories.map((value) => `分类:${value}`),
+    ...plan.candidate_selection.finding_codes.map((value) => `规则:${value}`),
+    ...plan.candidate_selection.finding_tags.map((value) => `标签:${value}`),
+  ].join("、") || "不限" : "不限";
   const reasonLabels: Record<string, string> = { "target-node-unavailable": "指定目标节点不存在、状态不可调度或已因资源归属异常被排除。", "target-node-outside-ownership-scope": "指定目标节点不在当前节点归属候选范围内。", "attribution-excluded": "归属异常节点及关联 Workload 已被安全排除。", "no-candidates-after-filters": "筛选后没有可协调的 Workload。", "insufficient-releasable-resources": "候选 Workload 可释放的资源不足。", "solver-time-limit": "求解器在时间预算内没有找到可验证方案。" };
   return <div className="plan-results">
     <div className="plan-result-heading"><div><h3>{plan.optimality}</h3><span>{plan.solver.backend} · {plan.search_elapsed_seconds}s · snapshot {plan.snapshot_id.slice(0, 12)}</span></div>{superseded && <span className="status status-warning">快照已更新</span>}</div>
     <p className="plan-timestamp">快照时间 {new Date(plan.snapshot_generated_at).toLocaleString()}{plan.cache_hit ? " · cache hit" : ""}</p>
-    {plan.candidate_selection && <p className="plan-filter-summary">资源候选：{resourceScopeLabels[plan.candidate_selection.resource_scope] ?? plan.candidate_selection.resource_scope} · 节点归属：{nodeScopeLabels[plan.candidate_selection.effective_node_ownership_scope] ?? plan.candidate_selection.effective_node_ownership_scope}{plan.candidate_selection.node_ownership_scope !== plan.candidate_selection.effective_node_ownership_scope ? `（请求 ${nodeScopeLabels[plan.candidate_selection.node_ownership_scope] ?? plan.candidate_selection.node_ownership_scope}，约束已关闭）` : ""} · 节点使用关系：{placementScopeLabels[plan.candidate_selection.effective_placement_scope] ?? plan.candidate_selection.effective_placement_scope}</p>}
+    {plan.candidate_selection && <p className="plan-filter-summary">资源候选：{resourceScopeLabels[plan.candidate_selection.resource_scope] ?? plan.candidate_selection.resource_scope} · 分组：{plan.candidate_selection.groups.join("、") || "未限定"} · 候选节点范围：{nodeScopeLabels[plan.candidate_selection.node_ownership_scope] ?? plan.candidate_selection.node_ownership_scope} · Workload 节点使用关系：{placementScopeLabels[plan.candidate_selection.placement_relation_scope] ?? plan.candidate_selection.placement_relation_scope} · 策略发现筛选：{findingFilterLabel} · 节点归属约束：{plan.candidate_selection.node_allocation_enabled ? "已启用" : "未启用"}</p>}
     {plan.strategy_results.length > 0 && <div className="tag-list">{plan.strategy_results.map((result) => <span key={result.strategy}>{result.strategy}: {result.status} · {result.returned_alternatives}/{result.requested_alternatives}{result.top_k_complete ? "" : " · partial"}</span>)}</div>}
     <div className="plan-resolved"><b>实际资源画像</b><span>{number(plan.resolved_target.nodes)} 节点 ×（每节点 {number(plan.resolved_target.gpus_per_node)} GPU / {number(plan.resolved_target.cpus_per_node)} CPU / {number(plan.resolved_target.memory_per_node_gib)} GiB）</span>{plan.defaults_applied.length > 0 && <small>已应用默认值：{plan.defaults_applied.join(", ")}</small>}<small>排除 {plan.planning_exclusions.node_count} 节点 / {plan.planning_exclusions.workload_count} Workload{plan.planning_exclusions.reasons.length ? ` · ${plan.planning_exclusions.reasons.join(", ")}` : ""}</small>{plan.planning_exclusions.nodes?.map((item) => <small key={`node:${item.node}`}>节点 {item.node}: {item.reasons.join(", ")}</small>)}{plan.planning_exclusions.workloads?.map((item) => <small key={`workload:${item.workload_id}`}>Workload {item.workload_id}: {item.reasons.join(", ")} ({item.nodes.join(", ")})</small>)}</div>
     {plan.plans.length === 0 ? plan.optimality === "not-needed" ? <div className="plan-notice"><b>无需协调 Workload</b><p>当前可调度节点：{plan.currently_schedulable_nodes?.join(", ") || "—"}</p></div> : <div className="plan-notice"><b>没有可行方案</b><p>{reasonLabels[plan.no_plan_reason ?? ""] ?? "当前候选范围不足以释放目标资源。"}</p></div> : plan.plans.map((item) => {
@@ -410,7 +432,7 @@ function PlanResults({ plan, currentSnapshotId, onWorkload }: { plan: PlanResult
       return <article className={open ? "plan-card expanded" : "plan-card"} key={key}><button type="button" className="plan-summary" aria-expanded={open} onClick={() => setExpanded(open ? expanded.filter((value) => value !== key) : [...expanded, key])}><span><b>{item.strategy} #{item.rank}</b><small>{item.rank_status} · {item.rank_backend} · {number(item.gpus)} GPU · {number(item.workload_count)} workloads</small></span><span className="freed-summary">{item.freed_nodes.join(", ") || "无释放节点"}</span><i>{open ? "−" : "+"}</i></button>
         {open && <div className="plan-detail"><div className="plan-metrics"><span><small>GPU</small><b>{number(item.gpus)}</b></span><span><small>CPU</small><b>{number(item.cpus)}</b></span><span><small>内存 GiB</small><b>{number(item.memory_gib)}</b></span><span><small>用户</small><b>{number(item.users)}</b></span><span><small>分组</small><b>{number(item.groups)}</b></span><span><small>Workloads</small><b>{number(item.workload_count)}</b></span></div>
           <h4>目标节点</h4><div className="tag-list">{item.target_nodes.map((node) => <span key={node}>{node}</span>)}</div>{item.newly_schedulable_nodes.length > item.target_nodes.length && <small>同时可释放：{item.newly_schedulable_nodes.filter((node) => !item.target_nodes.includes(node)).join(", ")}</small>}
-          <h4>需要协调的 Workload</h4><div className="plan-workloads"><table><thead><tr><th>Workload</th><th>用户 / 分组</th><th>类型</th><th>GPU</th><th>CPU</th><th>内存 GiB</th><th>Placements</th></tr></thead><tbody>{item.workload_details.map((workload) => <tr tabIndex={0} className="clickable" aria-label={`查看 ${workload.workload_name} 详情`} key={workload.workload_id} onClick={() => onWorkload(workload)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onWorkload(workload); } }}><td>{workload.workload_name}</td><td>{workload.user}<small>{workload.group}</small></td><td>{workload.type}</td><td>{number(workload.total_gpu)}</td><td>{number(workload.total_cpu)}</td><td>{number(workload.total_memory_gib)}</td><td>{workload.placements.map((placement) => `${placement.node} (${number(placement.gpu)}G/${number(placement.cpu)}C/${number(placement.memory_gib)}GiB)`).join(", ")}</td></tr>)}</tbody></table></div>
+          <h4>需要协调的 Workload</h4><div className="plan-workloads"><table><thead><tr><th>Workload</th><th>用户 / 分组</th><th>类型</th><th>节点归属</th><th>GPU</th><th>CPU</th><th>内存 GiB</th><th>Placements</th></tr></thead><tbody>{item.workload_details.map((workload) => <tr tabIndex={0} className="clickable" aria-label={`查看 ${workload.workload_name} 详情`} key={workload.workload_id} onClick={() => onWorkload(workload)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onWorkload(workload); } }}><td>{workload.workload_name}</td><td>{workload.user}<small>{workload.group}</small></td><td>{workload.type}</td><td><PlacementBadge workload={workload} /></td><td>{number(workload.total_gpu)}</td><td>{number(workload.total_cpu)}</td><td>{number(workload.total_memory_gib)}</td><td>{workload.placements.map((placement) => `${placement.node} (${placement.owner_group ?? "未知 owner"}; ${number(placement.gpu)}G/${number(placement.cpu)}C/${number(placement.memory_gib)}GiB)`).join(", ")}</td></tr>)}</tbody></table></div>
         </div>}
       </article>;
     })}
@@ -558,8 +580,14 @@ export default function App() {
     if (ref.kind === "alert") {
       const alert = snapshot.alerts.find((item) => alertIdentity(item) === ref.id);
       if (!alert) return defaults;
-      const workload = workloads.find((item) => item.workload_id === alert.subject || item.workload_name === alert.subject);
-      const related = workload ? workloadRef(workload) : snapshot.nodes.some((item) => item.node === alert.subject) ? { kind: "node" as const, id: alert.subject, label: alert.subject } : snapshot.groups.some((item) => item.group === alert.subject) ? { kind: "group" as const, id: alert.subject, label: alert.subject } : snapshot.users.some((item) => item.user === alert.subject) ? { kind: "user" as const, id: alert.subject, label: alert.subject } : null;
+      const workload = alert.subject_type === "workload"
+        ? workloads.find((item) => item.workload_id === alert.subject)
+        : undefined;
+      const related = workload ? workloadRef(workload)
+        : alert.subject_type === "node" && snapshot.nodes.some((item) => item.node === alert.subject) ? { kind: "node" as const, id: alert.subject, label: alert.subject }
+        : alert.subject_type === "group" && snapshot.groups.some((item) => item.group === alert.subject) ? { kind: "group" as const, id: alert.subject, label: alert.subject }
+        : alert.subject_type === "user" && snapshot.users.some((item) => item.user === alert.subject) ? { kind: "user" as const, id: alert.subject, label: alert.subject }
+        : null;
       const derived = related ? plannerIntentFor(related) : defaults;
       return { ...derived, sourceKind: "alert", sourceId: ref.id, sourceLabel: alert.subject, note: `来自告警 ${alert.code || alert.kind}。${derived.note}` };
     }

@@ -24,6 +24,15 @@ export type Placement = {
   memory_gib: number | null;
   node: string;
   pod?: string;
+  owner_group?: string | null;
+  ownership?: "owned" | "foreign" | "unknown" | "unmanaged" | string;
+};
+
+export type PlacementContext = {
+  mode: "managed" | "unmanaged" | string;
+  relations: Array<"owned" | "foreign" | "unknown" | string>;
+  issue: "none" | "outside_owned_pool" | "quota_borrowed" | "unknown" | string;
+  owner_groups: string[];
 };
 
 export type TaskResource = {
@@ -99,7 +108,7 @@ export type Workload = FindingFacets & {
   cpus_per_node?: number | null;
   memory_per_node_gib?: number | null;
   policy_status: string;
-  policy_reasons: string[];
+  placement_context: PlacementContext;
   historical_telemetry?: HistoricalTelemetry;
   placements: Placement[];
   gpus: Array<Record<string, string | number | null>>;
@@ -186,6 +195,8 @@ export type Alert = {
   finding_categories?: string[];
   finding_codes?: string[];
   finding_tags?: string[];
+  observed?: Record<string, unknown>;
+  limit?: Record<string, unknown>;
 };
 
 export type PolicyResponse = {
@@ -223,6 +234,7 @@ export type PolicyResponse = {
 };
 
 export type Snapshot = {
+  schema_version: 2;
   snapshot_id: string;
   generated_at: string;
   cluster: string;
@@ -328,11 +340,12 @@ export type PlanResult = {
   planning_profile: { default_cpu_per_gpu: number; default_memory_gib_per_gpu: number };
   candidate_selection?: {
     resource_scope: "fragmented" | "full" | "all" | string;
-    node_ownership_scope: "all" | "selected_groups" | "outside_selected_groups" | string;
-    effective_node_ownership_scope: "all" | "selected_groups" | "outside_selected_groups" | string;
-    placement_scope: "any" | "owned_only" | "borrowed_only" | "mixed" | "includes_borrowed" | string;
-    effective_placement_scope: "any" | "owned_only" | "borrowed_only" | "mixed" | "includes_borrowed" | string;
+    node_ownership_scope: "all" | "selected_group_nodes" | "other_group_nodes" | string;
+    placement_relation_scope: "any" | "owned_only" | "foreign_only" | "mixed" | "includes_foreign" | string;
     groups: string[];
+    finding_categories: string[];
+    finding_codes: string[];
+    finding_tags: string[];
     node_allocation_enabled: boolean;
   };
   planning_exclusions: {

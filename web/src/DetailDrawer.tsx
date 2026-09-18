@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { monitorApiUrl } from "./api";
+import { PlacementBadge, PlacementOwnershipBadge } from "./PlacementBadge";
 import { formatPowerPercent, statusClass } from "./Table";
 import { useDialogFocus } from "./useDialogFocus";
 import type { Alert, DetailRef, GroupSummary, NodeSummary, PolicyFinding, Snapshot, Telemetry, UserSummary, Workload, WorkloadLogResponse } from "./types";
@@ -27,8 +28,11 @@ const runtimeSourceLabels: Record<string, string> = {
   resource_create_time: "资源创建时间",
 };
 const runtimeSource = (value: Workload["runtime_source"]) => runtimeSourceLabels[value ?? ""] ?? "—";
-
-export const alertIdentity = (alert: Alert) => [alert.severity, alert.kind, alert.subject, alert.message].join("\u0000");
+export const alertIdentity = (alert: Alert) => [
+  alert.severity, alert.kind, alert.subject, alert.code ?? "", alert.message,
+  String(alert.observed?.owner_group ?? ""),
+  Array.isArray(alert.observed?.nodes) ? alert.observed.nodes.join(",") : "",
+].join("\u0000");
 
 function Metrics({ children }: { children: ReactNode }) {
   return <div className="detail-metrics">{children}</div>;
@@ -59,38 +63,21 @@ function TelemetryPanel({ telemetry }: { telemetry: Telemetry }) {
 }
 
 function FindingsPanel({ findings }: { findings?: PolicyFinding[] }) {
-  const rows = findings ?? [];
+  const rows = [...(findings ?? [])].sort((left, right) => Number(right.category === "placement") - Number(left.category === "placement"));
   return <section className="detail-section"><h3>策略发现<span className="section-count">{rows.length}</span></h3>{rows.length === 0 ? <p className="muted">无</p> : <div className="finding-list">{rows.map((finding, index) => <article key={`${finding.code}:${finding.source_id ?? "self"}:${index}`}>
     <header><code>{finding.code}</code><span className={statusClass(finding.status)}>{finding.status}</span></header>
     <p>{finding.message}</p><div className="tag-list"><span>{finding.category}</span>{finding.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
-    <dl><div><dt>观测值</dt><dd>{JSON.stringify(Object.fromEntries(Object.entries(finding.observed).filter(([key]) => key !== "gpu_power_avg_w")))}</dd></div><div><dt>限制值</dt><dd>{JSON.stringify(finding.limit)}</dd></div>{finding.window_hours != null && <div><dt>窗口</dt><dd>{finding.window_hours}h</dd></div>}{finding.source_type && <div><dt>来源</dt><dd>{finding.source_type} · {finding.source_id}</dd></div>}</dl>
+    <dl>{finding.category === "placement" && <><div><dt>Owner group</dt><dd>{String(finding.observed.owner_group ?? "—")}</dd></div><div><dt>涉及节点</dt><dd>{Array.isArray(finding.observed.nodes) ? finding.observed.nodes.join(", ") : "—"}</dd></div><div><dt>GPU quota</dt><dd>{String(finding.limit.gpu_quota ?? "不限")}</dd></div><div><dt>Quota 状态</dt><dd>{String(finding.observed.quota_state ?? "—")}</dd></div><div><dt>已分配 / 本组空闲 / 待迁回 GPU</dt><dd>{`${number(finding.observed.allocated_gpu)} / ${number(finding.observed.owned_free_gpu)} / ${number(finding.observed.required_gpu)}`}</dd></div><div><dt>Owner pending pressure</dt><dd>{String((finding.observed.owner_pending_pressure as { state?: string } | undefined)?.state ?? "—")}</dd></div></>}{finding.category !== "placement" && <><div><dt>观测值</dt><dd>{JSON.stringify(Object.fromEntries(Object.entries(finding.observed).filter(([key]) => key !== "gpu_power_avg_w")))}</dd></div><div><dt>限制值</dt><dd>{JSON.stringify(finding.limit)}</dd></div></>}{finding.window_hours != null && <div><dt>窗口</dt><dd>{finding.window_hours}h</dd></div>}{finding.source_type && <div><dt>来源</dt><dd>{finding.source_type} · {finding.source_id}</dd></div>}</dl>
   </article>)}</div>}</section>;
 }
 
-function RelatedList({ title, items, kind, open }: { title: string; items: Array<{ id: string; label: string; meta?: string }>; kind: DetailRef["kind"]; open: (ref: DetailRef) => void }) {
+function RelatedList({ title, items, kind, open }: { title: string; items: Array<{ id: string; label: string; meta?: ReactNode }>; kind: DetailRef["kind"]; open: (ref: DetailRef) => void }) {
   return <section className="detail-section"><h3>{title}<span className="section-count">{items.length}</span></h3>
-    {items.length === 0 ? <p className="muted">无</p> : <div className="related-list">{items.map((item) => <button type="button" key={item.id} onClick={() => open({ kind, id: item.id, label: item.label })}><span>{item.label}</span>{item.meta && <small>{item.meta}</small>}<i>›</i></button>)}</div>}
-  </section>;
+    {items.length === 0 ? <p className="muted">无</p> : <div className="related-list">{items.map((item) => <button type="button" key={item.id} onClick={() => open({ kind, id: item.id, label: item.label })}><span>{item.label}</span>{item.meta && <span className="related-meta">{item.meta}</span>}<i>›</i></button>)}</div>}
+</section>;
 }
 
-type PlacementRelation = "owned" | "borrowed" | "unknown";
-
-function placementRelations(workload: Workload, snapshot: Snapshot): PlacementRelation[] {
-  if (!snapshot.node_allocation?.enabled) return workload.placements.map(() => "owned");
-  const owners = new Map<string, string>();
-  Object.entries(snapshot.node_allocation.assignments ?? {}).forEach(([group, nodes]) => nodes.forEach((node) => owners.set(node, group)));
-  return workload.placements.map((placement) => {
-    const owner = owners.get(placement.node);
-    if (!owner) return "unknown";
-    return owner === workload.group ? "owned" : "borrowed";
-  });
-}
-
-function placementSummary(workload: Workload, snapshot: Snapshot): string {
-  const relations = placementRelations(workload, snapshot);
-  const labels = new Set(relations.map((relation) => ({ owned: "本组", borrowed: "借用", unknown: "未知" }[relation])));
-  return [...labels].join(" + ") || "无 placement";
-}
+const workloadRelatedMeta = (item: Workload, prefix: string) => <span className="related-meta-content"><span>{prefix} · {workloadResources(item)}</span><PlacementBadge workload={item} /></span>;
 
 function GroupDetail({ group, snapshot, open, planFrom }: { group: GroupSummary; snapshot: Snapshot; open: (ref: DetailRef) => void; planFrom: (ref: DetailRef) => void }) {
   const workloads = allWorkloads(snapshot).filter((item) => item.group === group.group);
@@ -99,7 +86,7 @@ function GroupDetail({ group, snapshot, open, planFrom }: { group: GroupSummary;
   const configuredNodes = allocationEnabled ? (snapshot.node_allocation?.configured_assignments?.[group.group] ?? []) : [];
   const nodeDetails = snapshot.nodes.filter((node) => effectiveNodes.includes(node.node));
   const nodeGpu = nodeDetails.reduce((total, node) => total + node.total_gpu, 0);
-  const borrowedWorkloads = workloads.filter((item) => placementRelations(item, snapshot).includes("borrowed"));
+  const crossGroupWorkloads = workloads.filter((item) => item.placement_context?.relations.includes("foreign"));
   return <>
     <span className="eyebrow">Group</span><h2>{group.group}</h2><DetailActions detailRef={{ kind: "group", id: group.group, label: group.group }} planFrom={planFrom} /><span className={statusClass(group.status)}>{group.status}</span>
     <Metrics>
@@ -114,12 +101,11 @@ function GroupDetail({ group, snapshot, open, planFrom }: { group: GroupSummary;
       <Metric label="有效节点" value={allocationEnabled ? number(effectiveNodes.length) : "全部 queue 节点"} />
       <Metric label="有效节点 GPU" value={allocationEnabled ? number(nodeGpu) : "—"} />
       <Metric label="配置节点" value={allocationEnabled ? number(configuredNodes.length) : "—"} />
-      <Metric label="借用中的 Workload" value={allocationEnabled ? number(borrowedWorkloads.length) : "—"} />
+      <Metric label="存在跨组放置的 Workload" value={allocationEnabled ? number(crossGroupWorkloads.length) : "—"} />
     </Metrics>{allocationEnabled && configuredNodes.join(", ") !== effectiveNodes.join(", ") && <p className="muted">配置节点：{configuredNodes.join(", ") || "无"}；有效节点：{effectiveNodes.join(", ") || "无"}</p>}</section>
     {allocationEnabled && <RelatedList title="有效节点" kind="node" open={open} items={nodeDetails.map((node) => ({ id: node.node, label: node.node, meta: `${number(node.allocated_gpu)}/${number(node.total_gpu)} GPU · ${node.state}` }))} />}
     <RelatedList title="当前活跃用户" kind="user" open={open} items={group.members.map((user) => ({ id: user, label: user, meta: snapshot.users.some((item) => item.user === user) ? undefined : "当前无资源" }))} />
-    <RelatedList title="关联 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.user} · ${workloadResources(item)}` }))} />
-    {allocationEnabled && <RelatedList title="使用借用节点的 Workload" kind="workload" open={open} items={borrowedWorkloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.user} · ${placementSummary(item, snapshot)}` }))} />}
+    <RelatedList title="关联 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: workloadRelatedMeta(item, item.user) }))} />
     <FindingsPanel findings={group.policy_findings} />
     <TelemetryPanel telemetry={group.telemetry} />
   </>;
@@ -135,7 +121,7 @@ function UserDetail({ user, snapshot, open, planFrom }: { user: UserSummary; sna
       <Metric label="CPU" value={number(user.allocated_cpu)} />
       <Metric label="内存 GiB" value={number(user.allocated_memory_gib)} />
     </Metrics>
-    <RelatedList title="关联 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.type} · ${workloadResources(item)}` }))} />
+    <RelatedList title="关联 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: workloadRelatedMeta(item, item.type) }))} />
     <FindingsPanel findings={user.policy_findings} />
     <TelemetryPanel telemetry={user.telemetry} />
   </>;
@@ -168,7 +154,7 @@ function NodeDetail({ node, snapshot, open, planFrom }: { node: NodeSummary; sna
       <Metric label="未归属 GPU / CPU / GiB" value={`${number(node.unattributed.gpu)} / ${number(node.unattributed.cpu)} / ${number(node.unattributed.memory_gib)}`} />
       <Metric label="归属超额 GPU / CPU / GiB" value={`${number(node.attribution_excess.gpu)} / ${number(node.attribution_excess.cpu)} / ${number(node.attribution_excess.memory_gib)}`} />
     </Metrics></section>
-    <RelatedList title="节点 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: `${item.user} · ${workloadResources(item)}${allocationEnabled ? ` · ${placementSummary(item, snapshot)}` : ""}` }))} />
+    <RelatedList title="关联 Workload" kind="workload" open={open} items={workloads.map((item) => ({ id: item.workload_id, label: item.workload_name, meta: workloadRelatedMeta(item, item.user) }))} />
     <TelemetryPanel telemetry={node.telemetry} />
   </>;
 }
@@ -279,7 +265,11 @@ function WorkloadDetail({ workload, snapshotId, open, planFrom }: { workload: Wo
   return <>
     <span className="eyebrow">{workload.type}</span><h2>{workload.workload_name}</h2><DetailActions detailRef={{ kind: "workload", id: workload.workload_id, label: workload.workload_name }} planFrom={planFrom} consoleUrl={workload.console_url} workload /><p><button className="inline-link" type="button" onClick={() => open({ kind: "user", id: workload.user, label: workload.user })}>{workload.user}</button> · <button className="inline-link" type="button" onClick={() => open({ kind: "group", id: workload.group, label: workload.group })}>{workload.group}</button></p><span className={statusClass(workload.policy_status)}>{workload.policy_status}</span>
     {workload.planning_eligible === false && <p className="banner">该 Workload 接触归属异常节点，不作为调度释放候选。</p>}
-    {(workload.policy_reasons ?? []).map((reason) => <p className="error" key={reason}>{reason}</p>)}
+    <section className="detail-section placement-context-card"><h3>节点归属</h3><Metrics>
+      <Metric label="节点归属" value={<PlacementBadge workload={workload} showOwner={false} />} />
+      <Metric label="Owner group" value={workload.placement_context?.owner_groups?.join(", ") || "—"} />
+      <Metric label="模式" value={workload.placement_context?.mode === "managed" ? "已启用归属约束" : "未启用归属约束"} />
+    </Metrics></section>
     <Metrics>
       <Metric label="GPU" value={number(workload.total_gpu)} />
       <Metric label="CPU" value={number(workload.total_cpu)} />
@@ -296,7 +286,7 @@ function WorkloadDetail({ workload, snapshotId, open, planFrom }: { workload: Wo
     </Metrics>
     {pending && <p className="muted">Pending 时以资源创建时间计算初始排队时长；重试或重新进入 Pending 不会重置。</p>}
     {workload.resource_basis === "requested" && <section className="detail-section"><h3>Task 请求<span className="section-count">{workload.task_resources?.length ?? 0}</span></h3>{workload.task_resources?.length ? <div className="plan-workloads"><table><thead><tr><th>Task</th><th>角色</th><th>副本数</th><th>每副本 GPU</th><th>每副本 CPU</th><th>每副本内存 GiB</th></tr></thead><tbody>{workload.task_resources.map((task, index) => <tr key={`${task.name}:${task.role}:${index}`}><td>{task.name}</td><td>{task.role || "—"}</td><td>{number(task.replicas)}</td><td>{number(task.gpu_per_replica)}</td><td>{number(task.cpu_per_replica)}</td><td>{number(task.memory_gib_per_replica)}</td></tr>)}</tbody></table></div> : <p className="muted">无 Task 资源明细</p>}</section>}
-    {workload.resource_basis === "attributed" && <section className="detail-section"><h3>Placements（当前归属）<span className="section-count">{workload.placements.length}</span></h3><div className="placement-list">{workload.placements.map((placement, index) => <button type="button" key={`${placement.node}-${placement.pod ?? index}`} onClick={() => open({ kind: "node", id: placement.node, label: placement.node })}><span><b>{placement.node}</b><small>{placement.pod || "—"}</small></span><em>{number(placement.gpu)} GPU · {number(placement.cpu)} CPU · {number(placement.memory_gib)} GiB</em></button>)}</div></section>}
+    {workload.resource_basis === "attributed" && <section className="detail-section"><h3>Placements（当前归属）<span className="section-count">{workload.placements.length}</span></h3><div className="placement-list">{workload.placements.map((placement, index) => <button type="button" key={`${placement.node}-${placement.pod ?? index}`} onClick={() => open({ kind: "node", id: placement.node, label: placement.node })}><span><b>{placement.node}</b><small>{placement.pod || "—"}</small><PlacementOwnershipBadge placement={placement} /></span><em>{number(placement.gpu)} GPU · {number(placement.cpu)} CPU · {number(placement.memory_gib)} GiB</em></button>)}</div></section>}
     {workload.type === "trainingJob" && workload.resource_basis === "attributed" && workload.placements.some((item) => item.pod) && <WorkloadLogPanel key={workload.workload_id} workload={workload} snapshotId={snapshotId} />}
     <TelemetryPanel telemetry={workload.telemetry} />
     {workload.historical_telemetry && <section className="detail-section"><h3>历史 GPU 遥测</h3><Metrics>
@@ -318,11 +308,13 @@ function WorkloadDetail({ workload, snapshotId, open, planFrom }: { workload: Wo
 
 function relatedAlertRef(alert: Alert, snapshot: Snapshot): DetailRef | null {
   const workloads = allWorkloads(snapshot);
-  const workload = workloads.find((item) => item.workload_id === alert.subject || item.workload_name === alert.subject);
+  const workload = alert.subject_type === "workload"
+    ? workloads.find((item) => item.workload_id === alert.subject)
+    : undefined;
   if (workload) return { kind: "workload", id: workload.workload_id, label: workload.workload_name };
-  if (snapshot.users.some((item) => item.user === alert.subject)) return { kind: "user", id: alert.subject, label: alert.subject };
-  if (snapshot.groups.some((item) => item.group === alert.subject)) return { kind: "group", id: alert.subject, label: alert.subject };
-  if (snapshot.nodes.some((item) => item.node === alert.subject)) return { kind: "node", id: alert.subject, label: alert.subject };
+  if (alert.subject_type === "user" && snapshot.users.some((item) => item.user === alert.subject)) return { kind: "user", id: alert.subject, label: alert.subject };
+  if (alert.subject_type === "group" && snapshot.groups.some((item) => item.group === alert.subject)) return { kind: "group", id: alert.subject, label: alert.subject };
+  if (alert.subject_type === "node" && snapshot.nodes.some((item) => item.node === alert.subject)) return { kind: "node", id: alert.subject, label: alert.subject };
   return null;
 }
 
@@ -332,6 +324,13 @@ function AlertDetail({ alert, snapshot, open, planFrom }: { alert: Alert; snapsh
     <span className="eyebrow">Alert · {alert.kind}</span><h2>{alert.subject}</h2><DetailActions detailRef={{ kind: "alert", id: alertIdentity(alert), label: alert.subject }} planFrom={planFrom} /><span className={statusClass(alert.severity)}>{alert.severity}</span>
     <section className="detail-section"><h3>说明</h3><p className="alert-message">{alert.message}</p></section>
     <Metrics><Metric label="规则代码" value={alert.code || "—"} /><Metric label="分类" value={alert.category || "—"} /><Metric label="对象类型" value={alert.subject_type || "—"} /><Metric label="标签" value={(alert.tags ?? []).join(", ") || "—"} /></Metrics>
+    {alert.category === "placement" && alert.observed && <section className="detail-section"><h3>Placement 证据</h3><Metrics>
+      <Metric label="Workload group" value={String(alert.observed.group ?? "—")} />
+      <Metric label="Owner group" value={String(alert.observed.owner_group ?? "—")} />
+      <Metric label="涉及节点" value={Array.isArray(alert.observed.nodes) ? alert.observed.nodes.join(", ") : "—"} />
+      <Metric label="GPU quota" value={String(alert.limit?.gpu_quota ?? "不限")} />
+      <Metric label="Owner pending pressure" value={String((alert.observed.owner_pending_pressure as { state?: string } | undefined)?.state ?? "—")} />
+    </Metrics></section>}
     {related && <RelatedList title="关联对象" kind={related.kind} open={open} items={[{ id: related.id, label: related.label, meta: related.kind }]} />}
   </>;
 }

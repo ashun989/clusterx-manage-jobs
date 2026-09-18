@@ -149,7 +149,7 @@ class MonitorApiTests(unittest.TestCase):
     def test_status_snapshot_policy_and_read_only_routes(self):
         client = TestClient(self.app)
         status_response = client.get("/api/v1/status")
-        self.assertEqual(status_response.json()["version"], "2.0.0")
+        self.assertEqual(status_response.json()["version"], "2.1.0")
         self.assertTrue(status_response.json()["snapshot"]["ready"])
         self.assertIn("default-src 'self'", status_response.headers["content-security-policy"])
         self.assertEqual(status_response.headers["x-content-type-options"], "nosniff")
@@ -318,12 +318,30 @@ class MonitorApiTests(unittest.TestCase):
         self.assertEqual(first_payload["snapshot_id"], "api-snapshot")
         self.assertEqual(first_payload["solver"]["backend"], "cp-sat")
         self.assertEqual(first_payload["strategy_results"][0]["status"], "OPTIMAL")
-        self.assertEqual(first_payload["candidate_selection"]["effective_node_ownership_scope"], "all")
-        self.assertEqual(first_payload["candidate_selection"]["effective_placement_scope"], "any")
+        self.assertEqual(first_payload["candidate_selection"]["node_ownership_scope"], "all")
+        self.assertEqual(first_payload["candidate_selection"]["placement_relation_scope"], "any")
+        self.assertEqual(first_payload["candidate_selection"]["finding_categories"], [])
+        self.assertEqual(first_payload["candidate_selection"]["finding_codes"], [])
+        self.assertEqual(first_payload["candidate_selection"]["finding_tags"], [])
         second = client.post("/api/v1/plans", json=body).json()
         self.assertTrue(second["cache_hit"])
         missing = dict(body, snapshot_id="missing")
         self.assertEqual(client.post("/api/v1/plans", json=missing).status_code, 404)
+
+    def test_plan_rejects_ownership_filters_when_node_allocation_is_disabled(self):
+        client = TestClient(self.app)
+        body = {
+            "snapshot_id": "api-snapshot",
+            "target": {"nodes": 1, "gpus_per_node": 8},
+            "filters": {
+                "groups": ["example-team"],
+                "candidate_node_scope": "selected_group_nodes",
+                "placement_relation_scope": "foreign_only",
+            },
+        }
+        response = client.post("/api/v1/plans", json=body)
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("node allocation is disabled", response.json()["detail"])
 
     def test_invalid_hot_reload_is_visible_in_snapshot(self):
         self.policy.group_path.write_text("groups: [broken]", encoding="utf-8")

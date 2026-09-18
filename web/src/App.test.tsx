@@ -42,7 +42,8 @@ const workload = (id: string, name: string, user: string, group: string, gpu: nu
   start_time: "2026-08-14T00:10:00Z", runtime_anchor_time: "2026-08-14T00:10:00Z",
   runtime_source: "training_status_start", runtime_quality: "exact", runtime_hours: 2,
   runtime_estimated: false, total_gpu: gpu, total_cpu: gpu * 14, total_memory_gib: gpu * 240,
-  resource_basis: "attributed", task_resources: [], policy_status: "compliant", policy_reasons: [],
+  resource_basis: "attributed", task_resources: [], policy_status: "compliant",
+  placement_context: { mode: "managed", relations: ["owned"], issue: "none", owner_groups: [] },
   policy_findings: [], finding_categories: [], finding_codes: [], finding_tags: [],
   planning_eligible: true, planning_exclusion_reasons: [], planning_excluded_nodes: [],
   placements: [{ node, pod: `${name}-0`, gpu, cpu: gpu * 14, memory_gib: gpu * 240 }],
@@ -53,6 +54,7 @@ const trainA = workload("workload-a", "train-a", "alice", "group-a", 4, "node-a"
 const trainB = workload("workload-b", "train-b", "bob", "group-b", 8, "node-b");
 
 const baseSnapshot: Snapshot = {
+  schema_version: 2,
   snapshot_id: "snapshot-1", generated_at: "2026-08-14T01:00:00Z", cluster: "cluster", queue: "a800",
   capacity: { bound_gpu: 512, allocated_gpu: 12, free_gpu: 500, default_gpu_quota: 504, planning_eligible_gpu: 512 },
   planning_profile: { default_cpu_per_gpu: 14, default_memory_gib_per_gpu: 240 },
@@ -104,9 +106,10 @@ const planResult: PlanResult = {
   resolved_target: { nodes: 1, gpus_per_node: 8, cpus_per_node: 112, memory_per_node_gib: 1920 },
   defaults_applied: ["cpus_per_node", "memory_per_node_gib"],
   planning_profile: { default_cpu_per_gpu: 14, default_memory_gib_per_gpu: 240 },
+  candidate_selection: { resource_scope: "fragmented", node_ownership_scope: "all", placement_relation_scope: "any", groups: [], finding_categories: [], finding_codes: [], finding_tags: [], node_allocation_enabled: false },
   planning_exclusions: { node_count: 0, workload_count: 0, reasons: [] },
   no_plan_reason: null,
-  solver: { backend: "cp-sat", model_version: 2, status: "OPTIMAL", time_limit_seconds: 10, wall_time_seconds: 0.2, candidate_node_count: 2, candidate_workload_count: 2 },
+  solver: { backend: "cp-sat", model_version: 3, status: "OPTIMAL", time_limit_seconds: 10, wall_time_seconds: 0.2, candidate_node_count: 2, candidate_workload_count: 2 },
   strategy_results: [
     { strategy: "min-gpu", status: "OPTIMAL", termination_reason: "alternatives-complete", top_k_complete: true, requested_alternatives: 1, returned_alternatives: 1, wall_time_seconds: 0.1, deterministic_time_seconds: 0.01, branches: 2, conflicts: 0, plans: [] },
     { strategy: "min-workloads", status: "OPTIMAL", termination_reason: "alternatives-complete", top_k_complete: true, requested_alternatives: 1, returned_alternatives: 1, wall_time_seconds: 0.1, deterministic_time_seconds: 0.01, branches: 2, conflicts: 0, plans: [] },
@@ -160,7 +163,7 @@ describe("Clusterx monitor dashboard", () => {
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "2.0.0", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "2.1.0", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       if (path.includes("/history?")) return { ok: true, status: 200, json: async () => ({ retained_snapshots: 2, history_capacity: 2880, window_started_at: "2026-08-14T00:59:30Z", newest_at: "2026-08-14T01:00:00Z", points: [
         { snapshot_id: "snapshot-0", generated_at: "2026-08-14T00:59:30Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: { fragmented: 1, "gpu-full": 1 } },
         { snapshot_id: "snapshot-1", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 12, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: { fragmented: 1, "gpu-full": 1 } },
@@ -229,12 +232,12 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
 
-    fireEvent.click(screen.getByLabelText("查看 v2.0.0 更新内容"));
+    fireEvent.click(screen.getByLabelText("查看 v2.1.0 更新内容"));
 
     expect(screen.getByText("本版更新")).toBeInTheDocument();
-    expect(screen.getByText(/Monitor 拆分为可独立发布/)).toBeInTheDocument();
-    expect(screen.getByText(/组节点归属支持管理员开关/)).toBeInTheDocument();
-    expect(screen.getByText(/独立 Web 支持通过 config.js/)).toBeInTheDocument();
+    expect(screen.getByText(/Placement 统一为 Workload 上下文/)).toBeInTheDocument();
+    expect(screen.getByText(/调度模拟器采用候选节点范围/)).toBeInTheDocument();
+    expect(screen.getByText(/旧字段与旧枚举已移除/)).toBeInTheDocument();
   });
 
   it("provides an operational overview and global entity search", async () => {
@@ -245,7 +248,11 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByText("较上一快照 +2")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /已分配 GPU趋势/ })).toBeInTheDocument();
     expect(screen.getByLabelText("已分配 GPU时间轴").querySelectorAll("time")).toHaveLength(2);
-    expect(screen.getByText("节点健康")).toBeInTheDocument();
+    expect(screen.getByText("资源与配额策略")).toBeInTheDocument();
+    expect(screen.getByText("利用率与观测策略")).toBeInTheDocument();
+    expect(screen.getByText("节点归属策略")).toBeInTheDocument();
+    expect(screen.queryByText("节点健康")).not.toBeInTheDocument();
+    expect(screen.queryByText("最新告警")).not.toBeInTheDocument();
     const trendRange = screen.getByRole("slider", { name: "趋势时间范围" });
     fireEvent.change(trendRange, { target: { value: "0" } });
     fireEvent.pointerUp(trendRange);
@@ -338,7 +345,7 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(document.body);
     expect(menu).toHaveProperty("open", false);
 
-    const versionSummary = screen.getByLabelText("查看 v2.0.0 更新内容");
+    const versionSummary = screen.getByLabelText("查看 v2.1.0 更新内容");
     const versionMenu = versionSummary.closest("details")!;
     fireEvent.click(versionSummary);
     expect(versionMenu).toHaveProperty("open", true);
@@ -379,12 +386,12 @@ describe("Clusterx monitor dashboard", () => {
     render(<Overview snapshot={snapshot} history={null} open={() => {}} navigate={() => {}} range={DEFAULT_TREND_RANGE_SECONDS} onRange={() => {}} historyRefreshing={false} />);
 
     expect(screen.getByText("pending-5")).toBeInTheDocument();
-    expect(screen.getByText("attention-node-5")).toBeInTheDocument();
     expect(screen.getByText("low-5")).toBeInTheDocument();
-    expect(screen.getByText("attention-alert-5")).toBeInTheDocument();
-    for (const label of ["排队焦点列表", "节点健康列表", "策略与利用率列表", "最新告警列表"]) expect(screen.getByRole("region", { name: label })).toHaveAttribute("tabindex", "0");
+    expect(screen.queryByText("attention-node-5")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "最新告警列表" })).not.toBeInTheDocument();
+    for (const label of ["排队焦点列表", "资源与配额策略列表", "利用率与观测策略列表", "节点归属策略列表"]) expect(screen.getByRole("region", { name: label })).toHaveAttribute("tabindex", "0");
     const lowItem = screen.getByText("low-0").closest("button")!;
-    expect(within(lowItem).getByRole("group", { name: "GPU、显存与功率预览" })).toHaveTextContent("最近 36 小时GPU 12% · 显存 8%");
+    expect(within(lowItem).getByRole("group", { name: "GPU、显存与功率预览" })).toHaveTextContent("最近 36 小时 · GPU 12% · 显存 8%");
     expect(lowItem).toHaveTextContent("功率 20%");
     expect(lowItem).not.toHaveTextContent("W/卡");
     expect(lowItem).not.toHaveTextContent("实时");
@@ -424,7 +431,7 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "groups" }));
-    expect(screen.getByText("v2.0.0")).toBeInTheDocument();
+    expect(screen.getByText("v2.1.0")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);
@@ -754,8 +761,8 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(screen.getByLabelText("指定 Workload：train-a"));
     fireEvent.click(screen.getByText("排除用户", { selector: ".planner-multi > summary > span" }));
     fireEvent.click(screen.getByLabelText("排除用户：bob"));
-    fireEvent.click(screen.getByText("违规分类", { selector: ".planner-multi > summary > span" }));
-    fireEvent.click(screen.getByLabelText("违规分类：quota"));
+    fireEvent.click(screen.getByText("策略发现分类", { selector: ".planner-multi > summary > span" }));
+    fireEvent.click(screen.getByLabelText("策略发现分类：quota"));
     fireEvent.click(screen.getByText("规则代码", { selector: ".planner-multi > summary > span" }));
     fireEvent.click(screen.getByLabelText("规则代码：quota.gpu"));
     fireEvent.click(screen.getByRole("button", { name: "计算方案" }));
@@ -782,8 +789,8 @@ describe("Clusterx monitor dashboard", () => {
     expect(payload.filters.users).toEqual(["alice"]);
     expect(payload.filters.workloads).toEqual(["workload-a"]);
     expect(payload.filters.exclude_users).toEqual(["bob"]);
-    expect(payload.filters.violation_categories).toEqual(["quota"]);
-    expect(payload.filters.violation_codes).toEqual(["quota.gpu"]);
+    expect(payload.filters.finding_categories).toEqual(["quota"]);
+    expect(payload.filters.finding_codes).toEqual(["quota.gpu"]);
   });
 
   it("combines resource, group-owned node and placement scopes when allocation is enabled", async () => {
@@ -795,18 +802,32 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "planner" }));
-    const nodeScope = screen.getByRole("combobox", { name: "节点归属范围" });
-    expect(nodeScope).toBeDisabled();
+    const nodeScope = screen.getByRole("combobox", { name: "候选节点范围" });
+    expect(nodeScope).not.toBeDisabled();
+    fireEvent.change(nodeScope, { target: { value: "selected_group_nodes" } });
+    expect(screen.getByText("选择该候选节点范围前，请先选择至少一个分组。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "计算方案" })).toBeDisabled();
     fireEvent.click(screen.getByText("分组", { selector: ".planner-multi > summary > span" }));
     fireEvent.click(screen.getByLabelText("分组：group-a"));
     expect(nodeScope).not.toBeDisabled();
-    fireEvent.change(nodeScope, { target: { value: "outside_selected_groups" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "节点使用关系" }), { target: { value: "borrowed_only" } });
+    expect(screen.getByRole("button", { name: "计算方案" })).not.toBeDisabled();
+    fireEvent.change(nodeScope, { target: { value: "other_group_nodes" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Workload 节点使用关系" }), { target: { value: "foreign_only" } });
     fireEvent.click(screen.getByRole("button", { name: "计算方案" }));
     await screen.findByRole("button", { name: /min-gpu #1/ });
     const call = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).endsWith("/plans") && init?.method === "POST");
     const payload = JSON.parse(String(call?.[1]?.body));
-    expect(payload.filters).toMatchObject({ groups: ["group-a"], candidate_node_scope: "outside_selected_groups", placement_scope: "borrowed_only" });
+    expect(payload.filters).toMatchObject({ groups: ["group-a"], candidate_node_scope: "other_group_nodes", placement_relation_scope: "foreign_only" });
+  });
+
+  it("explains why ownership filters are unavailable when allocation is disabled", async () => {
+    latestSnapshot.node_allocation = { enabled: false, access_scope: "all", assignments: {}, configured_assignments: {} };
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "planner" }));
+    expect(screen.getByRole("combobox", { name: "候选节点范围" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Workload 节点使用关系" })).toBeDisabled();
+    expect(screen.getByText("节点归属约束未启用，当前所有 queue 节点可用。")).toBeInTheDocument();
   });
 
   it("enters an editable exact-node simulation from problem details", async () => {
@@ -848,12 +869,12 @@ describe("Clusterx monitor dashboard", () => {
 
     const groupFilter = screen.getByText("分组", { selector: ".planner-multi > summary > span" }).closest("details")!;
     expect(groupFilter.querySelector("summary")).toHaveTextContent("group-a");
-    expect(screen.getByRole("combobox", { name: "节点归属范围" })).toHaveValue("selected_groups");
-    expect(screen.getByText("范围会基于已选 group 的节点归属计算。")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "候选节点范围" })).toHaveValue("selected_group_nodes");
+    expect(screen.getByText("范围基于已选分组的节点归属计算。")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "清除上下文" }));
     expect(screen.getByText("分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
-    expect(screen.getByRole("combobox", { name: "节点归属范围" })).toHaveValue("all");
+    expect(screen.getByRole("combobox", { name: "候选节点范围" })).toHaveValue("all");
   });
 
   it("prefills a pending workload group without selecting the pending workload as a release candidate", async () => {
@@ -876,7 +897,7 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(within(drawer).getByRole("button", { name: "进入调度模拟" }));
 
     expect(screen.getByText("分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("group-a");
-    expect(screen.getByRole("combobox", { name: "节点归属范围" })).toHaveValue("selected_groups");
+    expect(screen.getByRole("combobox", { name: "候选节点范围" })).toHaveValue("selected_group_nodes");
     expect(screen.getByText("指定 Workload", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
     expect(screen.getByText("类型", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
   });
@@ -885,7 +906,7 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "groups" }));
-    const categorySummary = screen.getByText("违规分类", { selector: "summary" });
+    const categorySummary = screen.getByText("策略发现分类", { selector: "summary" });
     fireEvent.click(categorySummary);
     fireEvent.click(within(categorySummary.closest("details")!).getByRole("checkbox", { name: "quota" }));
     expect(screen.getByText("1/2")).toBeInTheDocument();
@@ -894,12 +915,69 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByRole("dialog", { name: "group-b 详情" })).toHaveTextContent("观测值");
   });
 
+  it("shows placement issues consistently and opens placement alerts at the Workload", async () => {
+    const placementFinding: PolicyFinding = {
+      code: "placement.outside_owned_pool", category: "placement", status: "warning",
+      message: "running workload is using nodes outside its group-owned node pool while GPU quota has headroom",
+      tags: ["placement", "outside-owned-pool"],
+      observed: {
+        group: "group-a", owner_group: "group-b", nodes: ["node-b"],
+        quota_state: "headroom", owner_pending_pressure: { state: "inactive" },
+      },
+      limit: { gpu_quota: 16 },
+    };
+    latestSnapshot.node_allocation = {
+      enabled: true, access_scope: "group-owned",
+      assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+      configured_assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+    };
+    latestSnapshot.workloads[0] = {
+      ...latestSnapshot.workloads[0], policy_status: "warning",
+      placement_context: { mode: "managed", relations: ["foreign"], issue: "outside_owned_pool", owner_groups: ["group-b"] },
+      placements: [{ ...latestSnapshot.workloads[0].placements[0], node: "node-b", owner_group: "group-b", ownership: "foreign" }],
+      policy_findings: [placementFinding], finding_categories: ["placement"],
+      finding_codes: ["placement.outside_owned_pool"], finding_tags: placementFinding.tags,
+    };
+    latestSnapshot.alerts.unshift({
+      severity: "warning", kind: "placement", subject: "workload-a",
+      message: placementFinding.message, code: placementFinding.code,
+      category: "placement", subject_type: "workload", tags: placementFinding.tags,
+      observed: placementFinding.observed, limit: placementFinding.limit,
+    });
+
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "workloads" }));
+    const row = screen.getByRole("row", { name: "查看 train-a 详情" });
+    expect(row).toHaveTextContent("warning");
+    expect(row).toHaveTextContent("有本组余量但使用其他组节点");
+    expect(row.querySelector(".placement-badge")).toHaveClass("placement-outside");
+    expect(within(row.closest("table")!).getByRole("button", { name: "排序 节点归属" })).toBeInTheDocument();
+
+    fireEvent.click(row);
+    const workloadDrawer = screen.getByRole("dialog", { name: "train-a 详情" });
+    expect(workloadDrawer).toHaveTextContent("group-b");
+    expect(workloadDrawer).toHaveTextContent("其他组节点");
+    expect(workloadDrawer.querySelector(".node-placement-badge .placement-badge")).toHaveClass("placement-foreign");
+    expect(workloadDrawer).toHaveTextContent("placement.outside_owned_pool");
+    fireEvent.click(within(workloadDrawer).getByRole("button", { name: "关闭详情" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "overview" }));
+    const placement = screen.getByRole("region", { name: "节点归属策略列表" });
+    fireEvent.click(within(placement).getByRole("button", { name: /train-a.*placement\.outside_owned_pool/ }));
+    expect(screen.getByRole("dialog", { name: "train-a 详情" })).toBeInTheDocument();
+
+    expect(screen.queryByText("使用借用节点的 Workload")).not.toBeInTheDocument();
+  });
+
   it("renders dynamic status, rules, effective values and private group counts", async () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "rules" }));
     expect(screen.getByRole("heading", { name: "规则说明" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /Monitor 规则产生层级与传播/ })).toBeInTheDocument();
+    expect(screen.getByText("pending > violation > warning")).toBeInTheDocument();
+    expect(screen.getByText("quota_borrowed / owner_unknown")).toBeInTheDocument();
     expect(screen.getByText("utilization.low_gpu_activity")).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "CPU quota" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "内存 quota GiB" })).toBeInTheDocument();

@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 CPU_SCALE = 1_000
 MEMORY_SCALE = 1_024
-MODEL_VERSION = 2
+MODEL_VERSION = 3
 
 
 def _decimal(value: Any) -> Decimal:

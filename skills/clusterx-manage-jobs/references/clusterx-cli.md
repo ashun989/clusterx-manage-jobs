@@ -187,20 +187,20 @@ clusterx-monitor-cli plan \
   --nodes 2 --gpus-per-node 8 \
   --strategy min-gpu --strategy min-workloads --strategy min-users \
   --candidate-scope all --alternatives 3 --search-seconds 10 \
-  --violation-category utilization \
-  --violation-code utilization.low_gpu_activity \
-  --violation-tag low-utilization \
+  --finding-category utilization \
+  --finding-code utilization.low_gpu_activity \
+  --finding-tag low-utilization \
   --format json
 ```
 
 Candidate filters include repeated `--type`, `--group`, `--user`, `--workload`,
-`--exclude-workload`, `--exclude-user`, `--violation-category`,
-`--violation-code`, `--violation-tag`, and `--over-quota-only`. Plan node
+`--exclude-workload`, `--exclude-user`, `--finding-category`,
+`--finding-code`, `--finding-tag`, and `--over-quota-only`. Plan node
 candidate scope is controlled independently with
-`--candidate-node-scope all|selected_groups|outside_selected_groups`; the two
-group-relative values use the selected repeated `--group` filters. Workload
+`--candidate-node-scope all|selected_group_nodes|other_group_nodes`; the two
+group-relative values require selected repeated `--group` filters. Workload
 placement scope is controlled with
-`--placement-scope any|owned_only|borrowed_only|mixed|includes_borrowed`.
+`--placement-relation any|owned_only|foreign_only|mixed|includes_foreign`.
 List views use
 comma-separated `--finding-category`, `--finding-code`, and `--tag` values.
 `--violations-only` and `--fail-on violation` read structured findings rather

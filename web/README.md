@@ -13,8 +13,10 @@ administrator editor for the local resource and group policies.
   priorities; selecting a proposal only updates the unsaved draft;
 - node-allocation enable/disable state reflected in the access view;
 - workload details, lazy running-worker logs and scheduling simulation;
-- scheduling simulation filters for resource shape, selected-group node scope,
-  and owned/borrowed/mixed placements;
+- placement status and owner groups throughout Workload, group, user and node
+  views, with placement alerts opening the affected Workload directly;
+- scheduling simulation filters for resource shape, group-relative node scope,
+  Workload placement relation and structured policy findings;
 - policy editing with revision checks, backups, CSRF protection and audit data.
 
 The dashboard is a static application. It does not query Clusterx directly.
@@ -60,9 +62,13 @@ are not counted because they have no node placement.
 
 When node allocation is enabled, the simulator keeps resource candidate scope
 (`fragmented`, `full`, `all`) separate from node ownership scope and placement
-relationship. The selected workload group filter is reused for “selected group
-nodes” and “outside selected groups”; when allocation is disabled, all nodes
-remain available and the ownership filters are disabled.
+relationship. Candidate node scope is `all`, `selected_group_nodes`, or
+`other_group_nodes`; the two group-relative values require a selected group.
+The scope control remains usable before group selection and displays an inline
+validation error instead of silently changing the request. Workload relation is
+`any`, `owned_only`, `foreign_only`, `mixed`, or `includes_foreign`. When node
+allocation is disabled, the UI explains that all queue nodes are available and
+disables ownership-dependent filters.
 
 ## Development
 

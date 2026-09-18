@@ -22,11 +22,14 @@ from .models import GroupConfig, PolicyConfig
 
 STATUS_DEFINITIONS = {
     "compliant": {"description": "All applicable policy checks are within their inclusive limits.", "propagation": "Does not raise the status of a parent object."},
+    "warning": {"description": "A policy finding needs attention but is not currently a violation.", "propagation": "Remains visible on the affected workload and propagates to its user summary."},
     "burst": {"description": "A group is above quota while no qualifying pending pressure is active.", "propagation": "Propagates from a group to its current users, but is not a violation."},
     "violation": {"description": "A policy rule is violated, or a group is above quota while pending pressure is active.", "propagation": "Workload findings propagate to the user; user findings remain user-scoped; quota findings propagate from group to user."},
     "unknown": {"description": "The available inventory or telemetry is insufficient to reach a policy conclusion.", "propagation": "A group quota unknown state propagates to its users; missing history alone does not."},
     "pending": {"description": "The workload is queued and is not evaluated as a running workload.", "propagation": "Pending jobs contribute to pressure only after the configured wait and count thresholds."},
 }
+
+SNAPSHOT_SCHEMA_VERSION = 2
 
 RULE_CATALOG = [
     {"code": "quota.development.instances_per_user", "category": "quota", "applies_to": "user", "title": "Development instances per-user limit", "description": "A known user may have at most the configured number of active aid development instances; equality is compliant."},
@@ -54,8 +57,9 @@ RULE_CATALOG = [
     {"code": "node.cpu_memory_blocked", "category": "node-classification", "applies_to": "node", "title": "CPU/memory-blocked node", "description": "Raw free GPUs exceed the number usable for the configured standard planning profile; smaller explicit requests may still fit."},
     {"code": "attribution.resource_excess", "category": "attribution", "applies_to": "node", "title": "Inconsistent resource attribution", "description": "Pod-attributed resources exceed node allocated resources; the node and touching workloads are excluded from planning."},
     {"code": "quota.pending_pressure", "category": "quota", "applies_to": "queue", "title": "Pending pressure", "description": "Pressure becomes active when the configured number of pending training jobs individually reach the wait threshold; 0-GPU jobs count. Missing queue timestamps make pressure unknown."},
-    {"code": "placement.outside_owned_pool", "category": "placement", "applies_to": "running workload", "title": "Outside owned node pool", "description": "A group with quota headroom is running on a node owned by another group; the finding becomes a violation when the owner group has active pending pressure."},
-    {"code": "placement.borrowed_node", "category": "placement", "applies_to": "running workload", "title": "Borrowed node", "description": "A group at or above its GPU quota is running on a node owned by another group; the finding becomes a violation when the owner group has active pending pressure, and borrowing does not waive quota findings."},
+    {"code": "placement.outside_owned_pool", "category": "placement", "applies_to": "running workload", "title": "Outside owned node pool", "description": "A group with quota headroom and enough effective free capacity in its own pool is running on a node owned by another group; the finding becomes a violation when the owner group has active pending pressure."},
+    {"code": "placement.quota_borrowed", "category": "placement", "applies_to": "running workload", "title": "Quota-full borrowed node", "description": "A group at or above its GPU quota is running on a node owned by another group; the finding becomes a violation when the owner group has active pending pressure, and borrowing does not waive quota findings."},
+    {"code": "placement.owner_unknown", "category": "placement", "applies_to": "running workload", "title": "Node owner unknown", "description": "At least one running placement references a node without an effective owner while node allocation is enabled."},
     {"code": "placement.assignment_stale", "category": "placement", "applies_to": "node allocation", "title": "Stale node assignment", "description": "A configured node is not present in the current queue inventory."},
     {"code": "placement.assignment_capacity_insufficient", "category": "placement", "applies_to": "group", "title": "Assigned node capacity insufficient", "description": "The effective nodes assigned to a group have less GPU capacity than its finite quota."},
 ]
@@ -88,17 +92,117 @@ def _set_finding_facets(row: dict[str, Any]) -> None:
     row["finding_tags"] = sorted({str(tag) for item in findings for tag in item.get("tags", [])})
 
 
+def _status_from_findings(findings: Iterable[dict[str, Any]], fallback: str = "compliant") -> str:
+    statuses = {str(item.get("status")) for item in findings}
+    if "violation" in statuses:
+        return "violation"
+    if "warning" in statuses:
+        return "warning"
+    if "unknown" in statuses:
+        return "unknown"
+    return fallback
+
+
+def _annotate_placement_context(
+    workload: dict[str, Any], node_owners: dict[str, str], allocation_enabled: bool,
+) -> None:
+    placements = workload.get("placements") or []
+    if not allocation_enabled:
+        for placement in placements:
+            placement["owner_group"] = None
+            placement["ownership"] = "unmanaged"
+        workload["placement_context"] = {
+            "mode": "unmanaged", "relations": [], "issue": "none", "owner_groups": [],
+        }
+        return
+
+    relations: set[str] = set()
+    owner_groups: set[str] = set()
+    for placement in placements:
+        node_name = str(placement.get("node") or "")
+        owner = node_owners.get(node_name)
+        placement["owner_group"] = owner
+        if owner is None:
+            ownership = "unknown"
+        elif owner == str(workload.get("group") or ""):
+            ownership = "owned"
+        else:
+            ownership = "foreign"
+            owner_groups.add(owner)
+        placement["ownership"] = ownership
+        relations.add(ownership)
+    ordered_relations = [name for name in ("owned", "foreign", "unknown") if name in relations]
+    workload["placement_context"] = {
+        "mode": "managed",
+        "relations": ordered_relations,
+        "issue": "unknown" if "unknown" in relations and "foreign" not in relations else "none",
+        "owner_groups": sorted(owner_groups),
+    }
+
+
+def _fits_on_owned_nodes(
+    workload: dict[str, Any], group: str, nodes: list[dict[str, Any]],
+    node_owners: dict[str, str],
+) -> bool:
+    """Conservatively prove that every foreign placement fits in owned free capacity."""
+    requirements: list[list[float]] = []
+    for placement in workload.get("placements") or []:
+        if placement.get("ownership") != "foreign":
+            continue
+        if placement.get("cpu") is None or placement.get("memory_gib") is None:
+            return False
+        requirements.append([
+            float(placement.get("gpu") or 0),
+            float(placement["cpu"]),
+            float(placement["memory_gib"]),
+        ])
+    if not requirements:
+        return False
+    capacities = [
+        [
+            max(0, float(node.get("total_gpu") or 0) - float(node.get("allocated_gpu") or 0)),
+            max(0, float(node.get("total_cpu") or 0) - float(node.get("allocated_cpu") or 0)),
+            max(0, float(node.get("total_memory_gib") or 0) - float(node.get("allocated_memory_gib") or 0)),
+        ]
+        for node in nodes
+        if node_owners.get(str(node.get("node"))) == group
+        and node.get("state") in {"RUNNING", "IDLE", "MIXED", "running", "idle", "mixed"}
+        and bool(node.get("planning_eligible", True))
+    ]
+    if not capacities:
+        return False
+    for required in sorted(requirements, key=lambda item: tuple(item), reverse=True):
+        choices = [
+            (sum(capacity[index] - required[index] for index in range(3)), position)
+            for position, capacity in enumerate(capacities)
+            if all(capacity[index] >= required[index] for index in range(3))
+        ]
+        if not choices:
+            return False
+        _, selected = min(choices)
+        capacities[selected] = [
+            capacities[selected][index] - required[index] for index in range(3)
+        ]
+    return True
+
+
 def _alert(
     severity: str, kind: str, subject: Any, message: str, *,
     code: str, category: str, subject_type: str, tags: Iterable[str] = (),
+    observed: dict[str, Any] | None = None, limit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    alert = {
         "severity": severity, "kind": kind, "subject": subject,
         "message": message, "code": code, "category": category,
         "subject_type": subject_type, "tags": sorted(set(tags)),
         "finding_categories": [category], "finding_codes": [code],
         "finding_tags": sorted(set(tags)),
     }
+    if observed is not None:
+        alert["observed"] = observed
+    if limit is not None:
+        alert["limit"] = limit
+    return alert
 
 
 def _load_mapping(path: Path, label: str) -> dict[str, Any]:
@@ -283,7 +387,7 @@ class PolicyManager:
                     "historical_scope": "Only currently running GPU trainingJob, aid, and air workloads are evaluated; no completed-workload history is stored.",
                     "development_instance_limit": "Only active aid workloads with known owners count toward the per-user development instance limit; the finding remains user-scoped.",
                     "group_quotas": "GPU, CPU, and memory quotas are independent; an omitted or null resource quota is unlimited. Numeric GPU quotas must be multiples of 8. The default group's members are the current known users left after explicit group assignment.",
-                    "node_allocation": "When enabled, each queue node has one public group owner; unassigned nodes effectively belong to default. Placement findings are advisory by default, but become violations when the owner group has active group-local pending pressure. Pending workloads do not receive node placement findings.",
+                    "node_allocation": "When enabled, each queue node has one public group owner; unassigned nodes effectively belong to default. Placement findings are advisory by default, but become violations when the owner group has active group-local pending pressure. Pending workloads do not receive node placement findings. Workload placement context is authoritative for ownership and issue display.",
                     "default_group": "When default.gpu_quota is remainder, its effective quota is max(0, current bound GPU capacity minus all other explicit group GPU quotas).",
                     "planning_profile": "Node effective/blocked capacity and omitted plan CPU/memory use the configurable standard planning profile; training ratios remain submission limits.",
                     "cluster_access": "Monitoring and planning are read-only against Clusterx; authenticated administrators may write only the configured local policy files.",
@@ -934,7 +1038,10 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         pending_item["type"] = "trainingJob"
         pending_item["policy_status"] = "pending"
         pending_item["policy_findings"] = []
-        pending_item["policy_reasons"] = []
+        pending_item["placement_context"] = {
+            "mode": "managed" if allocation_enabled else "unmanaged",
+            "relations": [], "issue": "none", "owner_groups": [],
+        }
         _set_finding_facets(pending_item)
         if "total_gpu" not in pending_item:
             pending_item["total_gpu"] = int(pending_item.get("num_nodes") or 0) * int(pending_item.get("gpus_per_node") or 0)
@@ -1020,10 +1127,10 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             ["attribution.resource_excess"] if excluded_placements else []
         )
         workload["planning_excluded_nodes"] = excluded_placements
+        _annotate_placement_context(workload, node_owners, allocation_enabled)
         status, findings = _workload_limits(workload, policy, now)
         workload["policy_status"] = status
         workload["policy_findings"] = findings
-        workload["policy_reasons"] = [item["message"] for item in findings]
         _set_finding_facets(workload)
         workload["telemetry"] = _telemetry_summary([workload], policy.low_utilization.gpu_power_limit_w)
         by_user[user].append(workload)
@@ -1056,6 +1163,29 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             group = str(workload.get("group") or "")
             if group in {"", "unattributed"}:
                 continue
+            unknown_nodes = sorted({
+                str(placement.get("node"))
+                for placement in workload.get("placements") or []
+                if placement.get("ownership") == "unknown"
+            })
+            if unknown_nodes:
+                finding = _finding(
+                    "placement.owner_unknown", "placement", "unknown",
+                    "running workload uses nodes without an effective owner",
+                    tags=("placement", "node", "owner-unknown"),
+                    observed={"group": group, "nodes": unknown_nodes},
+                )
+                workload["policy_findings"] = [*workload.get("policy_findings", []), finding]
+                workload["policy_status"] = _status_from_findings(
+                    workload["policy_findings"], workload.get("policy_status", "compliant"),
+                )
+                _set_finding_facets(workload)
+                alerts.append(_alert(
+                    "warning", "placement", workload.get("workload_id"), finding["message"],
+                    code=finding["code"], category=finding["category"],
+                    subject_type="workload", tags=finding["tags"],
+                    observed=finding["observed"], limit=finding["limit"],
+                ))
             external_nodes_by_owner: dict[str, set[str]] = defaultdict(set)
             for placement in workload.get("placements") or []:
                 node_name = str(placement.get("node"))
@@ -1066,8 +1196,16 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
                 continue
             quota = group_gpu_quota.get(group)
             quota_full = quota is not None and group_allocated_gpu.get(group, 0) >= quota
-            required_gpu = float(workload.get("total_gpu") or 0)
-            if not quota_full and group_owned_free_gpu.get(group, 0) < required_gpu:
+            workload_gpu = float(workload.get("total_gpu") or 0)
+            required_gpu = _sum(
+                placement.get("gpu") for placement in workload.get("placements") or []
+                if placement.get("ownership") == "foreign"
+            )
+            has_owned_capacity = _fits_on_owned_nodes(workload, group, nodes, node_owners)
+            issue = "quota_borrowed" if quota_full else "outside_owned_pool" if has_owned_capacity else "none"
+            if issue != "none":
+                workload["placement_context"]["issue"] = issue
+            if issue == "none":
                 continue
             for owner_group, owner_nodes in sorted(external_nodes_by_owner.items()):
                 owner_pressure = group_pending_pressure.get(owner_group, {
@@ -1079,18 +1217,18 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
                 })
                 pressure_status = owner_pressure["state"]
                 finding_status = "violation" if pressure_status == "active" else "warning"
-                code = "placement.borrowed_node" if quota_full else "placement.outside_owned_pool"
+                code = "placement.quota_borrowed" if quota_full else "placement.outside_owned_pool"
                 message = (
-                    "running workload is using nodes owned by another group while that group's pending pressure is active"
+                    "running workload is borrowing nodes from another group after its GPU quota is full while the owner group has active pending pressure"
                     if finding_status == "violation" and quota_full else
-                    "running workload is outside its group-owned node pool while that group's pending pressure is active"
+                    "running workload is outside its group-owned node pool while the owner group has active pending pressure"
                     if finding_status == "violation" else
-                    "running workload is using nodes owned by another group after GPU quota is full"
+                    "running workload is borrowing nodes from another group after its GPU quota is full"
                     if quota_full else
                     "running workload is using nodes outside its group-owned node pool while GPU quota has headroom"
                 )
                 tags = (
-                    "placement", "node", "borrowed" if quota_full else "outside-owned-pool",
+                    "placement", "node", "quota-borrowed" if quota_full else "outside-owned-pool",
                     "pending-pressure" if pressure_status == "active" else
                     "pending-pressure-unknown" if pressure_status == "unknown" else
                     "pending-pressure-inactive",
@@ -1105,25 +1243,28 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
                         "allocated_gpu": _clean(group_allocated_gpu.get(group, 0)),
                         "owned_free_gpu": _clean(group_owned_free_gpu.get(group, 0)),
                         "required_gpu": _clean(required_gpu),
+                        "workload_gpu": _clean(workload_gpu),
+                        "quota_state": "full" if quota_full else "headroom",
+                        "owned_capacity_sufficient": has_owned_capacity,
                         "owner_pending_pressure": owner_pressure,
                     },
                     limit={"gpu_quota": quota},
                 )
                 workload["policy_findings"] = [*workload.get("policy_findings", []), finding]
-                if finding_status == "violation":
-                    workload["policy_status"] = "violation"
                 if finding_status == "warning":
                     alerts_message = (
-                        "workload is borrowing nodes from another group; GPU quota findings remain active"
+                        "workload is borrowing nodes from another group after its GPU quota is full"
                         if quota_full else
                         "workload is outside its group-owned node pool while GPU quota has headroom"
                     )
                     alerts.append(_alert(
                         "warning", "placement", workload.get("workload_id"), alerts_message,
                         code=code, category="placement", subject_type="workload",
-                        tags=finding["tags"],
+                        tags=finding["tags"], observed=finding["observed"], limit=finding["limit"],
                     ))
-            workload["policy_reasons"] = [item["message"] for item in workload["policy_findings"]]
+            workload["policy_status"] = _status_from_findings(
+                workload["policy_findings"], workload.get("policy_status", "compliant"),
+            )
             _set_finding_facets(workload)
 
     group_summaries: list[dict[str, Any]] = []
@@ -1203,7 +1344,6 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
                 "min_wait_minutes": policy.pending_pressure.min_wait_minutes,
             }),
             "policy_findings": quota_findings,
-            "policy_reasons": [item["message"] for item in quota_findings],
             "telemetry": _telemetry_summary(group_workloads, policy.low_utilization.gpu_power_limit_w),
         }
         _set_finding_facets(summary)
@@ -1275,10 +1415,10 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
                 or group_states.get(group_name) == "violation"
                 else "unknown" if group_states.get(group_name) == "unknown"
                 else "burst" if group_states.get(group_name) == "burst"
+                else "warning" if any(w["policy_status"] == "warning" for w in items)
                 else "compliant"
             ),
             "policy_findings": user_findings,
-            "policy_reasons": [item["message"] for item in user_findings],
             "telemetry": _telemetry_summary(items, policy.low_utilization.gpu_power_limit_w),
         }
         _set_finding_facets(summary)
@@ -1294,10 +1434,12 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             if finding.get("status") != "violation":
                 continue
             alerts.append(_alert(
-                "error", "workload-policy", workload.get("workload_id"),
+                "error", "placement" if finding.get("category") == "placement" else "workload-policy",
+                workload.get("workload_id"),
                 finding["message"], code=finding["code"],
                 category=finding["category"], subject_type="workload",
-                tags=finding.get("tags", []),
+                tags=finding.get("tags", []), observed=finding.get("observed"),
+                limit=finding.get("limit"),
             ))
     if allocation_enabled:
         for node_name in stale_assignments:
@@ -1460,6 +1602,7 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
     snapshot["groups"] = group_summaries
     snapshot["alerts"] = alerts
     snapshot["telemetry"] = _telemetry_summary(workloads, policy.low_utilization.gpu_power_limit_w)
+    snapshot["schema_version"] = SNAPSHOT_SCHEMA_VERSION
     if not snapshot.get("telemetry_available", True):
         snapshot["telemetry_status"] = "unavailable"
     elif snapshot["telemetry"]["reported_gpu_count"] < snapshot["telemetry"]["allocated_gpu_count"]:
