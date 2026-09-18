@@ -248,7 +248,11 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByText("较上一快照 +2")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /已分配 GPU趋势/ })).toBeInTheDocument();
     expect(screen.getByLabelText("已分配 GPU时间轴").querySelectorAll("time")).toHaveLength(2);
-    expect(screen.getByText("节点健康")).toBeInTheDocument();
+    expect(screen.getByText("资源与配额策略")).toBeInTheDocument();
+    expect(screen.getByText("利用率与观测策略")).toBeInTheDocument();
+    expect(screen.getByText("节点归属策略")).toBeInTheDocument();
+    expect(screen.queryByText("节点健康")).not.toBeInTheDocument();
+    expect(screen.queryByText("最新告警")).not.toBeInTheDocument();
     const trendRange = screen.getByRole("slider", { name: "趋势时间范围" });
     fireEvent.change(trendRange, { target: { value: "0" } });
     fireEvent.pointerUp(trendRange);
@@ -382,12 +386,12 @@ describe("Clusterx monitor dashboard", () => {
     render(<Overview snapshot={snapshot} history={null} open={() => {}} navigate={() => {}} range={DEFAULT_TREND_RANGE_SECONDS} onRange={() => {}} historyRefreshing={false} />);
 
     expect(screen.getByText("pending-5")).toBeInTheDocument();
-    expect(screen.getByText("attention-node-5")).toBeInTheDocument();
     expect(screen.getByText("low-5")).toBeInTheDocument();
-    expect(screen.getByText("attention-alert-5")).toBeInTheDocument();
-    for (const label of ["排队焦点列表", "节点健康列表", "策略问题列表", "最新告警列表"]) expect(screen.getByRole("region", { name: label })).toHaveAttribute("tabindex", "0");
+    expect(screen.queryByText("attention-node-5")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "最新告警列表" })).not.toBeInTheDocument();
+    for (const label of ["排队焦点列表", "资源与配额策略列表", "利用率与观测策略列表", "节点归属策略列表"]) expect(screen.getByRole("region", { name: label })).toHaveAttribute("tabindex", "0");
     const lowItem = screen.getByText("low-0").closest("button")!;
-    expect(within(lowItem).getByRole("group", { name: "GPU、显存与功率预览" })).toHaveTextContent("最近 36 小时GPU 12% · 显存 8%");
+    expect(within(lowItem).getByRole("group", { name: "GPU、显存与功率预览" })).toHaveTextContent("最近 36 小时 · GPU 12% · 显存 8%");
     expect(lowItem).toHaveTextContent("功率 20%");
     expect(lowItem).not.toHaveTextContent("W/卡");
     expect(lowItem).not.toHaveTextContent("实时");
@@ -959,8 +963,8 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(within(workloadDrawer).getByRole("button", { name: "关闭详情" }));
 
     fireEvent.click(screen.getByRole("button", { name: "overview" }));
-    const alerts = screen.getByRole("region", { name: "最新告警列表" });
-    fireEvent.click(within(alerts).getByRole("button", { name: /workload-a.*placement\.outside_owned_pool/ }));
+    const placement = screen.getByRole("region", { name: "节点归属策略列表" });
+    fireEvent.click(within(placement).getByRole("button", { name: /train-a.*placement\.outside_owned_pool/ }));
     expect(screen.getByRole("dialog", { name: "train-a 详情" })).toBeInTheDocument();
 
     expect(screen.queryByText("使用借用节点的 Workload")).not.toBeInTheDocument();

@@ -457,11 +457,12 @@ tr.clickable:hover, tr.clickable:focus { background: var(--surface-hover); }
 .sparkline-labels time:nth-child(2) { text-align: center; }
 .sparkline-labels time:last-child { text-align: right; }
 .sparkline-empty { position: absolute; right: 13px; bottom: 12px; left: 13px; color: color-mix(in srgb, var(--muted) 65%, transparent); font-size: 9px; }
-.overview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; margin-top: 12px; }
+.overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; margin-top: 12px; }
 .overview-panel { min-width: 0; padding: 15px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-soft); }
 .overview-panel > header { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 10px; }
 .overview-panel h3 { margin: 0; color: var(--text-soft); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
 .overview-panel > header button { padding: 3px; border: 0; color: var(--accent); background: none; font-size: 10px; cursor: pointer; }
+.overview-panel-count { color: var(--muted); font-size: 10px; }
 .insight-list { display: grid; height: 280px; gap: 5px; align-content: start; padding-right: 4px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; outline: none; }
 .insight-list:focus-visible { border-radius: 6px; box-shadow: inset 0 0 0 2px var(--accent); }
 .insight-list > button { display: flex; justify-content: space-between; gap: 12px; align-items: center; min-width: 0; width: 100%; padding: 9px 10px; border: 1px solid transparent; border-radius: 8px; color: var(--text); background: color-mix(in srgb, var(--surface-raised) 68%, transparent); text-align: left; cursor: pointer; }
@@ -473,6 +474,12 @@ tr.clickable:hover, tr.clickable:focus { background: var(--surface-hover); }
 .insight-list > button > em.low-utilization-readout > b { font-size: 12px; }
 .insight-list > button b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .insight-list > button small { color: var(--muted); font-size: 10px; }
+.insight-list > button.policy-insight-item { align-items: flex-start; }
+.policy-insight-item > span { overflow: hidden; }
+.policy-insight-item > span small:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.policy-insight-item > em { max-width: 108px; }
+.policy-insight-item > em span { align-self: end; }
+.policy-insight-item > em small { max-width: 108px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .overview-empty { padding: 22px 8px; color: var(--muted); text-align: center; font-size: 11px; }
 .node-distribution { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 4px; }
 .node-distribution .status { gap: 7px; }

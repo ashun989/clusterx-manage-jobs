@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { alertIdentity } from "./DetailDrawer";
-import { PlacementBadge } from "./PlacementBadge";
 import { formatPowerPercent, statusClass } from "./Table";
-import type { DetailRef, HistoryPoint, HistoryResponse, Snapshot, Workload } from "./types";
+import type { Alert, DetailRef, HistoryPoint, HistoryResponse, PolicyFinding, Snapshot, Workload } from "./types";
 import {
   DEFAULT_TREND_RANGE_SECONDS,
   TREND_RANGE_MARKS,
@@ -119,6 +118,102 @@ function InsightList({ title, action, children }: { title: string; action?: Reac
   return <section className="overview-panel"><header><h3>{title}</h3>{action}</header><div className="insight-list" role="region" aria-label={`${title}列表`} tabIndex={0}>{children}</div></section>;
 }
 
+type PolicyPanelKey = "resource" | "utilization" | "placement";
+type PolicyInsight = {
+  id: string;
+  subjectType: string;
+  subjectId: string;
+  subjectLabel: string;
+  meta: string;
+  finding: PolicyFinding;
+  detail?: string;
+  alert?: Alert;
+};
+
+const policyPanelDefinitions: Record<PolicyPanelKey, { title: string; categories: string[] }> = {
+  resource: { title: "资源与配额策略", categories: ["resource-shape", "quota", "runtime"] },
+  utilization: { title: "利用率与观测策略", categories: ["utilization", "telemetry"] },
+  placement: { title: "节点归属策略", categories: ["placement", "attribution"] },
+};
+
+function findingCategory(code: string) {
+  if (code.startsWith("resource.")) return "resource-shape";
+  if (code.startsWith("quota.")) return "quota";
+  if (code.startsWith("utilization.")) return "utilization";
+  if (code.startsWith("telemetry.")) return "telemetry";
+  if (code.startsWith("placement.")) return "placement";
+  if (code.startsWith("attribution.")) return "attribution";
+  if (code.startsWith("runtime.")) return "runtime";
+  return "";
+}
+
+function fallbackFindings(entity: { policy_findings?: PolicyFinding[]; finding_codes?: string[]; finding_tags?: string[]; status?: string }) {
+  if (entity.policy_findings?.length) return entity.policy_findings;
+  return (entity.finding_codes ?? []).map((code): PolicyFinding => ({
+    code,
+    category: findingCategory(code),
+    status: entity.status === "violation" ? "violation" : entity.status === "unknown" ? "unknown" : "warning",
+    message: code,
+    tags: entity.finding_tags ?? [],
+    observed: {},
+    limit: {},
+  }));
+}
+
+function alertStatus(severity: string) {
+  if (["critical", "error"].includes(severity)) return "violation";
+  if (severity === "warning") return "warning";
+  return severity || "unknown";
+}
+
+function collectPolicyInsights(snapshot: Snapshot, panel: PolicyPanelKey): PolicyInsight[] {
+  const categories = new Set(policyPanelDefinitions[panel].categories);
+  const entries: PolicyInsight[] = [];
+  const seen = new Set<string>();
+  const add = (subjectType: string, subjectId: string, subjectLabel: string, meta: string, finding: PolicyFinding, alert?: Alert, detail?: string) => {
+    if (!categories.has(finding.category)) return;
+    const key = `${finding.category}:${finding.code}:${subjectType}:${subjectId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push({ id: key, subjectType, subjectId, subjectLabel, meta, finding, alert, detail });
+  };
+
+  for (const workload of [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])]) {
+    for (const finding of fallbackFindings(workload)) {
+      const detail = finding.code === "utilization.low_gpu_activity"
+        ? `最近 ${number(workload.historical_telemetry?.window_hours)} 小时 · GPU ${number(workload.historical_telemetry?.gpu_compute_util_avg_pct, "%")} · 显存 ${number(workload.historical_telemetry?.gpu_memory_util_avg_pct, "%")} · 功率 ${formatPowerPercent(workload.historical_telemetry?.gpu_power_util_avg_pct)}`
+        : undefined;
+      add("workload", workload.workload_id, workload.workload_name, `${workload.user} · ${workload.group}`, finding, undefined, detail);
+    }
+  }
+  for (const group of snapshot.groups) {
+    for (const finding of fallbackFindings(group)) add("group", group.group, group.group, `${group.members.length} 个成员`, finding);
+  }
+  for (const user of snapshot.users) {
+    for (const finding of fallbackFindings(user)) {
+      // User summaries copy workload/group findings; retain only user-local findings here.
+      if (finding.source_type) continue;
+      add("user", user.user, user.user, user.group, finding);
+    }
+  }
+  for (const alert of snapshot.alerts) {
+    const category = alert.category ?? alert.finding_categories?.[0] ?? findingCategory(alert.code ?? "");
+    if (!category || !categories.has(category)) continue;
+    const finding: PolicyFinding = {
+      code: alert.code ?? alert.kind,
+      category,
+      status: alertStatus(alert.severity),
+      message: alert.message,
+      tags: alert.tags ?? alert.finding_tags ?? [],
+      observed: alert.observed ?? {},
+      limit: alert.limit ?? {},
+    };
+    add(alert.subject_type ?? "alert", String(alert.subject), String(alert.subject), alert.subject_type ?? "队列", finding, alert);
+  }
+  const statusRank: Record<string, number> = { violation: 0, warning: 1, burst: 2, unknown: 3 };
+  return entries.sort((left, right) => (statusRank[left.finding.status] ?? 4) - (statusRank[right.finding.status] ?? 4) || left.subjectLabel.localeCompare(right.subjectLabel) || left.finding.code.localeCompare(right.finding.code));
+}
+
 function TrendRangeSlider({ range, onRange }: { range: TrendRange; onRange: (range: TrendRange) => void }) {
   const [position, setPosition] = useState(() => sliderPositionFromTrendRange(range));
   const positionRef = useRef(position);
@@ -185,18 +280,22 @@ export function Overview({ snapshot, history, open, navigate, range, onRange, hi
   const [activeSnapshotId, setActiveSnapshotId] = useState<string | null>(null);
   const capacity = snapshot.capacity;
   const pending = [...(snapshot.pending_workloads ?? [])].sort((a, b) => Number(b.queue_age_seconds ?? 0) - Number(a.queue_age_seconds ?? 0));
-  const lowUtilization = snapshot.workloads.filter((workload) => workload.finding_codes?.includes("utilization.low_gpu_activity"));
-  const placementIssues = snapshot.workloads.filter((workload) => workload.placement_context?.issue && workload.placement_context.issue !== "none");
-  const nodeCounts = snapshot.nodes.reduce<Record<string, number>>((result, node) => ({ ...result, [node.classification]: (result[node.classification] ?? 0) + 1 }), {});
-  const attentionNodes = snapshot.nodes.filter((node) => ["fragmented", "cpu-memory-blocked", "unavailable"].includes(node.classification));
+  const policyInsights = {
+    resource: collectPolicyInsights(snapshot, "resource"),
+    utilization: collectPolicyInsights(snapshot, "utilization"),
+    placement: collectPolicyInsights(snapshot, "placement"),
+  };
   const severeAlerts = snapshot.alerts.filter((alert) => ["critical", "error", "warning"].includes(alert.severity));
   const openWorkload = (workload: Workload) => open({ kind: "workload", id: workload.workload_id, label: workload.workload_name });
-  const openAlertTarget = (alert: Snapshot["alerts"][number]) => {
-    const workload = alert.subject_type === "workload"
-      ? [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])].find((item) => item.workload_id === alert.subject)
-      : undefined;
-    if (workload) openWorkload(workload);
-    else open({ kind: "alert", id: alertIdentity(alert), label: alert.subject });
+  const openPolicyInsight = (insight: PolicyInsight) => {
+    if (insight.subjectType === "workload") {
+      const workload = [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])].find((item) => item.workload_id === insight.subjectId);
+      if (workload) return openWorkload(workload);
+    }
+    if (insight.subjectType === "group" && snapshot.groups.some((item) => item.group === insight.subjectId)) return open({ kind: "group", id: insight.subjectId, label: insight.subjectLabel });
+    if (insight.subjectType === "user" && snapshot.users.some((item) => item.user === insight.subjectId)) return open({ kind: "user", id: insight.subjectId, label: insight.subjectLabel });
+    if (insight.subjectType === "node" && snapshot.nodes.some((item) => item.node === insight.subjectId)) return open({ kind: "node", id: insight.subjectId, label: insight.subjectLabel });
+    if (insight.alert) open({ kind: "alert", id: alertIdentity(insight.alert), label: insight.subjectLabel });
   };
   const resolution = history?.resolution_seconds ?? 1;
   const resolutionLabel = resolution < 60 ? "原始点" : resolution < 3600 ? `${Math.round(resolution / 60)} 分钟聚合` : resolution < 86_400 ? `${Math.round(resolution / 3600)} 小时聚合` : `${Math.round(resolution / 86_400)} 天聚合`;
@@ -212,7 +311,7 @@ export function Overview({ snapshot, history, open, navigate, range, onRange, hi
 
   return <div className="overview-page">
     <section className="overview-hero">
-      <div><span className="eyebrow">Operational overview</span><h2>集群运行总览</h2><p>从容量、排队、节点健康与策略异常快速定位当前最值得关注的问题。</p></div>
+      <div><span className="eyebrow">Operational overview</span><h2>集群运行总览</h2><p>从容量、排队与策略异常快速定位当前最值得关注的问题。</p></div>
       <div className="capacity-ring" style={{ "--value": `${percent(capacity.allocated_gpu, capacity.bound_gpu)}%` } as React.CSSProperties} aria-label={`GPU 分配率 ${percent(capacity.allocated_gpu, capacity.bound_gpu)}%`}><strong>{percent(capacity.allocated_gpu, capacity.bound_gpu)}%</strong><small>GPU 分配率</small></div>
     </section>
 
@@ -234,22 +333,16 @@ export function Overview({ snapshot, history, open, navigate, range, onRange, hi
         {!pending.length && <p className="overview-empty">当前没有 Pending Workload</p>}
       </InsightList>
 
-      <InsightList title="节点健康" action={<button type="button" onClick={() => navigate("nodes")}>节点视图</button>}>
-        <div className="node-distribution">{Object.entries(nodeCounts).map(([name, count]) => <span key={name} className={statusClass(name)}>{name}<b>{count}</b></span>)}</div>
-        {attentionNodes.map((node) => <button type="button" key={node.node} onClick={() => open({ kind: "node", id: node.node, label: node.node })}><span><b>{node.node}</b><small>{node.classification}</small></span><em><b>{number(node.stranded_gpu)} blocked</b><small>{number(node.effective_free_gpu)} effective free</small></em></button>)}
-        {!attentionNodes.length && <p className="overview-empty">节点状态良好</p>}
-      </InsightList>
-
-      <InsightList title="策略问题" action={<button type="button" onClick={() => navigate("workloads")}>Workload 视图</button>}>
-        {placementIssues.map((workload) => <button type="button" className="low-utilization-item" key={`placement:${workload.workload_id}`} onClick={() => openWorkload(workload)}><span><b>{workload.workload_name}</b><small>{workload.user} · {workload.group}</small><PlacementBadge workload={workload} showOwner={false} /></span><em className="low-utilization-readout"><small>Owner group</small><b>{workload.placement_context.owner_groups.join(", ") || "—"}</b></em></button>)}
-        {lowUtilization.map((workload) => <button type="button" className="low-utilization-item" key={workload.workload_id} onClick={() => openWorkload(workload)}><span><b>{workload.workload_name}</b><small>{workload.user} · 低 GPU/显存利用率或功率</small></span><em className="low-utilization-readout" role="group" aria-label="GPU、显存与功率预览"><small>最近 {number(workload.historical_telemetry?.window_hours)} 小时</small><b>GPU {number(workload.historical_telemetry?.gpu_compute_util_avg_pct, "%")} · 显存 {number(workload.historical_telemetry?.gpu_memory_util_avg_pct, "%")} · 功率 {formatPowerPercent(workload.historical_telemetry?.gpu_power_util_avg_pct)}</b></em></button>)}
-        {!lowUtilization.length && !placementIssues.length && <p className="overview-empty">当前没有策略问题</p>}
-      </InsightList>
-
-      <InsightList title="最新告警" action={<button type="button" onClick={() => navigate("alerts")}>告警中心</button>}>
-        {severeAlerts.map((alert) => <button type="button" key={alertIdentity(alert)} onClick={() => openAlertTarget(alert)}><span><b>{alert.subject}</b><small>{alert.code ?? alert.kind}</small></span><em><span className={statusClass(alert.severity)}>{alert.severity}</span></em></button>)}
-        {!severeAlerts.length && <p className="overview-empty">当前没有需要关注的告警</p>}
-      </InsightList>
+      {(Object.entries(policyPanelDefinitions) as Array<[PolicyPanelKey, typeof policyPanelDefinitions[PolicyPanelKey]]>).map(([key, definition]) => {
+        const insights = policyInsights[key];
+        return <InsightList key={key} title={definition.title} action={<small className="overview-panel-count">{insights.length} 项</small>}>
+          {insights.map((insight) => <button type="button" className="policy-insight-item" key={insight.id} onClick={() => openPolicyInsight(insight)}>
+            <span><b>{insight.subjectLabel}</b><small>{insight.meta}</small><small>{insight.finding.message}</small>{insight.detail && <small role="group" aria-label="GPU、显存与功率预览">{insight.detail}</small>}</span>
+            <em><span className={statusClass(insight.finding.status)}>{insight.finding.status}</span><small>{insight.finding.code}</small></em>
+          </button>)}
+          {!insights.length && <p className="overview-empty">当前没有相关策略问题</p>}
+        </InsightList>;
+      })}
     </section>
   </div>;
 }
