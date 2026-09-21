@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
+from ipaddress import IPv4Address, ip_address
 import json
 import math
 import re
@@ -224,6 +225,20 @@ def _resource_map(node: dict[str, Any]) -> dict[str, tuple[float, float]]:
     return result
 
 
+def _node_hostname(value: object) -> str | None:
+    """Convert an authoritative node IPv4 address to Clusterx's hostname."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        address = ip_address(raw)
+    except ValueError:
+        return None
+    if not isinstance(address, IPv4Address):
+        return None
+    return "host-" + str(address).replace(".", "-")
+
+
 def normalize_nodes(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     nodes: list[dict[str, Any]] = []
     for raw in rows:
@@ -232,6 +247,7 @@ def normalize_nodes(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             "node": str(raw.get("name") or ""),
             "id": str(raw.get("id") or ""),
             "host_ip": str(raw.get("host_ip") or ""),
+            "hostname": _node_hostname(raw.get("host_ip")),
             "state": str(raw.get("state") or "UNKNOWN"),
             "allocated_gpu": _clean(resources.get("DEVICE", (0, 0))[0]),
             "total_gpu": _clean(resources.get("DEVICE", (0, 0))[1]),
@@ -328,7 +344,7 @@ def _list_queue_nodes(cluster: Any, cluster_name: str, queue: str) -> list[dict[
 def _node_signature(rows: Iterable[dict[str, Any]]) -> tuple[Any, ...]:
     return tuple(
         (
-            n["node"], n["id"], n["state"],
+            n["node"], n["id"], n["host_ip"], n["state"],
             n["allocated_gpu"], n["total_gpu"],
             n["allocated_cpu"], n["total_cpu"],
             n["allocated_memory_gib"], n["total_memory_gib"],
@@ -1139,40 +1155,62 @@ class ClusterCollector:
         started = time.monotonic()
         raw_nodes = self.gateway.list_queue_nodes(self.cluster_name, self.queue)
         nodes = normalize_nodes(raw_nodes)
-        occupied = [
-            item for item in nodes
-            if item["allocated_gpu"] or item["allocated_cpu"] or item["allocated_memory_gib"]
-        ]
         pods_by_node: dict[str, list[dict[str, Any]]] = {}
-        failures: list[str] = []
-        pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="monitor-pod")
-        try:
-            futures = {
-                pool.submit(self.gateway.list_node_pods, self.cluster_name, self.queue, item["id"]): item["node"]
-                for item in occupied
-            }
-            remaining = max(0.01, deadline_seconds - (time.monotonic() - started))
-            done, pending_futures = wait(futures, timeout=remaining)
-            for future in pending_futures:
-                failures.append(futures[future])
-                future.cancel()
-            for future in done:
-                name = futures[future]
+        nodes_to_fetch = nodes
+        for _ in range(4):
+            occupied = [
+                item for item in nodes_to_fetch
+                if item["allocated_gpu"] or item["allocated_cpu"] or item["allocated_memory_gib"]
+            ]
+            failures: list[str] = []
+            if occupied:
+                pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="monitor-pod")
                 try:
-                    pods_by_node[name] = future.result()
-                except Exception:
-                    failures.append(name)
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
-        if failures:
-            raise RuntimeError(f"pod workload mapping failed for {len(failures)} occupied nodes")
+                    futures = {
+                        pool.submit(self.gateway.list_node_pods, self.cluster_name, self.queue, item["id"]): item["node"]
+                        for item in occupied
+                    }
+                    remaining = max(0.01, deadline_seconds - (time.monotonic() - started))
+                    done, pending_futures = wait(futures, timeout=remaining)
+                    for future in pending_futures:
+                        failures.append(futures[future])
+                        future.cancel()
+                    for future in done:
+                        name = futures[future]
+                        try:
+                            pods_by_node[name] = future.result()
+                        except Exception:
+                            failures.append(name)
+                finally:
+                    pool.shutdown(wait=False, cancel_futures=True)
+            if failures:
+                raise RuntimeError(f"pod workload mapping failed for {len(failures)} occupied nodes")
+
+            # Reconcile only changed nodes while the Pod mapping is fresh.
+            # Slow lifecycle and telemetry queries below do not affect it.
+            after = self.gateway.list_queue_nodes(self.cluster_name, self.queue)
+            before_signature = {row[0]: row for row in _node_signature(raw_nodes)}
+            after_signature = {row[0]: row for row in _node_signature(after)}
+            if before_signature == after_signature:
+                break
+            changed_names = {
+                name for name in before_signature.keys() | after_signature.keys()
+                if before_signature.get(name) != after_signature.get(name)
+            }
+            for name in changed_names:
+                pods_by_node.pop(name, None)
+            raw_nodes = after
+            nodes = normalize_nodes(raw_nodes)
+            nodes_to_fetch = [item for item in nodes if item["node"] in changed_names]
+        else:
+            raise RuntimeError("queue node allocation changed during collection")
 
         workloads: dict[str, dict[str, Any]] = {}
         hostname_to_node: dict[str, str] = {}
         warnings: list[str] = []
         for node in nodes:
-            if node["host_ip"]:
-                hostname_to_node["host-" + node["host_ip"].replace(".", "-")] = node["node"]
+            if node["hostname"]:
+                hostname_to_node[node["hostname"]] = node["node"]
             attributed = {"gpu": 0.0, "cpu": 0.0, "memory_gib": 0.0}
             for pod in pods_by_node.get(node["node"], []):
                 raw_workload = pod.get("workload") or {}
@@ -1293,9 +1331,6 @@ class ClusterCollector:
             pending, pending_complete = [], False
             warnings.append("pending workload inventory is unavailable")
 
-        after = self.gateway.list_queue_nodes(self.cluster_name, self.queue)
-        if _node_signature(raw_nodes) != _node_signature(after):
-            raise RuntimeError("queue node allocation changed during collection")
         if time.monotonic() - started > deadline_seconds:
             raise TimeoutError("collection deadline exceeded")
         generated = datetime.now(timezone.utc)

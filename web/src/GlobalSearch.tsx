@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { nodePrimaryLabel, nodeSecondaryLabel } from "./nodeIdentity";
 import type { DetailRef, Snapshot } from "./types";
 
 type SearchItem = DetailRef & { meta: string; search: string };
@@ -10,7 +11,7 @@ export function GlobalSearch({ snapshot, open }: { snapshot: Snapshot; open: (re
   const items = useMemo<SearchItem[]>(() => [
     ...snapshot.groups.map((item) => ({ kind: "group" as const, id: item.group, label: item.group, meta: `分组 · ${item.status}`, search: `${item.group} ${item.status}` })),
     ...snapshot.users.map((item) => ({ kind: "user" as const, id: item.user, label: item.user, meta: `用户 · ${item.group}`, search: `${item.user} ${item.group} ${item.status}` })),
-    ...snapshot.nodes.map((item) => ({ kind: "node" as const, id: item.node, label: item.node, meta: `节点 · ${item.classification}`, search: `${item.node} ${item.host_ip} ${item.classification} ${item.state}` })),
+    ...snapshot.nodes.map((item) => ({ kind: "node" as const, id: item.node, label: nodePrimaryLabel(item), meta: `节点 · ${nodeSecondaryLabel(item)} · ${item.classification}`, search: `${item.node} ${item.hostname ?? ""} ${item.host_ip} ${item.classification} ${item.state}` })),
     ...[...snapshot.workloads, ...(snapshot.pending_workloads ?? [])].map((item) => ({ kind: "workload" as const, id: item.workload_id, label: item.workload_name, meta: `${item.type} · ${item.user}`, search: `${item.workload_name} ${item.user} ${item.group} ${item.type} ${item.priority ?? ""}` })),
   ], [snapshot]);
   const normalized = query.trim().toLocaleLowerCase();

@@ -127,6 +127,12 @@ warnings.
    credentials.
 12. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
 
+For SSP placement, `--include` and `--exclude` accept lowercase Kubernetes
+hostnames, not ECP node names. Derive a valid IPv4 address such as
+`10.140.62.215` as `host-10-140-62-215`. Prefer the Monitor node `hostname`
+field and use `host_ip` only for the same deterministic fallback; never invent
+a hostname when the IP is missing or invalid.
+
 ## Query and stop jobs
 
 - Execute `list`, `get-job`, `get-node`, `log`, and `stats` as read-only

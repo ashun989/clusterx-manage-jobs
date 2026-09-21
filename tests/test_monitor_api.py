@@ -88,7 +88,8 @@ def raw_snapshot():
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "cluster": "c", "queue": "q", "telemetry_window_minutes": 5,
         "nodes": [{
-            "node": "n1", "state": "RUNNING", "allocated_gpu": 1, "total_gpu": 8,
+            "node": "n1", "id": "node-id-1", "host_ip": "10.140.62.215",
+            "hostname": "host-10-140-62-215", "state": "RUNNING", "allocated_gpu": 1, "total_gpu": 8,
             "allocated_cpu": 4, "total_cpu": 112,
             "allocated_memory_gib": 10, "total_memory_gib": 1920,
             "workloads": {}, "unattributed": {"gpu": 0, "cpu": 0, "memory_gib": 0},
@@ -149,12 +150,13 @@ class MonitorApiTests(unittest.TestCase):
     def test_status_snapshot_policy_and_read_only_routes(self):
         client = TestClient(self.app)
         status_response = client.get("/api/v1/status")
-        self.assertEqual(status_response.json()["version"], "2.1.0")
+        self.assertEqual(status_response.json()["version"], "2.1.1")
         self.assertTrue(status_response.json()["snapshot"]["ready"])
         self.assertIn("default-src 'self'", status_response.headers["content-security-policy"])
         self.assertEqual(status_response.headers["x-content-type-options"], "nosniff")
         snapshot = client.get("/api/v1/snapshots/latest").json()
         self.assertEqual(snapshot["snapshot_id"], "api-snapshot")
+        self.assertEqual(snapshot["nodes"][0]["hostname"], "host-10-140-62-215")
         self.assertEqual(snapshot["workloads"][0]["total_cpu"], 4)
         self.assertEqual(snapshot["workloads"][0]["total_memory_gib"], 10)
         self.assertEqual(snapshot["workloads"][0]["resource_basis"], "attributed")
@@ -228,6 +230,7 @@ class MonitorApiTests(unittest.TestCase):
         self.assertEqual(owned.status_code, 200)
         self.assertEqual(owned.json()["identity"]["group"], "example-team")
         self.assertEqual([item["node"] for item in owned.json()["nodes"]], ["n1"])
+        self.assertEqual(owned.json()["nodes"][0]["hostname"], "host-10-140-62-215")
 
     def test_snapshot_index_history_and_comparison_are_additive_and_read_only(self):
         client = TestClient(self.app)

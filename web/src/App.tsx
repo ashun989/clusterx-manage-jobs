@@ -11,6 +11,7 @@ import { emptyNavigationState, monitorTabs, navigationUrl, readNavigationState, 
 import { useMonitorData } from "./useMonitorData";
 import { DismissibleDetails, useDismissibleMenu } from "./useDismissibleMenu";
 import { PlacementBadge, placementLabel } from "./PlacementBadge";
+import { nodeNameWithInternal, nodePrimaryLabel, nodeSecondaryLabel } from "./nodeIdentity";
 import type { Alert, DetailRef, GroupSummary, NodeSummary, PlanItem, PlanResult, PolicyResponse, Snapshot, UserSummary, Workload } from "./types";
 
 const number = (value: unknown, suffix = "") => value == null ? "—" : `${Number(value).toLocaleString()}${suffix}`;
@@ -22,6 +23,11 @@ const dateTime = (value: string | null | undefined) => {
   return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
 };
 const releaseNotes: Record<string, string[]> = {
+  "2.1.1": [
+    "节点 IPv4 统一派生为小写 Clusterx hostname，并在节点、Placement、调度与分配界面突出展示。",
+    "Clusterx wrapper 按 hostname 校验 --include/--exclude，兼容旧 Monitor 的 host_ip 回退并提示大小写错误。",
+    "ECP 节点名继续作为归属配置和 planner 的内部主键，现有分组配置无需迁移。",
+  ],
   "2.1.0": [
     "Placement 统一为 Workload 上下文与结构化策略发现，节点 owner、跨组放置和 quota 满额借用在列表与详情中直接可见。",
     "调度模拟器采用候选节点范围与 Workload 节点使用关系的新模型，无效组合会明确报错，不再静默降级。",
@@ -163,14 +169,14 @@ const workloadColumns: ColumnDef<Workload>[] = [
   ...telemetryColumns<Workload>(),
 ];
 
-const alertColumns: ColumnDef<Alert>[] = [
+const alertColumns = (nodes: NodeSummary[]): ColumnDef<Alert>[] => [
   { key: "severity", label: "级别", kind: "enum", value: (row) => row.severity, format: (value) => <span className={statusClass(value)}>{String(value)}</span> },
   { key: "kind", label: "类型", kind: "enum", value: (row) => row.kind },
   { key: "category", label: "分类", kind: "enum", value: (row) => row.category },
   { key: "code", label: "规则代码", kind: "enum", value: (row) => row.code },
   { key: "subject_type", label: "对象类型", kind: "enum", value: (row) => row.subject_type, hidden: true },
   { key: "finding_tags", label: "标签", kind: "enum", value: (row) => row.finding_tags, hidden: true },
-  { key: "subject", label: "对象", kind: "text", value: (row) => row.subject },
+  { key: "subject", label: "对象", kind: "text", value: (row) => row.subject_type === "node" ? nodeNameWithInternal(nodes, row.subject) : row.subject },
   { key: "message", label: "说明", kind: "text", value: (row) => row.message },
 ];
 
@@ -215,7 +221,8 @@ function NodeHeatmap({ nodes, state, onState, onNode }: { nodes: NodeSummary[]; 
       const ratio = node.total_gpu > 0 ? Math.min(100, node.allocated_gpu / node.total_gpu * 100) : 0;
       const open = () => onNode(node);
       return <article role="button" tabIndex={0} aria-label={`查看 ${node.node} 详情`} className={`node-tile node-${node.classification}`} key={node.node} onClick={open} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } }}>
-        <header><b title={node.node}>{node.node}</b><span>{node.classification}</span></header>
+        <header><b title={nodePrimaryLabel(node)}>{nodePrimaryLabel(node)}</b><span>{node.classification}</span></header>
+        <small className="node-identity">{nodeSecondaryLabel(node)}</small>
         <small className="node-owner">节点归属：{node.assigned_group ?? "未启用约束"}</small>
         <div className="gpu-bar"><i style={{ width: `${ratio}%` }} /></div>
         <p><strong>{number(node.allocated_gpu)}/{number(node.total_gpu)}</strong> GPU</p>
@@ -406,7 +413,7 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
 
 const planKey = (item: PlanItem) => `${item.strategy}:${item.rank}:${item.workloads.join(",")}`;
 
-function PlanResults({ plan, currentSnapshotId, onWorkload }: { plan: PlanResult | null; currentSnapshotId: string; onWorkload: (workload: Workload) => void }) {
+function PlanResults({ plan, currentSnapshotId, nodes, onWorkload }: { plan: PlanResult | null; currentSnapshotId: string; nodes: NodeSummary[]; onWorkload: (workload: Workload) => void }) {
   const [expanded, setExpanded] = useState<string[]>([]);
   const signature = plan ? `${plan.snapshot_id}:${plan.computed_at ?? ""}:${plan.plans.map(planKey).join("|")}` : "";
   useEffect(() => setExpanded(plan?.plans[0] ? [planKey(plan.plans[0])] : []), [signature]);
@@ -426,13 +433,13 @@ function PlanResults({ plan, currentSnapshotId, onWorkload }: { plan: PlanResult
     <p className="plan-timestamp">快照时间 {new Date(plan.snapshot_generated_at).toLocaleString()}{plan.cache_hit ? " · cache hit" : ""}</p>
     {plan.candidate_selection && <p className="plan-filter-summary">资源候选：{resourceScopeLabels[plan.candidate_selection.resource_scope] ?? plan.candidate_selection.resource_scope} · 分组：{plan.candidate_selection.groups.join("、") || "未限定"} · 候选节点范围：{nodeScopeLabels[plan.candidate_selection.node_ownership_scope] ?? plan.candidate_selection.node_ownership_scope} · Workload 节点使用关系：{placementScopeLabels[plan.candidate_selection.placement_relation_scope] ?? plan.candidate_selection.placement_relation_scope} · 策略发现筛选：{findingFilterLabel} · 节点归属约束：{plan.candidate_selection.node_allocation_enabled ? "已启用" : "未启用"}</p>}
     {plan.strategy_results.length > 0 && <div className="tag-list">{plan.strategy_results.map((result) => <span key={result.strategy}>{result.strategy}: {result.status} · {result.returned_alternatives}/{result.requested_alternatives}{result.top_k_complete ? "" : " · partial"}</span>)}</div>}
-    <div className="plan-resolved"><b>实际资源画像</b><span>{number(plan.resolved_target.nodes)} 节点 ×（每节点 {number(plan.resolved_target.gpus_per_node)} GPU / {number(plan.resolved_target.cpus_per_node)} CPU / {number(plan.resolved_target.memory_per_node_gib)} GiB）</span>{plan.defaults_applied.length > 0 && <small>已应用默认值：{plan.defaults_applied.join(", ")}</small>}<small>排除 {plan.planning_exclusions.node_count} 节点 / {plan.planning_exclusions.workload_count} Workload{plan.planning_exclusions.reasons.length ? ` · ${plan.planning_exclusions.reasons.join(", ")}` : ""}</small>{plan.planning_exclusions.nodes?.map((item) => <small key={`node:${item.node}`}>节点 {item.node}: {item.reasons.join(", ")}</small>)}{plan.planning_exclusions.workloads?.map((item) => <small key={`workload:${item.workload_id}`}>Workload {item.workload_id}: {item.reasons.join(", ")} ({item.nodes.join(", ")})</small>)}</div>
-    {plan.plans.length === 0 ? plan.optimality === "not-needed" ? <div className="plan-notice"><b>无需协调 Workload</b><p>当前可调度节点：{plan.currently_schedulable_nodes?.join(", ") || "—"}</p></div> : <div className="plan-notice"><b>没有可行方案</b><p>{reasonLabels[plan.no_plan_reason ?? ""] ?? "当前候选范围不足以释放目标资源。"}</p></div> : plan.plans.map((item) => {
+    <div className="plan-resolved"><b>实际资源画像</b><span>{number(plan.resolved_target.nodes)} 节点 ×（每节点 {number(plan.resolved_target.gpus_per_node)} GPU / {number(plan.resolved_target.cpus_per_node)} CPU / {number(plan.resolved_target.memory_per_node_gib)} GiB）</span>{plan.defaults_applied.length > 0 && <small>已应用默认值：{plan.defaults_applied.join(", ")}</small>}<small>排除 {plan.planning_exclusions.node_count} 节点 / {plan.planning_exclusions.workload_count} Workload{plan.planning_exclusions.reasons.length ? ` · ${plan.planning_exclusions.reasons.join(", ")}` : ""}</small>{plan.planning_exclusions.nodes?.map((item) => <small key={`node:${item.node}`}>节点 {nodeNameWithInternal(nodes, item.node)}: {item.reasons.join(", ")}</small>)}{plan.planning_exclusions.workloads?.map((item) => <small key={`workload:${item.workload_id}`}>Workload {item.workload_id}: {item.reasons.join(", ")} ({item.nodes.map((node) => nodeNameWithInternal(nodes, node)).join(", ")})</small>)}</div>
+    {plan.plans.length === 0 ? plan.optimality === "not-needed" ? <div className="plan-notice"><b>无需协调 Workload</b><p>当前可调度节点：{plan.currently_schedulable_nodes?.map((node) => nodeNameWithInternal(nodes, node)).join(", ") || "—"}</p></div> : <div className="plan-notice"><b>没有可行方案</b><p>{reasonLabels[plan.no_plan_reason ?? ""] ?? "当前候选范围不足以释放目标资源。"}</p></div> : plan.plans.map((item) => {
       const key = planKey(item); const open = expanded.includes(key);
-      return <article className={open ? "plan-card expanded" : "plan-card"} key={key}><button type="button" className="plan-summary" aria-expanded={open} onClick={() => setExpanded(open ? expanded.filter((value) => value !== key) : [...expanded, key])}><span><b>{item.strategy} #{item.rank}</b><small>{item.rank_status} · {item.rank_backend} · {number(item.gpus)} GPU · {number(item.workload_count)} workloads</small></span><span className="freed-summary">{item.freed_nodes.join(", ") || "无释放节点"}</span><i>{open ? "−" : "+"}</i></button>
+      return <article className={open ? "plan-card expanded" : "plan-card"} key={key}><button type="button" className="plan-summary" aria-expanded={open} onClick={() => setExpanded(open ? expanded.filter((value) => value !== key) : [...expanded, key])}><span><b>{item.strategy} #{item.rank}</b><small>{item.rank_status} · {item.rank_backend} · {number(item.gpus)} GPU · {number(item.workload_count)} workloads</small></span><span className="freed-summary">{item.freed_nodes.map((node) => nodeNameWithInternal(nodes, node)).join(", ") || "无释放节点"}</span><i>{open ? "−" : "+"}</i></button>
         {open && <div className="plan-detail"><div className="plan-metrics"><span><small>GPU</small><b>{number(item.gpus)}</b></span><span><small>CPU</small><b>{number(item.cpus)}</b></span><span><small>内存 GiB</small><b>{number(item.memory_gib)}</b></span><span><small>用户</small><b>{number(item.users)}</b></span><span><small>分组</small><b>{number(item.groups)}</b></span><span><small>Workloads</small><b>{number(item.workload_count)}</b></span></div>
-          <h4>目标节点</h4><div className="tag-list">{item.target_nodes.map((node) => <span key={node}>{node}</span>)}</div>{item.newly_schedulable_nodes.length > item.target_nodes.length && <small>同时可释放：{item.newly_schedulable_nodes.filter((node) => !item.target_nodes.includes(node)).join(", ")}</small>}
-          <h4>需要协调的 Workload</h4><div className="plan-workloads"><table><thead><tr><th>Workload</th><th>用户 / 分组</th><th>类型</th><th>节点归属</th><th>GPU</th><th>CPU</th><th>内存 GiB</th><th>Placements</th></tr></thead><tbody>{item.workload_details.map((workload) => <tr tabIndex={0} className="clickable" aria-label={`查看 ${workload.workload_name} 详情`} key={workload.workload_id} onClick={() => onWorkload(workload)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onWorkload(workload); } }}><td>{workload.workload_name}</td><td>{workload.user}<small>{workload.group}</small></td><td>{workload.type}</td><td><PlacementBadge workload={workload} /></td><td>{number(workload.total_gpu)}</td><td>{number(workload.total_cpu)}</td><td>{number(workload.total_memory_gib)}</td><td>{workload.placements.map((placement) => `${placement.node} (${placement.owner_group ?? "未知 owner"}; ${number(placement.gpu)}G/${number(placement.cpu)}C/${number(placement.memory_gib)}GiB)`).join(", ")}</td></tr>)}</tbody></table></div>
+          <h4>目标节点</h4><div className="tag-list">{item.target_nodes.map((node) => <span key={node}>{nodeNameWithInternal(nodes, node)}</span>)}</div>{item.newly_schedulable_nodes.length > item.target_nodes.length && <small>同时可释放：{item.newly_schedulable_nodes.filter((node) => !item.target_nodes.includes(node)).map((node) => nodeNameWithInternal(nodes, node)).join(", ")}</small>}
+          <h4>需要协调的 Workload</h4><div className="plan-workloads"><table><thead><tr><th>Workload</th><th>用户 / 分组</th><th>类型</th><th>节点归属</th><th>GPU</th><th>CPU</th><th>内存 GiB</th><th>Placements</th></tr></thead><tbody>{item.workload_details.map((workload) => <tr tabIndex={0} className="clickable" aria-label={`查看 ${workload.workload_name} 详情`} key={workload.workload_id} onClick={() => onWorkload(workload)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onWorkload(workload); } }}><td>{workload.workload_name}</td><td>{workload.user}<small>{workload.group}</small></td><td>{workload.type}</td><td><PlacementBadge workload={workload} /></td><td>{number(workload.total_gpu)}</td><td>{number(workload.total_cpu)}</td><td>{number(workload.total_memory_gib)}</td><td>{workload.placements.map((placement) => `${nodeNameWithInternal(nodes, placement.node)} (${placement.owner_group ?? "未知 owner"}; ${number(placement.gpu)}G/${number(placement.cpu)}C/${number(placement.memory_gib)}GiB)`).join(", ")}</td></tr>)}</tbody></table></div>
         </div>}
       </article>;
     })}
@@ -440,7 +447,7 @@ function PlanResults({ plan, currentSnapshotId, onWorkload }: { plan: PlanResult
 }
 
 function SchedulerPanel({ snapshot, plan, onResult, onWorkload, intent, clearIntent }: { snapshot: Snapshot; plan: PlanResult | null; onResult: (result: PlanResult) => void; onWorkload: (workload: Workload) => void; intent: PlannerIntent | null; clearIntent: () => void }) {
-  return <div className="scheduler-panel"><div className="planner-column"><span className="eyebrow">Read-only simulation</span><h2>调度模拟器</h2><p>固定使用当前缓存快照，不访问集群；预填条件可在计算前调整。</p><Planner snapshot={snapshot} onResult={onResult} intent={intent} clearIntent={clearIntent} /></div><PlanResults plan={plan} currentSnapshotId={snapshot.snapshot_id} onWorkload={onWorkload} /></div>;
+  return <div className="scheduler-panel"><div className="planner-column"><span className="eyebrow">Read-only simulation</span><h2>调度模拟器</h2><p>固定使用当前缓存快照，不访问集群；预填条件可在计算前调整。</p><Planner snapshot={snapshot} onResult={onResult} intent={intent} clearIntent={clearIntent} /></div><PlanResults plan={plan} currentSnapshotId={snapshot.snapshot_id} nodes={snapshot.nodes} onWorkload={onWorkload} /></div>;
 }
 
 const policyLabel = (value: string) => value.replaceAll("_", " ");
@@ -558,7 +565,7 @@ export default function App() {
     if (ref.kind === "node") {
       const node = snapshot.nodes.find((item) => item.node === ref.id);
       if (!node) return defaults;
-      return { ...defaults, sourceLabel: node.node, note: "模拟将只验证释放这一台指定节点所需协调的运行中 Workload。", nodes: 1, gpusPerNode: Math.max(1, node.total_gpu), cpusTotal: node.total_cpu, memoryTotalGib: node.total_memory_gib, targetNodes: [node.node], scope: "all" };
+      return { ...defaults, sourceLabel: nodeNameWithInternal(snapshot.nodes, node.node), note: "模拟将只验证释放这一台指定节点所需协调的运行中 Workload。", nodes: 1, gpusPerNode: Math.max(1, node.total_gpu), cpusTotal: node.total_cpu, memoryTotalGib: node.total_memory_gib, targetNodes: [node.node], scope: "all" };
     }
     if (ref.kind === "group") return { ...defaults, sourceLabel: ref.id, note: "候选 Workload 已限定为该分组；目标资源仍可调整。", groups: [ref.id] };
     if (ref.kind === "user") return { ...defaults, sourceLabel: ref.id, note: "候选 Workload 已限定为该用户；目标资源仍可调整。", users: [ref.id] };
@@ -589,7 +596,8 @@ export default function App() {
         : alert.subject_type === "user" && snapshot.users.some((item) => item.user === alert.subject) ? { kind: "user" as const, id: alert.subject, label: alert.subject }
         : null;
       const derived = related ? plannerIntentFor(related) : defaults;
-      return { ...derived, sourceKind: "alert", sourceId: ref.id, sourceLabel: alert.subject, note: `来自告警 ${alert.code || alert.kind}。${derived.note}` };
+      const sourceLabel = alert.subject_type === "node" ? nodeNameWithInternal(snapshot.nodes, alert.subject) : alert.subject;
+      return { ...derived, sourceKind: "alert", sourceId: ref.id, sourceLabel, note: `来自告警 ${alert.code || alert.kind}。${derived.note}` };
     }
     return defaults;
   };
@@ -609,7 +617,7 @@ export default function App() {
       {tab === "users" && <DataTable rows={snapshot.users} columns={userColumns} state={tableStates.users} onState={(state) => updateTable("users", state)} rowKey={(row) => row.user} rowLabel={(row) => row.user} onRow={(row) => open({ kind: "user", id: row.user, label: row.user })} />}
       {tab === "nodes" && <NodeHeatmap nodes={snapshot.nodes} state={nodeState} onState={updateNodeState} onNode={(row) => open({ kind: "node", id: row.node, label: row.node })} />}
       {tab === "workloads" && <DataTable rows={workloads} columns={workloadColumns} state={tableStates.workloads} onState={(state) => updateTable("workloads", state)} rowKey={(row) => row.workload_id} rowLabel={(row) => row.workload_name} onRow={(row) => open(workloadRef(row))} />}
-      {tab === "alerts" && <DataTable rows={snapshot.alerts} columns={alertColumns} state={tableStates.alerts} onState={(state) => updateTable("alerts", state)} rowKey={(row, index) => `${alertIdentity(row)}:${index}`} rowLabel={(row) => row.subject} onRow={(row) => open({ kind: "alert", id: alertIdentity(row), label: row.subject })} />}
+      {tab === "alerts" && <DataTable rows={snapshot.alerts} columns={alertColumns(snapshot.nodes)} state={tableStates.alerts} onState={(state) => updateTable("alerts", state)} rowKey={(row, index) => `${alertIdentity(row)}:${index}`} rowLabel={(row) => row.subject_type === "node" ? nodeNameWithInternal(snapshot.nodes, row.subject) : row.subject} onRow={(row) => open({ kind: "alert", id: alertIdentity(row), label: row.subject_type === "node" ? nodeNameWithInternal(snapshot.nodes, row.subject) : row.subject })} />}
       {tab === "planner" && <SchedulerPanel snapshot={snapshot} plan={plan} onResult={setPlan} onWorkload={(workload) => open(workloadRef(workload))} intent={plannerIntent} clearIntent={clearPlannerIntent} />}
       {tab === "rules" && <RulesPage response={policy} snapshot={snapshot} error={policyError} />}
     </div></section>

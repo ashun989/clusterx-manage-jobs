@@ -140,12 +140,16 @@ groups:
   team-a:
     gpu_quota: 8
     members: [alice]
+    # Monitor 内部归属使用 ECP 节点名，不是 clusterx --include hostname。
     nodes: [node-001]
 ```
 
 该开关只作用于当前 Monitor 配置的 queue。开启时节点归属公开且互斥，未显式分配的在线节点有效
 归属 `default`；placement 规则只产生 advisory 告警。关闭时 Skill 不添加节点限制，Monitor CLI
 访问范围为全部 queue 节点。Pending workload 没有节点 placement，不产生节点归属告警。
+节点快照同时公开 ECP `node`、`host_ip` 和可空的 `hostname`。实际提交
+`clusterx --include/--exclude` 时使用小写 `hostname`，例如把 `10.140.62.215`
+转换为 `host-10-140-62-215`；分组文件中的 `nodes` 仍保持 ECP 节点名。
 
 公共策略中的 `planning.default_cpu_per_gpu` 与
 `planning.default_memory_gib_per_gpu` 是标准调度画像。方案未显式给出 CPU/内存

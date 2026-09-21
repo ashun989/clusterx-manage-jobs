@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from decimal import Decimal, InvalidOperation
 from importlib.resources import files as resource_files
+from ipaddress import IPv4Address, ip_address
 import json
 import os
 from pathlib import Path
@@ -175,6 +176,29 @@ def _placement_values(clusterx_args: list[str], name: str) -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+def _hostname_from_ip(value: object) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        address = ip_address(raw)
+    except ValueError:
+        return None
+    if not isinstance(address, IPv4Address):
+        return None
+    return "host-" + str(address).replace(".", "-")
+
+
+def _monitor_node_hostname(node: dict[str, object]) -> str | None:
+    hostname = str(node.get("hostname") or "").strip()
+    if hostname.startswith("host-") and hostname == hostname.lower():
+        hostname_ip = hostname.removeprefix("host-").replace("-", ".")
+        if _hostname_from_ip(hostname_ip) == hostname:
+            return hostname
+    derived = _hostname_from_ip(node.get("host_ip"))
+    return derived
+
+
 def _check_node_policy(
     clusterx_args: list[str], *, explicit_user: str | None,
     identity_path: Path,
@@ -194,14 +218,26 @@ def _check_node_policy(
             return "node allocation is enabled but no cluster user was provided; pass --cluster-user or configure identity.yaml"
         access = _monitor_request(endpoint, user)
         owned = {
-            str(node.get("node")) for node in (access.get("nodes") or [])
-            if isinstance(node, dict) and node.get("node")
+            hostname for node in (access.get("nodes") or [])
+            if isinstance(node, dict) and (hostname := _monitor_node_hostname(node))
         }
         include = _placement_values(clusterx_args, "--include")
         exclude = _placement_values(clusterx_args, "--exclude")
-        if include and not include.intersection(owned):
+        wrong_case = sorted(
+            value for value in include | exclude
+            if value != value.lower() and value.lower().startswith("host-")
+        )
+        if wrong_case:
             print(
-                f"warning: explicit --include does not contain any node in the {access.get('identity', {}).get('group', 'resolved')} owned pool; owned nodes: {', '.join(sorted(owned)) or '-'}",
+                "warning: Clusterx hostnames are case-sensitive and must be lowercase; use: "
+                + ", ".join(value.lower() for value in wrong_case),
+                file=sys.stderr,
+            )
+        elif include and not include.intersection(owned):
+            print(
+                "warning: explicit --include does not contain any hostname in the "
+                f"{access.get('identity', {}).get('group', 'resolved')} owned pool; "
+                f"owned hostnames: {', '.join(sorted(owned)) or '-'}",
                 file=sys.stderr,
             )
         elif exclude and owned.intersection(exclude):
@@ -212,7 +248,7 @@ def _check_node_policy(
             )
         elif not include:
             print(
-                "node policy recommendation: owned nodes="
+                "node policy recommendation: owned hostnames="
                 + (", ".join(sorted(owned)) or "-"),
                 file=sys.stderr,
             )

@@ -87,6 +87,13 @@ the environment and mapping. The wrapper never rewrites explicit
 group-node pool suggests a different placement. When the allocation policy is
 disabled, it does not add node restrictions.
 
+Clusterx placement values are lowercase hostnames derived from node IPv4
+addresses, such as `host-10-140-62-215`; they are not ECP node names. The
+wrapper compares explicit placement values with the `hostname` returned by
+Monitor and derives the same value from `host_ip` when talking to an older
+Monitor. Missing or invalid IPs are never guessed. `clusterx-monitor-cli nodes`
+shows `node`, `hostname`, and `host_ip` together.
+
 ## Build and test
 
 ```bash

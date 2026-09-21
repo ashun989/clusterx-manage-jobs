@@ -163,6 +163,7 @@ export type NodeSummary = {
   node: string;
   id: string;
   host_ip: string;
+  hostname?: string | null;
   state: string;
   assigned_group?: string | null;
   allocated_gpu: number;

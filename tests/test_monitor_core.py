@@ -27,6 +27,7 @@ from clusterx_monitor.collector import (
     _attach_telemetry,
     _available_transition,
     _list_queue_nodes,
+    _node_hostname,
     _node_signature,
     _pending_workloads,
     _priority,
@@ -34,6 +35,7 @@ from clusterx_monitor.collector import (
     _running_air_lifecycle,
     _running_training_lifecycle,
     _workload_console_url,
+    normalize_nodes,
     resource_number,
 )
 from clusterx_monitor.auth import AdminAuth, initialize_auth_config
@@ -1906,6 +1908,19 @@ class StoreAndTelemetryTests(unittest.TestCase):
         self.assertEqual(history.call_count, 1)
         self.assertIn("historical workload GPU telemetry is unavailable", result["warnings"])
 
+    def test_node_hostname_uses_valid_ipv4_without_changing_internal_identity(self):
+        self.assertEqual(_node_hostname("10.140.62.215"), "host-10-140-62-215")
+        self.assertIsNone(_node_hostname(""))
+        self.assertIsNone(_node_hostname("not-an-ip"))
+        self.assertIsNone(_node_hostname("2001:db8::1"))
+        normalized = normalize_nodes([
+            {"name": "ecp-node-a", "id": "node-id-a", "host_ip": "10.140.62.215"},
+            {"name": "ecp-node-b", "id": "node-id-b", "host_ip": "invalid"},
+        ])
+        self.assertEqual(normalized[0]["node"], "ecp-node-a")
+        self.assertEqual(normalized[0]["hostname"], "host-10-140-62-215")
+        self.assertIsNone(normalized[1]["hostname"])
+
     def test_collector_sums_running_resources_across_placements(self):
         def raw_node(name, node_id, gpu, cpu, memory):
             return {
@@ -1946,9 +1961,9 @@ class StoreAndTelemetryTests(unittest.TestCase):
         self.assertEqual(item["resource_basis"], "attributed")
 
     def test_node_signature_detects_identity_state_totals_and_allocations(self):
-        def raw(*, node_id="id", state="RUNNING", gpu_allocated=1, gpu_total=8):
+        def raw(*, node_id="id", host_ip="10.0.0.1", state="RUNNING", gpu_allocated=1, gpu_total=8):
             return [{
-                "name": "n", "id": node_id, "state": state,
+                "name": "n", "id": node_id, "host_ip": host_ip, "state": state,
                 "summary_data": [
                     {"resource_type": "DEVICE", "allocated": gpu_allocated, "total": gpu_total},
                     {"resource_type": "CPU", "allocated": 4, "total": 112},
@@ -1957,9 +1972,71 @@ class StoreAndTelemetryTests(unittest.TestCase):
             }]
         baseline = _node_signature(raw())
         for changed in (
-            raw(node_id="other"), raw(state="IDLE"), raw(gpu_allocated=2), raw(gpu_total=16),
+            raw(node_id="other"), raw(host_ip="10.0.0.2"), raw(state="IDLE"),
+            raw(gpu_allocated=2), raw(gpu_total=16),
         ):
             self.assertNotEqual(baseline, _node_signature(changed))
+
+    def test_collector_validates_node_mapping_before_optional_queries(self):
+        raw_nodes = [{
+            "name": "n", "id": "id", "state": "RUNNING",
+            "summary_data": [
+                {"resource_type": "DEVICE", "allocated": 1, "total": 8},
+                {"resource_type": "CPU", "allocated": 4, "total": 112},
+                {"resource_type": "MEMORY", "allocated": 10, "total": 1920, "unit": "GiB"},
+            ],
+        }]
+        gateway = mock.Mock()
+        gateway.query_workload_history.return_value = {}
+        gateway.pending_workloads.return_value = ([], True)
+        calls = []
+        gateway.list_queue_nodes.side_effect = lambda *_: calls.append("nodes") or raw_nodes
+        gateway.list_node_pods.side_effect = lambda *_: calls.append("pods") or [{
+            "name": "pod", "workload": {"uid": "workload", "type": "unknown"},
+            "resource": {"accelerate_device_count": 1, "cpu": 4, "memory": "10GiB"},
+        }]
+        gateway.query_gpu_telemetry.side_effect = lambda *_: calls.append("telemetry") or []
+        result = ClusterCollector(mock.Mock(), "q", "c", gateway=gateway).collect()
+        self.assertEqual(calls[:4], ["nodes", "pods", "nodes", "telemetry"])
+        self.assertEqual(result["nodes"][0]["allocated_gpu"], 1)
+
+    def test_collector_rechecks_only_changed_node_pods(self):
+        def raw(name, allocated):
+            return {
+                "name": name, "id": name, "state": "RUNNING",
+                "summary_data": [
+                    {"resource_type": "DEVICE", "allocated": allocated, "total": 8},
+                    {"resource_type": "CPU", "allocated": 0, "total": 112},
+                    {"resource_type": "MEMORY", "allocated": 0, "total": 1920, "unit": "GiB"},
+                ],
+            }
+
+        initial = [raw("changed", 1), raw("stable", 1)]
+        updated = [raw("changed", 2), raw("stable", 1)]
+        gateway = mock.Mock()
+        gateway.list_queue_nodes.side_effect = [initial, updated, updated]
+        pod_calls = []
+
+        def pods(_, __, node_id):
+            pod_calls.append(node_id)
+            allocation = 2 if node_id == "changed" and pod_calls.count(node_id) == 2 else 1
+            return [{
+                "name": f"pod-{node_id}",
+                "workload": {"uid": f"workload-{node_id}-{allocation}", "type": "unknown"},
+                "resource": {"accelerate_device_count": allocation},
+            }]
+
+        gateway.list_node_pods.side_effect = pods
+        gateway.query_gpu_telemetry.return_value = []
+        gateway.query_workload_history.return_value = {}
+        gateway.pending_workloads.return_value = ([], True)
+        result = ClusterCollector(mock.Mock(), "q", "c", gateway=gateway).collect()
+        self.assertEqual(pod_calls.count("changed"), 2)
+        self.assertEqual(pod_calls.count("stable"), 1)
+        self.assertEqual(
+            {item["workload_id"] for item in result["workloads"]},
+            {"workload-changed-2", "workload-stable-1"},
+        )
 
     def test_queue_node_inventory_paginates(self):
         client = mock.Mock()
@@ -2258,6 +2335,17 @@ class SkillCliTests(unittest.TestCase):
         self.assertIn("cpu_quota", rendered)
         self.assertIn("memory_quota_gib", rendered)
         self.assertIn("不限", rendered)
+
+    def test_node_table_includes_clusterx_hostname_and_host_ip(self):
+        with mock.patch.dict("os.environ", {"COLUMNS": "240"}):
+            rendered = self.module._render_table([{
+                "node": "ecp-node-a", "hostname": "host-10-140-62-215",
+                "host_ip": "10.140.62.215", "state": "RUNNING",
+            }], no_color=True)
+        self.assertIn("hostname", rendered)
+        self.assertIn("host-10-140-62-215", rendered)
+        self.assertIn("host_ip", rendered)
+        self.assertIn("10.140.62.215", rendered)
 
     def test_api_validation_returns_two_and_filtered_stale_uses_snapshot(self):
         with mock.patch.object(

@@ -167,19 +167,20 @@ class ConfigResolverTests(unittest.TestCase):
                 encoding="utf-8",
             )
             identity.chmod(0o600)
-            self.assertEqual(
-                clusterx_exec._configured_cluster_user(
-                    "https://monitor.test/", None, identity,
-                ),
-                "alice",
-            )
+            with mock.patch.dict(os.environ, {"CLUSTERX_USER": ""}, clear=False):
+                self.assertEqual(
+                    clusterx_exec._configured_cluster_user(
+                        "https://monitor.test/", None, identity,
+                    ),
+                    "alice",
+                )
             self.assertEqual(
                 clusterx_exec._configured_cluster_user(
                     "https://monitor.test/", " Bob ", identity,
                 ),
                 "Bob",
             )
-            with mock.patch.dict(os.environ, {"USER": "wrong-user"}, clear=False):
+            with mock.patch.dict(os.environ, {"USER": "wrong-user", "CLUSTERX_USER": ""}, clear=False):
                 self.assertIsNone(
                     clusterx_exec._configured_cluster_user(
                         "https://other.test", None, identity,
@@ -190,7 +191,8 @@ class ConfigResolverTests(unittest.TestCase):
         responses = [
             mock.Mock(status_code=200, json=lambda: {"node_allocation": {"enabled": True}}),
             mock.Mock(status_code=200, json=lambda: {
-                "identity": {"group": "team"}, "nodes": [{"node": "team-1"}],
+                "identity": {"group": "team"},
+                "nodes": [{"node": "team-1", "host_ip": "10.140.62.215"}],
             }),
         ]
         with mock.patch.dict(os.environ, {"CLUSTERX_MONITOR_URL": "https://monitor.test"}, clear=False), \
@@ -201,7 +203,48 @@ class ConfigResolverTests(unittest.TestCase):
                 explicit_user="alice", identity_path=Path("/missing/identity.yaml"),
             )
         self.assertIsNone(error)
-        self.assertIn("does not contain any node", stderr.getvalue())
+        self.assertIn("does not contain any hostname", stderr.getvalue())
+        self.assertIn("host-10-140-62-215", stderr.getvalue())
+
+    def test_node_policy_uses_lowercase_hostname_with_old_monitor_fallback(self):
+        self.assertEqual(
+            clusterx_exec._monitor_node_hostname({"hostname": "host-10-140-62-215"}),
+            "host-10-140-62-215",
+        )
+        responses = [
+            mock.Mock(status_code=200, json=lambda: {"node_allocation": {"enabled": True}}),
+            mock.Mock(status_code=200, json=lambda: {
+                "identity": {"group": "team"},
+                "nodes": [{"node": "team-1", "host_ip": "10.140.62.215"}],
+            }),
+        ]
+        with mock.patch.dict(os.environ, {"CLUSTERX_MONITOR_URL": "https://monitor.test"}, clear=False), \
+             mock.patch.object(clusterx_exec.requests, "get", side_effect=responses), \
+             mock.patch("sys.stderr", new_callable=__import__("io").StringIO) as stderr:
+            error = clusterx_exec._check_node_policy(
+                ["run", "--include", "host-10-140-62-215", "runner.sh"],
+                explicit_user="alice", identity_path=Path("/missing/identity.yaml"),
+            )
+        self.assertIsNone(error)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_node_policy_warns_when_hostname_is_not_lowercase(self):
+        responses = [
+            mock.Mock(status_code=200, json=lambda: {"node_allocation": {"enabled": True}}),
+            mock.Mock(status_code=200, json=lambda: {
+                "identity": {"group": "team"},
+                "nodes": [{"node": "team-1", "hostname": "host-10-140-62-215", "host_ip": "10.140.62.215"}],
+            }),
+        ]
+        with mock.patch.dict(os.environ, {"CLUSTERX_MONITOR_URL": "https://monitor.test"}, clear=False), \
+             mock.patch.object(clusterx_exec.requests, "get", side_effect=responses), \
+             mock.patch("sys.stderr", new_callable=__import__("io").StringIO) as stderr:
+            clusterx_exec._check_node_policy(
+                ["run", "--include", "host-10-140-62-215".upper(), "runner.sh"],
+                explicit_user="alice", identity_path=Path("/missing/identity.yaml"),
+            )
+        self.assertIn("must be lowercase", stderr.getvalue())
+        self.assertIn("host-10-140-62-215", stderr.getvalue())
 
     def test_wrapper_redacts_clusterx_output(self):
         with tempfile.TemporaryDirectory() as directory:

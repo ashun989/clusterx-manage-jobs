@@ -73,8 +73,8 @@ const baseSnapshot: Snapshot = {
     { user: "bob", group: "group-b", workload_count: 1, development_instance_count: 0, allocated_gpu: 8, allocated_cpu: 112, allocated_memory_gib: 1920, status: "violation", policy_findings: [quotaFinding], finding_categories: ["quota"], finding_codes: ["quota.gpu"], finding_tags: ["quota", "gpu"], telemetry: telemetry(8, 80, 2600) },
   ],
   nodes: [
-    { node: "node-a", id: "node-id-a", host_ip: "10.0.0.1", state: "RUNNING", allocated_gpu: 4, total_gpu: 8, allocated_cpu: 56, total_cpu: 112, allocated_memory_gib: 960, total_memory_gib: 1920, workloads: { "workload-a": { gpu: 4, cpu: 56, memory_gib: 960 } }, unattributed: { gpu: 0, cpu: 0, memory_gib: 0 }, attribution_excess: { gpu: 0, cpu: 0, memory_gib: 0 }, planning_eligible: true, planning_exclusion_reasons: [], free_gpu: 4, effective_free_gpu: 4, stranded_gpu: 0, classification: "fragmented", telemetry: telemetry(4, 50, 1000) },
-    { node: "node-b", id: "node-id-b", host_ip: "10.0.0.2", state: "RUNNING", allocated_gpu: 8, total_gpu: 8, allocated_cpu: 112, total_cpu: 112, allocated_memory_gib: 1920, total_memory_gib: 1920, workloads: { "workload-b": { gpu: 8, cpu: 112, memory_gib: 1920 } }, unattributed: { gpu: 0, cpu: 0, memory_gib: 0 }, attribution_excess: { gpu: 0, cpu: 0, memory_gib: 0 }, planning_eligible: true, planning_exclusion_reasons: [], free_gpu: 0, effective_free_gpu: 0, stranded_gpu: 0, classification: "gpu-full", telemetry: telemetry(8, 80, 2600) },
+    { node: "node-a", id: "node-id-a", host_ip: "10.0.0.1", hostname: "host-10-0-0-1", state: "RUNNING", allocated_gpu: 4, total_gpu: 8, allocated_cpu: 56, total_cpu: 112, allocated_memory_gib: 960, total_memory_gib: 1920, workloads: { "workload-a": { gpu: 4, cpu: 56, memory_gib: 960 } }, unattributed: { gpu: 0, cpu: 0, memory_gib: 0 }, attribution_excess: { gpu: 0, cpu: 0, memory_gib: 0 }, planning_eligible: true, planning_exclusion_reasons: [], free_gpu: 4, effective_free_gpu: 4, stranded_gpu: 0, classification: "fragmented", telemetry: telemetry(4, 50, 1000) },
+    { node: "node-b", id: "node-id-b", host_ip: "10.0.0.2", hostname: "host-10-0-0-2", state: "RUNNING", allocated_gpu: 8, total_gpu: 8, allocated_cpu: 112, total_cpu: 112, allocated_memory_gib: 1920, total_memory_gib: 1920, workloads: { "workload-b": { gpu: 8, cpu: 112, memory_gib: 1920 } }, unattributed: { gpu: 0, cpu: 0, memory_gib: 0 }, attribution_excess: { gpu: 0, cpu: 0, memory_gib: 0 }, planning_eligible: true, planning_exclusion_reasons: [], free_gpu: 0, effective_free_gpu: 0, stranded_gpu: 0, classification: "gpu-full", telemetry: telemetry(8, 80, 2600) },
   ],
   workloads: [trainA, trainB], pending_workloads: [],
 };
@@ -153,7 +153,7 @@ describe("Clusterx monitor dashboard", () => {
       if (path.endsWith("/admin/session")) return adminAuthenticated ? { ok: true, status: 200, json: async () => ({ authenticated: true, username: "admin", csrf_token: "csrf-token", expires_at: "2026-08-14T12:00:00Z" }) } : { ok: false, status: 401, statusText: "Unauthorized", json: async () => ({ detail: "administrator authentication required" }) };
       if (path.endsWith("/admin/login")) { adminAuthenticated = true; return { ok: true, status: 200, json: async () => ({ authenticated: true, username: "admin", csrf_token: "csrf-token", expires_at: "2026-08-14T12:00:00Z" }) }; }
       if (path.endsWith("/admin/logout")) { adminAuthenticated = false; return { ok: true, status: 200, json: async () => ({ ok: true }) }; }
-      const adminConfig = () => ({ configured: true, effective_config_valid: true, snapshot_id: latestSnapshot.snapshot_id, resource: { format: "json", text: adminResourceText, revision: adminResourceRevision, parse_error: null }, groups: { format: "yaml", text: adminGroupsText, revision: adminGroupsRevision, parse_error: null }, groups_structured: { node_allocation: { enabled: false }, groups: { "group-a": { gpu_quota: 16, cpu_quota: null, memory_quota_gib: null, members: ["alice"], nodes: [] }, default: { gpu_quota: "remainder", cpu_quota: null, memory_quota_gib: null, members: [], nodes: [] } } }, node_options: [{ node: "node-a", id: "node-id-a", state: "RUNNING", total_gpu: 8, allocated_gpu: 4 }, { node: "node-b", id: "node-id-b", state: "RUNNING", total_gpu: 8, allocated_gpu: 8 }], member_options: ["alice", "bob"], validation_error: null, audit_error: null });
+      const adminConfig = () => ({ configured: true, effective_config_valid: true, snapshot_id: latestSnapshot.snapshot_id, resource: { format: "json", text: adminResourceText, revision: adminResourceRevision, parse_error: null }, groups: { format: "yaml", text: adminGroupsText, revision: adminGroupsRevision, parse_error: null }, groups_structured: { node_allocation: { enabled: false }, groups: { "group-a": { gpu_quota: 16, cpu_quota: null, memory_quota_gib: null, members: ["alice"], nodes: [] }, default: { gpu_quota: "remainder", cpu_quota: null, memory_quota_gib: null, members: [], nodes: [] } } }, node_options: [{ node: "node-a", id: "node-id-a", host_ip: "10.0.0.1", hostname: "host-10-0-0-1", state: "RUNNING", total_gpu: 8, allocated_gpu: 4 }, { node: "node-b", id: "node-id-b", host_ip: "10.0.0.2", hostname: "host-10-0-0-2", state: "RUNNING", total_gpu: 8, allocated_gpu: 8 }], member_options: ["alice", "bob"], validation_error: null, audit_error: null });
       if (path.endsWith("/admin/config") && !init?.method) return { ok: true, status: 200, json: async () => adminConfig() };
       if (path.endsWith("/admin/config/resource") && init?.method === "PUT") { const body = JSON.parse(String(init.body)); adminResourceRevision = "resource-r2"; adminResourceText = body.text; return { ok: true, status: 200, json: async () => adminConfig() }; }
       if (path.endsWith("/admin/config/groups-structured") && init?.method === "PUT") { const body = JSON.parse(String(init.body)); adminGroupsRevision = "group-r2"; return { ok: true, status: 200, json: async () => ({ ...adminConfig(), groups_structured: body }) }; }
@@ -163,7 +163,7 @@ describe("Clusterx monitor dashboard", () => {
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "2.1.0", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "2.1.1", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       if (path.includes("/history?")) return { ok: true, status: 200, json: async () => ({ retained_snapshots: 2, history_capacity: 2880, window_started_at: "2026-08-14T00:59:30Z", newest_at: "2026-08-14T01:00:00Z", points: [
         { snapshot_id: "snapshot-0", generated_at: "2026-08-14T00:59:30Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: { fragmented: 1, "gpu-full": 1 } },
         { snapshot_id: "snapshot-1", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 12, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: { fragmented: 1, "gpu-full": 1 } },
@@ -232,12 +232,12 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
 
-    fireEvent.click(screen.getByLabelText("查看 v2.1.0 更新内容"));
+    fireEvent.click(screen.getByLabelText("查看 v2.1.1 更新内容"));
 
     expect(screen.getByText("本版更新")).toBeInTheDocument();
-    expect(screen.getByText(/Placement 统一为 Workload 上下文/)).toBeInTheDocument();
-    expect(screen.getByText(/调度模拟器采用候选节点范围/)).toBeInTheDocument();
-    expect(screen.getByText(/旧字段与旧枚举已移除/)).toBeInTheDocument();
+    expect(screen.getByText(/节点 IPv4 统一派生为小写/)).toBeInTheDocument();
+    expect(screen.getByText(/按 hostname 校验 --include\/--exclude/)).toBeInTheDocument();
+    expect(screen.getByText(/现有分组配置无需迁移/)).toBeInTheDocument();
   });
 
   it("provides an operational overview and global entity search", async () => {
@@ -266,8 +266,8 @@ describe("Clusterx monitor dashboard", () => {
 
     const search = screen.getByLabelText("全局搜索");
     fireEvent.focus(search);
-    fireEvent.change(search, { target: { value: "node-b" } });
-    fireEvent.click(await screen.findByRole("option", { name: /node-b/ }));
+    fireEvent.change(search, { target: { value: "host-10-0-0-2" } });
+    fireEvent.click(await screen.findByRole("option", { name: /host-10-0-0-2/ }));
     expect(screen.getByRole("dialog", { name: "node-b 详情" })).toBeInTheDocument();
   });
 
@@ -345,7 +345,7 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(document.body);
     expect(menu).toHaveProperty("open", false);
 
-    const versionSummary = screen.getByLabelText("查看 v2.1.0 更新内容");
+    const versionSummary = screen.getByLabelText("查看 v2.1.1 更新内容");
     const versionMenu = versionSummary.closest("details")!;
     fireEvent.click(versionSummary);
     expect(versionMenu).toHaveProperty("open", true);
@@ -431,7 +431,7 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "groups" }));
-    expect(screen.getByText("v2.1.0")).toBeInTheDocument();
+    expect(screen.getByText("v2.1.1")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);
@@ -700,6 +700,8 @@ describe("Clusterx monitor dashboard", () => {
     expect(workspace.children).toHaveLength(1);
     const nodeCard = screen.getByRole("button", { name: "查看 node-a 详情" });
     expect(nodeCard).toBeInTheDocument();
+    expect(nodeCard).toHaveTextContent("host-10-0-0-1");
+    expect(nodeCard).toHaveTextContent("node-a · 10.0.0.1");
     const telemetryCell = nodeCard.querySelector<HTMLElement>(".telemetry-cell")!;
     const telemetryItems = telemetryCell.querySelectorAll(":scope > span");
     expect(telemetryCell).toHaveTextContent("99.999% util");
@@ -720,6 +722,18 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看 node-a 详情" }));
     expect(screen.getByRole("dialog", { name: "node-a 详情" })).toHaveTextContent("有效空闲 GPU");
     expect(screen.getByRole("dialog", { name: "node-a 详情" })).toHaveTextContent("不参与调度模拟");
+    expect(screen.getByRole("dialog", { name: "node-a 详情" })).toHaveTextContent("Clusterx hostnamehost-10-0-0-1");
+    expect(screen.getByRole("dialog", { name: "node-a 详情" })).toHaveTextContent("ECP 节点名node-a");
+  });
+
+  it("falls back to the ECP node name when hostname is unavailable", async () => {
+    latestSnapshot.nodes[0].hostname = null;
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "nodes" }));
+    const nodeCard = screen.getByRole("button", { name: "查看 node-a 详情" });
+    expect(nodeCard).toHaveTextContent("node-a");
+    expect(nodeCard).toHaveTextContent("hostname 不可用");
   });
 
   it("auto-expands the first plan, expands alternatives and opens plan workload details", async () => {
@@ -1044,6 +1058,7 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.change(screen.getByLabelText("密码"), { target: { value: "a-strong-test-password" } });
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
     await screen.findByText("组与节点分配");
+    expect(screen.getByText(/host-10-0-0-1 · node-a · 10.0.0.1/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("checkbox", { name: /启用节点归属约束/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: "节点：node-a" }));
     expect(vi.mocked(fetch).mock.calls.some(([input, init]) => String(input).endsWith("/admin/config/groups-structured") && init?.method === "PUT")).toBe(false);

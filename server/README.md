@@ -28,6 +28,13 @@ violations when the owner group has active group-local pending pressure. Unknown
 owner-group pressure remains a warning with explicit evidence. When allocation
 is disabled, placements are marked `unmanaged` rather than treated as owned.
 
+Every node snapshot keeps the ECP node name in `node` as its stable internal
+identity and exposes the authoritative `host_ip` plus a nullable Clusterx
+`hostname`. For a valid IPv4 address the hostname is derived as lowercase
+`host-<dashed-ip>` (for example `10.140.62.215` becomes
+`host-10-140-62-215`). Group configuration and planner payloads continue to
+use the ECP node name; `clusterx run --include/--exclude` uses `hostname`.
+
 The planning API keeps resource candidate scope separate from node ownership
 and Workload placement relation. Non-default ownership filters are rejected
 when allocation is disabled, and group-relative node scopes require an explicit

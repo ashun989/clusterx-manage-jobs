@@ -68,6 +68,7 @@ The positional argument is the command to run. The verified option surface is:
 | `--image` | Container image | config/default |
 | `--mount`, `--empty-mount` | Repeatable volume mount | config/default |
 | `--shm-size-gib` | Shared memory | `64` |
+| `--storage-ak-id`, `--storage-ak-secret` | Storage credentials | config/default |
 
 When `CLUSTERX_MONITOR_URL` is configured, the Skill wrapper performs an
 advisory group-node check before `run`. Pass `--cluster-user <name>` before the
@@ -78,7 +79,12 @@ name is the caller-supplied Clusterx identity and is never inferred from
 If the Monitor reports node allocation disabled, the wrapper skips node
 recommendations and treats the queue as fully accessible. The wrapper never
 rewrites `--include` or `--exclude`.
-| `--storage-ak-id`, `--storage-ak-secret` | Storage credentials | config/default |
+
+For SSP, these placement filters use the lowercase Kubernetes hostname rather
+than the ECP node name. Monitor exposes it as `hostname`; a valid IPv4 address
+is converted deterministically (`10.140.62.215` → `host-10-140-62-215`). Keep
+ECP node names as Monitor allocation/configuration identities and do not pass
+them to `--include` or `--exclude`.
 
 Clusterx `2026.8.19` joins positional command tokens without shell quoting.
 Never submit `bash -c`, `bash -lc`, `sh -c`, or equivalent command-string forms.

@@ -193,7 +193,7 @@ def _render_table(payload: Any, *, no_color: bool = False) -> str:
         if not rows:
             return "No matching rows.\n"
         preferred = [
-            "user", "group", "node", "workload_name", "type", "classification",
+            "user", "group", "node", "hostname", "host_ip", "workload_name", "type", "classification",
             "priority", "status", "policy_status", "gpu_quota", "cpu_quota", "memory_quota_gib",
             "pending_pressure",
             "allocated_gpu", "allocated_cpu", "allocated_memory_gib", "total_gpu",
