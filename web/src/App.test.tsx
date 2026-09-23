@@ -1004,14 +1004,14 @@ describe("Clusterx monitor dashboard", () => {
   it("shows effective node assignments in rules and group/node details", async () => {
     latestSnapshot.node_allocation = {
       enabled: true, access_scope: "group-owned",
-      assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
-      configured_assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+      assignments: { "group-a": ["node-a", "node-b"], "group-b": [] },
+      configured_assignments: { "group-a": ["node-a", "node-b"], "group-b": [] },
     };
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "rules" }));
     expect(screen.getByRole("columnheader", { name: "有效节点" })).toBeInTheDocument();
-    expect(screen.getByRole("row", { name: /group-a/ })).toHaveTextContent("node-a");
+    expect(screen.getByRole("row", { name: /group-a/ })).toHaveTextContent("host-10-0-0-1,host-10-0-0-2");
     fireEvent.click(screen.getByRole("button", { name: "groups" }));
     fireEvent.click(screen.getByRole("row", { name: "查看 group-a 详情" }));
     expect(screen.getByRole("dialog", { name: "group-a 详情" })).toHaveTextContent("有效节点 GPU");
