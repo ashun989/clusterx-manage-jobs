@@ -859,16 +859,21 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(any(item["code"] == "placement.outside_owned_pool" for item in result["alerts"]))
 
         owned_full = apply_policy(snapshot([node("owned", 8), node("other", 1)], [item]), policy)
-        self.assertNotIn("placement.outside_owned_pool", owned_full["workloads"][0]["finding_codes"])
+        owned_full_finding = next(
+            finding for finding in owned_full["workloads"][0]["policy_findings"]
+            if finding["code"] == "placement.outside_owned_pool"
+        )
+        self.assertFalse(owned_full_finding["observed"]["owned_capacity_sufficient"])
 
         owned_cpu_blocked = apply_policy(
             snapshot([node("owned", 0, 112, 0), node("other", 1, 14, 240)], [item]),
             policy,
         )
-        self.assertNotIn(
-            "placement.outside_owned_pool",
-            owned_cpu_blocked["workloads"][0]["finding_codes"],
+        owned_cpu_blocked_finding = next(
+            finding for finding in owned_cpu_blocked["workloads"][0]["policy_findings"]
+            if finding["code"] == "placement.outside_owned_pool"
         )
+        self.assertFalse(owned_cpu_blocked_finding["observed"]["owned_capacity_sufficient"])
 
         mixed_item = workload(
             "mixed", "alice", "trainingJob",
@@ -886,6 +891,89 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "appears in both"):
             PolicyConfig.model_validate(payload)
 
+    def test_cross_group_placement_compares_remaining_quota_with_foreign_gpu(self):
+        for quota, expected_code, expected_remaining in (
+            (8, "placement.quota_borrowed", 0),
+            (16, "placement.outside_owned_pool", 8),
+            (24, "placement.outside_owned_pool", 16),
+        ):
+            with self.subTest(quota=quota):
+                payload = self.policy.model_dump(mode="json")
+                payload["node_allocation"] = {"enabled": True}
+                payload["groups"]["example-team"]["gpu_quota"] = quota
+                payload["groups"]["example-team"]["nodes"] = ["owned"]
+                payload["groups"]["default"]["nodes"] = ["foreign"]
+                policy = PolicyConfig.model_validate(payload)
+                item = workload("cross-group", "alice", "trainingJob", [placement("foreign", 8)])
+                result = apply_policy(
+                    snapshot([node("owned", 8), node("foreign", 8)], [item]), policy,
+                )
+                finding = next(
+                    entry for entry in result["workloads"][0]["policy_findings"]
+                    if entry["category"] == "placement"
+                )
+                self.assertEqual(finding["code"], expected_code)
+                self.assertEqual(finding["status"], "warning")
+                self.assertEqual(finding["observed"]["required_gpu"], 8)
+                self.assertEqual(finding["observed"]["quota_remaining_gpu"], expected_remaining)
+                self.assertEqual(
+                    finding["observed"]["quota_sufficient_for_foreign_gpu"],
+                    expected_code == "placement.outside_owned_pool",
+                )
+
+        payload = self.policy.model_dump(mode="json")
+        payload["node_allocation"] = {"enabled": True}
+        payload["groups"]["example-team"]["gpu_quota"] = None
+        payload["groups"]["example-team"]["nodes"] = ["owned"]
+        payload["groups"]["default"]["nodes"] = ["foreign"]
+        unlimited = apply_policy(
+            snapshot(
+                [node("owned", 8), node("foreign", 8)],
+                [workload("unlimited", "alice", "trainingJob", [placement("foreign", 8)])],
+            ),
+            PolicyConfig.model_validate(payload),
+        )["workloads"][0]
+        unlimited_finding = next(
+            entry for entry in unlimited["policy_findings"] if entry["category"] == "placement"
+        )
+        self.assertEqual(unlimited_finding["code"], "placement.outside_owned_pool")
+        self.assertIsNone(unlimited_finding["observed"]["quota_remaining_gpu"])
+        self.assertTrue(unlimited_finding["observed"]["quota_sufficient_for_foreign_gpu"])
+
+        payload["groups"]["example-team"]["gpu_quota"] = 0
+        zero_gpu = apply_policy(
+            snapshot(
+                [node("owned", 8), node("foreign", 0)],
+                [workload("zero-gpu", "alice", "trainingJob", [placement("foreign", 0)])],
+            ),
+            PolicyConfig.model_validate(payload),
+        )["workloads"][0]
+        zero_gpu_finding = next(
+            entry for entry in zero_gpu["policy_findings"] if entry["category"] == "placement"
+        )
+        self.assertEqual(zero_gpu_finding["code"], "placement.outside_owned_pool")
+        self.assertEqual(zero_gpu_finding["observed"]["required_gpu"], 0)
+        self.assertTrue(zero_gpu_finding["observed"]["quota_sufficient_for_foreign_gpu"])
+
+        payload["groups"]["example-team"]["gpu_quota"] = 16
+        mixed = apply_policy(
+            snapshot(
+                [node("owned", 8), node("foreign", 4)],
+                [workload(
+                    "mixed-quota-boundary", "alice", "trainingJob",
+                    [placement("owned", 8), placement("foreign", 4)],
+                )],
+            ),
+            PolicyConfig.model_validate(payload),
+        )["workloads"][0]
+        mixed_finding = next(
+            entry for entry in mixed["policy_findings"] if entry["category"] == "placement"
+        )
+        self.assertEqual(mixed_finding["code"], "placement.outside_owned_pool")
+        self.assertEqual(mixed_finding["observed"]["workload_gpu"], 12)
+        self.assertEqual(mixed_finding["observed"]["required_gpu"], 4)
+        self.assertEqual(mixed_finding["observed"]["quota_remaining_gpu"], 4)
+
     def test_node_allocation_borrowing_keeps_quota_finding_and_ignores_pending_placement(self):
         payload = self.policy.model_dump(mode="json")
         payload["node_allocation"] = {"enabled": True}
@@ -898,6 +986,12 @@ class PolicyTests(unittest.TestCase):
         finding_codes = result["workloads"][0]["finding_codes"]
         self.assertIn("placement.quota_borrowed", finding_codes)
         self.assertEqual(result["workloads"][0]["placement_context"]["issue"], "quota_borrowed")
+        finding = next(
+            entry for entry in result["workloads"][0]["policy_findings"]
+            if entry["code"] == "placement.quota_borrowed"
+        )
+        self.assertEqual(finding["observed"]["quota_remaining_gpu"], 0)
+        self.assertFalse(finding["observed"]["quota_sufficient_for_foreign_gpu"])
         self.assertIn("quota.gpu", next(item for item in result["groups"] if item["group"] == "example-team")["finding_codes"])
 
         pending = apply_policy(snapshot([node("owned", 0), node("borrowed", 0)], [], [{"workload_id": "pending", "queue_age_seconds": 1}]), policy)
@@ -962,6 +1056,8 @@ class PolicyTests(unittest.TestCase):
             {item["observed"]["owner_group"]: item["status"] for item in findings},
             {"default": "warning", "pressure-team": "violation"},
         )
+        self.assertEqual({item["code"] for item in findings}, {"placement.outside_owned_pool"})
+        self.assertEqual(active["workloads"][0]["policy_status"], "violation")
 
         unknown = apply_policy(
             snapshot(

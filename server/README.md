@@ -21,12 +21,14 @@ optionally serve a built Web directory.
 The Server never creates, stops or mutates Clusterx jobs. Pending workloads do
 not receive node placement findings. Every running Workload has an authoritative
 `placement_context`; every placement records its `owner_group` and ownership
-relation. `placement.outside_owned_pool` means the Workload had enough capacity
-in its own pool but ran on another group's node. `placement.quota_borrowed`
-means its GPU quota was already full. Both are warnings by default and become
-violations when the owner group has active group-local pending pressure. Unknown
-owner-group pressure remains a warning with explicit evidence. When allocation
-is disabled, placements are marked `unmanaged` rather than treated as owned.
+relation. `placement.outside_owned_pool` means the Workload had enough remaining
+GPU quota to cover every GPU placed on other groups' nodes.
+`placement.quota_borrowed` means that remaining quota was smaller than the
+foreign GPU total. Every running foreign placement produces one of these two
+findings. Both are warnings by default and become violations when the owner
+group has active group-local pending pressure. Unknown owner-group pressure
+remains a warning with explicit evidence. When allocation is disabled,
+placements are marked `unmanaged` rather than treated as owned.
 
 Every node snapshot keeps the ECP node name in `node` as its stable internal
 identity and exposes the authoritative `host_ip` plus a nullable Clusterx

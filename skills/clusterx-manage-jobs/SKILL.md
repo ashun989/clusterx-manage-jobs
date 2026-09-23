@@ -173,15 +173,17 @@ a hostname when the IP is missing or invalid.
   category, status, tags, observed values, limits, and optional history window.
 - Node allocation is queue-wide and advisory. Every live queue node has one
   public effective owner when enabled; an unassigned node belongs to `default`.
-  A running workload with quota headroom on another group's node produces a
-  `placement.outside_owned_pool` warning only when its own pool has sufficient
-  free capacity; a workload at or above quota on another group's node produces
-  a `placement.quota_borrowed` warning. These findings become violations when
-  the owner group reaches group-local pending pressure, computed with the same
-  `min_wait_minutes` and `min_jobs` thresholds as queue pressure. Unknown
-  pressure remains a warning. Borrowing never suppresses quota findings.
-  Pending workloads have no node placement and never receive placement
-  warnings.
+  Every running workload on another group's node produces a placement finding.
+  Compare the group's current remaining GPU quota with the sum of GPU on all
+  foreign placements: sufficient or unlimited quota produces
+  `placement.outside_owned_pool`, while insufficient remaining quota produces
+  `placement.quota_borrowed`. Physical free capacity in the group's own pool is
+  diagnostic evidence and does not change this classification. These findings
+  are warnings by default and become violations when the owner group reaches
+  group-local pending pressure, computed with the same `min_wait_minutes` and
+  `min_jobs` thresholds as queue pressure. Unknown pressure remains a warning.
+  Borrowing never suppresses quota findings. Pending workloads have no node
+  placement and never receive placement warnings.
 - Monitor resource/group editing is an administrator-only service capability,
   not a Clusterx CRUD operation. Never request or transmit the administrator
   password through the Skill. The operator initializes it interactively with

@@ -23,6 +23,11 @@ const dateTime = (value: string | null | undefined) => {
   return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
 };
 const releaseNotes: Record<string, string[]> = {
+  "2.1.2": [
+    "所有运行中的跨组节点使用都会产生 placement finding，并按剩余 GPU quota 能否覆盖外组 GPU 统一分类。",
+    "quota 足够归为 outside_owned_pool，quota 余量不足归为 quota_borrowed；两类在 owner 组有排队压力时升级为 violation。",
+    "Placement 详情新增 quota 剩余、外组 GPU 和覆盖结果证据，便于直接解释分类。",
+  ],
   "2.1.1": [
     "节点 IPv4 统一派生为小写 Clusterx hostname，并在节点、Placement、调度与分配界面突出展示。",
     "Clusterx wrapper 按 hostname 校验 --include/--exclude，兼容旧 Monitor 的 host_ip 回退并提示大小写错误。",

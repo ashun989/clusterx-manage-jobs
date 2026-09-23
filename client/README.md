@@ -42,12 +42,14 @@ disabled, the endpoint can return all nodes without either value.
 If node allocation is disabled, the access response explicitly reports that
 the policy is disabled and all queue nodes are available. If it is enabled,
 the response returns the effective group pool. `placement.outside_owned_pool`
-means the Workload had sufficient capacity in its own pool but used another
-group's node; `placement.quota_borrowed` means its GPU quota was already full.
-Placement findings are warnings unless the owner group has active group-local
-pending pressure, when they become violations. Unknown pressure remains a
-warning with unknown evidence. Pending Workloads do not receive placement
-findings. Group rows also expose their `pending_pressure` state and evidence.
+means the Workload's remaining GPU quota covers its total GPU placed on other
+groups' nodes; `placement.quota_borrowed` means the remaining quota is smaller
+than that foreign GPU total. Every running foreign placement produces one of
+these findings. Placement findings are warnings unless the owner group has
+active group-local pending pressure, when they become violations. Unknown
+pressure remains a warning with unknown evidence. Pending Workloads do not
+receive placement findings. Group rows also expose their `pending_pressure`
+state and evidence.
 
 Numeric group GPU quotas are validated as multiples of 8. The default group's
 members are derived from the current Monitor user inventory and are not

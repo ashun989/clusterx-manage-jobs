@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clusterx-monitor-cli"
-version = "2.1.1"
+version = "2.1.2"
 description = "Clusterx Monitor and safe Clusterx user client"
 requires-python = ">=3.10"
 dependencies = [

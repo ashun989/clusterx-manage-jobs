@@ -57,8 +57,8 @@ RULE_CATALOG = [
     {"code": "node.cpu_memory_blocked", "category": "node-classification", "applies_to": "node", "title": "CPU/memory-blocked node", "description": "Raw free GPUs exceed the number usable for the configured standard planning profile; smaller explicit requests may still fit."},
     {"code": "attribution.resource_excess", "category": "attribution", "applies_to": "node", "title": "Inconsistent resource attribution", "description": "Pod-attributed resources exceed node allocated resources; the node and touching workloads are excluded from planning."},
     {"code": "quota.pending_pressure", "category": "quota", "applies_to": "queue", "title": "Pending pressure", "description": "Pressure becomes active when the configured number of pending training jobs individually reach the wait threshold; 0-GPU jobs count. Missing queue timestamps make pressure unknown."},
-    {"code": "placement.outside_owned_pool", "category": "placement", "applies_to": "running workload", "title": "Outside owned node pool", "description": "A group with quota headroom and enough effective free capacity in its own pool is running on a node owned by another group; the finding becomes a violation when the owner group has active pending pressure."},
-    {"code": "placement.quota_borrowed", "category": "placement", "applies_to": "running workload", "title": "Quota-full borrowed node", "description": "A group at or above its GPU quota is running on a node owned by another group; the finding becomes a violation when the owner group has active pending pressure, and borrowing does not waive quota findings."},
+    {"code": "placement.outside_owned_pool", "category": "placement", "applies_to": "running workload", "title": "Outside owned node pool", "description": "A running workload uses another group's node while its remaining GPU quota can cover all GPU placed on foreign nodes; the finding becomes a violation when the owner group has active pending pressure."},
+    {"code": "placement.quota_borrowed", "category": "placement", "applies_to": "running workload", "title": "Insufficient-quota borrowed node", "description": "A running workload uses another group's node while its remaining GPU quota cannot cover all GPU placed on foreign nodes; the finding becomes a violation when the owner group has active pending pressure, and borrowing does not waive quota findings."},
     {"code": "placement.owner_unknown", "category": "placement", "applies_to": "running workload", "title": "Node owner unknown", "description": "At least one running placement references a node without an effective owner while node allocation is enabled."},
     {"code": "placement.assignment_stale", "category": "placement", "applies_to": "node allocation", "title": "Stale node assignment", "description": "A configured node is not present in the current queue inventory."},
     {"code": "placement.assignment_capacity_insufficient", "category": "placement", "applies_to": "group", "title": "Assigned node capacity insufficient", "description": "The effective nodes assigned to a group have less GPU capacity than its finite quota."},
@@ -1195,18 +1195,20 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
             if not external_nodes_by_owner:
                 continue
             quota = group_gpu_quota.get(group)
-            quota_full = quota is not None and group_allocated_gpu.get(group, 0) >= quota
+            allocated_gpu = group_allocated_gpu.get(group, 0)
+            quota_remaining_gpu = None if quota is None else max(0, quota - allocated_gpu)
             workload_gpu = float(workload.get("total_gpu") or 0)
             required_gpu = _sum(
                 placement.get("gpu") for placement in workload.get("placements") or []
                 if placement.get("ownership") == "foreign"
             )
+            quota_sufficient = (
+                quota_remaining_gpu is None or quota_remaining_gpu >= required_gpu
+            )
+            quota_insufficient = not quota_sufficient
             has_owned_capacity = _fits_on_owned_nodes(workload, group, nodes, node_owners)
-            issue = "quota_borrowed" if quota_full else "outside_owned_pool" if has_owned_capacity else "none"
-            if issue != "none":
-                workload["placement_context"]["issue"] = issue
-            if issue == "none":
-                continue
+            issue = "quota_borrowed" if quota_insufficient else "outside_owned_pool"
+            workload["placement_context"]["issue"] = issue
             for owner_group, owner_nodes in sorted(external_nodes_by_owner.items()):
                 owner_pressure = group_pending_pressure.get(owner_group, {
                     "state": "unknown",
@@ -1217,18 +1219,18 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
                 })
                 pressure_status = owner_pressure["state"]
                 finding_status = "violation" if pressure_status == "active" else "warning"
-                code = "placement.quota_borrowed" if quota_full else "placement.outside_owned_pool"
+                code = "placement.quota_borrowed" if quota_insufficient else "placement.outside_owned_pool"
                 message = (
-                    "running workload is borrowing nodes from another group after its GPU quota is full while the owner group has active pending pressure"
-                    if finding_status == "violation" and quota_full else
-                    "running workload is outside its group-owned node pool while the owner group has active pending pressure"
+                    "running workload is using another group's nodes without enough remaining GPU quota while the owner group has active pending pressure"
+                    if finding_status == "violation" and quota_insufficient else
+                    "running workload is using another group's nodes with enough remaining GPU quota while the owner group has active pending pressure"
                     if finding_status == "violation" else
-                    "running workload is borrowing nodes from another group after its GPU quota is full"
-                    if quota_full else
-                    "running workload is using nodes outside its group-owned node pool while GPU quota has headroom"
+                    "running workload is using another group's nodes without enough remaining GPU quota"
+                    if quota_insufficient else
+                    "running workload is using another group's nodes with enough remaining GPU quota"
                 )
                 tags = (
-                    "placement", "node", "quota-borrowed" if quota_full else "outside-owned-pool",
+                    "placement", "node", "quota-borrowed" if quota_insufficient else "outside-owned-pool",
                     "pending-pressure" if pressure_status == "active" else
                     "pending-pressure-unknown" if pressure_status == "unknown" else
                     "pending-pressure-inactive",
@@ -1240,11 +1242,16 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
                         "group": group,
                         "owner_group": owner_group,
                         "nodes": sorted(owner_nodes),
-                        "allocated_gpu": _clean(group_allocated_gpu.get(group, 0)),
+                        "allocated_gpu": _clean(allocated_gpu),
                         "owned_free_gpu": _clean(group_owned_free_gpu.get(group, 0)),
                         "required_gpu": _clean(required_gpu),
                         "workload_gpu": _clean(workload_gpu),
-                        "quota_state": "full" if quota_full else "headroom",
+                        "quota_state": "full" if quota is not None and allocated_gpu >= quota else "headroom",
+                        "quota_remaining_gpu": (
+                            None if quota_remaining_gpu is None
+                            else _clean(quota_remaining_gpu)
+                        ),
+                        "quota_sufficient_for_foreign_gpu": quota_sufficient,
                         "owned_capacity_sufficient": has_owned_capacity,
                         "owner_pending_pressure": owner_pressure,
                     },
@@ -1253,9 +1260,9 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
                 workload["policy_findings"] = [*workload.get("policy_findings", []), finding]
                 if finding_status == "warning":
                     alerts_message = (
-                        "workload is borrowing nodes from another group after its GPU quota is full"
-                        if quota_full else
-                        "workload is outside its group-owned node pool while GPU quota has headroom"
+                        "workload is using another group's nodes without enough remaining GPU quota"
+                        if quota_insufficient else
+                        "workload is using another group's nodes with enough remaining GPU quota"
                     )
                     alerts.append(_alert(
                         "warning", "placement", workload.get("workload_id"), alerts_message,

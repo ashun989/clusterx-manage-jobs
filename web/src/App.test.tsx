@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { FreshnessBadge } from "./App";
 import { Overview } from "./Overview";
+import { placementLabel } from "./PlacementBadge";
 import {
   DEFAULT_TREND_RANGE_SECONDS,
   MAX_TREND_RANGE_SECONDS,
@@ -163,7 +164,7 @@ describe("Clusterx monitor dashboard", () => {
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "2.1.1", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "2.1.2", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       if (path.includes("/history?")) return { ok: true, status: 200, json: async () => ({ retained_snapshots: 2, history_capacity: 2880, window_started_at: "2026-08-14T00:59:30Z", newest_at: "2026-08-14T01:00:00Z", points: [
         { snapshot_id: "snapshot-0", generated_at: "2026-08-14T00:59:30Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: { fragmented: 1, "gpu-full": 1 } },
         { snapshot_id: "snapshot-1", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 12, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: { fragmented: 1, "gpu-full": 1 } },
@@ -232,12 +233,12 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
 
-    fireEvent.click(screen.getByLabelText("查看 v2.1.1 更新内容"));
+    fireEvent.click(screen.getByLabelText("查看 v2.1.2 更新内容"));
 
     expect(screen.getByText("本版更新")).toBeInTheDocument();
-    expect(screen.getByText(/节点 IPv4 统一派生为小写/)).toBeInTheDocument();
-    expect(screen.getByText(/按 hostname 校验 --include\/--exclude/)).toBeInTheDocument();
-    expect(screen.getByText(/现有分组配置无需迁移/)).toBeInTheDocument();
+    expect(screen.getByText(/所有运行中的跨组节点使用/)).toBeInTheDocument();
+    expect(screen.getByText(/quota 足够归为 outside_owned_pool/)).toBeInTheDocument();
+    expect(screen.getByText(/新增 quota 剩余、外组 GPU/)).toBeInTheDocument();
   });
 
   it("provides an operational overview and global entity search", async () => {
@@ -345,7 +346,7 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(document.body);
     expect(menu).toHaveProperty("open", false);
 
-    const versionSummary = screen.getByLabelText("查看 v2.1.1 更新内容");
+    const versionSummary = screen.getByLabelText("查看 v2.1.2 更新内容");
     const versionMenu = versionSummary.closest("details")!;
     fireEvent.click(versionSummary);
     expect(versionMenu).toHaveProperty("open", true);
@@ -431,7 +432,7 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "groups" }));
-    expect(screen.getByText("v2.1.1")).toBeInTheDocument();
+    expect(screen.getByText("v2.1.2")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);
@@ -932,11 +933,14 @@ describe("Clusterx monitor dashboard", () => {
   it("shows placement issues consistently and opens placement alerts at the Workload", async () => {
     const placementFinding: PolicyFinding = {
       code: "placement.outside_owned_pool", category: "placement", status: "warning",
-      message: "running workload is using nodes outside its group-owned node pool while GPU quota has headroom",
+      message: "running workload is using another group's nodes with enough remaining GPU quota",
       tags: ["placement", "outside-owned-pool"],
       observed: {
         group: "group-a", owner_group: "group-b", nodes: ["node-b"],
-        quota_state: "headroom", owner_pending_pressure: { state: "inactive" },
+        allocated_gpu: 8, owned_free_gpu: 4, required_gpu: 4,
+        quota_state: "headroom", quota_remaining_gpu: 8,
+        quota_sufficient_for_foreign_gpu: true,
+        owner_pending_pressure: { state: "inactive" },
       },
       limit: { gpu_quota: 16 },
     };
@@ -964,7 +968,7 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "workloads" }));
     const row = screen.getByRole("row", { name: "查看 train-a 详情" });
     expect(row).toHaveTextContent("warning");
-    expect(row).toHaveTextContent("有本组余量但使用其他组节点");
+    expect(row).toHaveTextContent("quota 足够但使用其他组节点");
     expect(row.querySelector(".placement-badge")).toHaveClass("placement-outside");
     expect(within(row.closest("table")!).getByRole("button", { name: "排序 节点归属" })).toBeInTheDocument();
 
@@ -974,6 +978,8 @@ describe("Clusterx monitor dashboard", () => {
     expect(workloadDrawer).toHaveTextContent("其他组节点");
     expect(workloadDrawer.querySelector(".node-placement-badge .placement-badge")).toHaveClass("placement-foreign");
     expect(workloadDrawer).toHaveTextContent("placement.outside_owned_pool");
+    expect(workloadDrawer).toHaveTextContent("Quota 剩余 / 外组 GPU8 / 4");
+    expect(workloadDrawer).toHaveTextContent("Quota 是否足够是");
     fireEvent.click(within(workloadDrawer).getByRole("button", { name: "关闭详情" }));
 
     fireEvent.click(screen.getByRole("button", { name: "overview" }));
@@ -982,6 +988,16 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByRole("dialog", { name: "train-a 详情" })).toBeInTheDocument();
 
     expect(screen.queryByText("使用借用节点的 Workload")).not.toBeInTheDocument();
+  });
+
+  it("labels quota-insufficient foreign placement as borrowed", () => {
+    expect(placementLabel({
+      ...latestSnapshot.workloads[0],
+      placement_context: {
+        mode: "managed", relations: ["foreign"], issue: "quota_borrowed",
+        owner_groups: ["group-b"],
+      },
+    })).toBe("quota 余量不足借用");
   });
 
   it("renders dynamic status, rules, effective values and private group counts", async () => {

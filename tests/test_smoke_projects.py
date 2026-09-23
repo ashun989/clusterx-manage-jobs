@@ -193,7 +193,7 @@ class SmokeProjectTests(unittest.TestCase):
         deploy_readme = (ROOT / "deploy/README.md").read_text(encoding="utf-8")
         release_doc = (ROOT / "docs/release.md").read_text(encoding="utf-8")
         version = (ROOT / "server/VERSION").read_text(encoding="utf-8").strip()
-        self.assertEqual(version, "2.1.1")
+        self.assertEqual(version, "2.1.2")
         self.assertIn(
             f'version = "{version}"',
             (ROOT / "server/pyproject.toml").read_text(encoding="utf-8"),

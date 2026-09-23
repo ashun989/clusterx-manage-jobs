@@ -150,7 +150,7 @@ class MonitorApiTests(unittest.TestCase):
     def test_status_snapshot_policy_and_read_only_routes(self):
         client = TestClient(self.app)
         status_response = client.get("/api/v1/status")
-        self.assertEqual(status_response.json()["version"], "2.1.1")
+        self.assertEqual(status_response.json()["version"], "2.1.2")
         self.assertTrue(status_response.json()["snapshot"]["ready"])
         self.assertIn("default-src 'self'", status_response.headers["content-security-policy"])
         self.assertEqual(status_response.headers["x-content-type-options"], "nosniff")
