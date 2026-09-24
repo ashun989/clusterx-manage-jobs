@@ -23,6 +23,9 @@ const dateTime = (value: string | null | undefined) => {
   return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
 };
 const releaseNotes: Record<string, string[]> = {
+  "2.2.2": [
+    "调度模拟支持 0 GPU 的 Pending Workload，保留 CPU 与内存请求画像并按资源占用生成协调方案。",
+  ],
   "2.2.1": [
     "从 Pending Workload 进入调度模拟时，资源候选默认覆盖满 GPU 节点；默认返回 3 个备选方案，便于比较跨组占用的协调方式。",
   ],
@@ -411,7 +414,7 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
   return <form className="planner" onSubmit={submit}>
     {intent && <div className="planner-context"><div><span className="eyebrow">问题上下文</span><b>{intent.sourceLabel}</b><p>{intent.note}</p>{intent.targetNodes.length > 0 && <small>指定目标节点：{intent.targetNodes.join("、")}</small>}</div><button type="button" onClick={clearIntent}>清除上下文</button></div>}
     <section className="planner-section"><h3>目标资源</h3>
-      <label>节点数<input name="nodes" type="number" min="1" max="1024" value={nodes} onChange={(event) => setNodes(event.target.value)} required /></label><label>每节点 GPU<input name="gpus" type="number" min="1" max="1024" value={gpus} onChange={(event) => setGpus(event.target.value)} required /></label>
+      <label>节点数<input name="nodes" type="number" min="1" max="1024" value={nodes} onChange={(event) => setNodes(event.target.value)} required /></label><label>每节点 GPU<input name="gpus" type="number" min="0" max="1024" value={gpus} onChange={(event) => setGpus(event.target.value)} required /></label>
       <div className="planner-field"><label htmlFor="planner-cpus">CPU 总量（可覆盖）</label><input id="planner-cpus" name="cpus" type="number" min="1" max={1_000_000 * Math.max(1, Number(nodes) || 1)} step="any" value={cpus} onChange={(event) => { setCpusUseDefault(false); setCpus(event.target.value); }} required /><small><span>{cpusUseDefault ? `${nodes || "—"} 节点 × ${gpus || "—"} GPU × ${snapshot.planning_profile.default_cpu_per_gpu} CPU/GPU` : "使用自定义 CPU 总量"}</span>{!cpusUseDefault && <button type="button" aria-label="CPU 恢复默认比例" onClick={() => { setCpus(defaultFor(snapshot.planning_profile.default_cpu_per_gpu)); setCpusUseDefault(true); }}>恢复跟随</button>}</small></div>
       <div className="planner-field"><label htmlFor="planner-memory">内存总量 GiB（可覆盖）</label><input id="planner-memory" name="memory" type="number" min="1" max={10_000_000 * Math.max(1, Number(nodes) || 1)} step="any" value={memory} onChange={(event) => { setMemoryUsesDefault(false); setMemory(event.target.value); }} required /><small><span>{memoryUsesDefault ? `${nodes || "—"} 节点 × ${gpus || "—"} GPU × ${snapshot.planning_profile.default_memory_gib_per_gpu} GiB/GPU` : "使用自定义内存总量"}</span>{!memoryUsesDefault && <button type="button" aria-label="内存恢复默认比例" onClick={() => { setMemory(defaultFor(snapshot.planning_profile.default_memory_gib_per_gpu)); setMemoryUsesDefault(true); }}>恢复跟随</button>}</small></div>
     </section>
@@ -605,7 +608,7 @@ export default function App() {
       if (!workload) return defaults;
       const placementNodes = [...new Set(workload.placements.map((item) => item.node).filter(Boolean))];
       const nodes = Math.max(1, (workload.num_nodes ?? placementNodes.length) || 1);
-      const gpusPerNode = Math.max(1, workload.gpus_per_node ?? Math.ceil((workload.total_gpu || 1) / nodes));
+      const gpusPerNode = Math.max(0, workload.gpus_per_node ?? Math.ceil((workload.total_gpu || 0) / nodes));
       const pending = workload.policy_status === "pending" || workload.placements.length === 0;
       const group = workload.group && workload.group !== "unattributed" ? [workload.group] : [];
       return {

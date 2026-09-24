@@ -150,9 +150,19 @@ class PolicyConfig(FrozenModel):
 
 class PlanTarget(FrozenModel):
     nodes: int = Field(ge=1, le=1024)
-    gpus_per_node: int = Field(default=8, ge=1, le=1024)
+    gpus_per_node: int = Field(default=8, ge=0, le=1024)
     cpus_per_node: float | None = Field(default=None, gt=0, le=1_000_000)
     memory_per_node_gib: float | None = Field(default=None, gt=0, le=10_000_000)
+
+    @model_validator(mode="after")
+    def validate_nonempty_resource_request(self) -> "PlanTarget":
+        if (
+            self.gpus_per_node == 0
+            and self.cpus_per_node is None
+            and self.memory_per_node_gib is None
+        ):
+            raise ValueError("a zero-GPU target must request CPU or memory")
+        return self
 
 
 class PlanFilters(FrozenModel):

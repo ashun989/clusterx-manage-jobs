@@ -347,6 +347,11 @@ describe("Clusterx monitor dashboard", () => {
     expect(plannerUrl.searchParams.getAll("plan.node-group")).toEqual(["owner-group"]);
     window.history.replaceState({}, "", plannerUrl);
     expect(readNavigationState().plannerIntent).toMatchObject({ groups: ["candidate-group"], nodeGroups: ["owner-group"] });
+    state.plannerIntent.gpusPerNode = 0;
+    const cpuOnlyPlannerUrl = new URL(navigationUrl(state), window.location.origin);
+    expect(cpuOnlyPlannerUrl.searchParams.get("plan.gpus")).toBe("0");
+    window.history.replaceState({}, "", cpuOnlyPlannerUrl);
+    expect(readNavigationState().plannerIntent?.gpusPerNode).toBe(0);
     expect(sliderPositionFromTrendRange(604_800)).toBeGreaterThan(sliderPositionFromTrendRange(86_400));
   });
 
@@ -974,7 +979,7 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByRole("combobox", { name: "候选节点范围" })).toHaveValue("selected_group_nodes");
     expect(screen.getByText("指定 Workload", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
     expect(screen.getByText("类型", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
-    expect(screen.getByRole("combobox", { name: "资源候选范围" })).toHaveValue("all");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "资源候选范围" })).toHaveValue("all"));
     expect(screen.getByRole("spinbutton", { name: "备选数" })).toHaveValue(3);
   });
 
@@ -994,9 +999,39 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
 
-    expect(screen.getByRole("combobox", { name: "资源候选范围" })).toHaveValue("all");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "资源候选范围" })).toHaveValue("all"));
     expect(screen.getByRole("combobox", { name: "候选节点范围" })).toHaveValue("selected_group_nodes");
     expect(screen.getByText("Workload 分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
+  });
+
+  it("preserves the zero-GPU resource request for CPU-only pending workloads", async () => {
+    const pending: Workload = {
+      ...workload("cpu-pending", "cpu-pending", "charlie", "group-a", 0, "unused"),
+      policy_status: "pending", placements: [], gpus: [], telemetry: telemetry(0, null, null),
+      gpus_per_node: 0, total_gpu: 0, total_cpu: 8, total_memory_gib: 32,
+      cpus_per_node: 8, memory_per_node_gib: 32, resource_basis: "requested",
+    };
+    latestSnapshot = { ...latestSnapshot, pending_workloads: [pending] };
+    latestSnapshot.node_allocation = {
+      enabled: true, access_scope: "group-owned",
+      assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+      configured_assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+    };
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "workloads" }));
+    fireEvent.click(screen.getByRole("row", { name: "查看 cpu-pending 详情" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "cpu-pending 详情" })).getByRole("button", { name: "进入调度模拟" }));
+
+    expect(screen.getByLabelText("每节点 GPU")).toHaveValue(0);
+    expect(screen.getByLabelText("CPU 总量（可覆盖）")).toHaveValue(8);
+    expect(screen.getByLabelText("内存总量 GiB（可覆盖）")).toHaveValue(32);
+    fireEvent.click(screen.getByRole("button", { name: "计算方案" }));
+    await screen.findByRole("button", { name: /min-gpu #1/ });
+    const call = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).endsWith("/plans") && init?.method === "POST");
+    const payload = JSON.parse(String(call?.[1]?.body));
+    expect(payload.target).toEqual({ nodes: 1, gpus_per_node: 0, cpus_per_node: 8, memory_per_node_gib: 32 });
+    expect(payload.filters).toMatchObject({ groups: [], node_owner_groups: ["group-a"], candidate_node_scope: "selected_group_nodes" });
   });
 
   it("filters array-valued finding facets and renders finding details", async () => {

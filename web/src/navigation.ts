@@ -151,14 +151,21 @@ function positiveNumber(params: URLSearchParams, key: string): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+function nonNegativeNumber(params: URLSearchParams, key: string): number | null {
+  const raw = params.get(key);
+  if (raw === null || raw.trim() === "") return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
 function readPlannerIntent(params: URLSearchParams): PlannerIntent | null {
   const source = params.get("plan.source") ?? "";
   const separator = source.indexOf(":");
   const sourceKind = source.slice(0, separator) as DetailKind;
   const sourceId = source.slice(separator + 1);
   const nodes = positiveNumber(params, "plan.nodes");
-  const gpusPerNode = positiveNumber(params, "plan.gpus");
-  if (separator <= 0 || !detailKinds.includes(sourceKind) || !sourceId || !nodes || !gpusPerNode) return null;
+  const gpusPerNode = nonNegativeNumber(params, "plan.gpus");
+  if (separator <= 0 || !detailKinds.includes(sourceKind) || !sourceId || !nodes || gpusPerNode === null) return null;
   const requestedScope = params.get("plan.scope");
   return {
     sourceKind,

@@ -1279,6 +1279,33 @@ class PlannerTests(unittest.TestCase):
         })
         self.assertEqual(result["optimality"], "not-needed")
 
+    def test_cpu_only_target_can_be_freed_by_cpu_and_memory_occupancy(self):
+        target_node = node("n1", 0, cpu=16, memory=32)
+        target_node["total_gpu"] = 1
+        target_node["total_cpu"] = 16
+        target_node["total_memory_gib"] = 32
+        running = workload(
+            "cpu-only-job", "alice", "trainingJob",
+            [placement("n1", 0, cpu=8, memory=16)],
+        )
+        evaluated = apply_policy(snapshot([target_node], [running]), self.policy)
+        request = PlanRequest.model_validate({
+            "snapshot_id": "s1",
+            "target": {
+                "nodes": 1, "gpus_per_node": 0,
+                "cpus_per_node": 8, "memory_per_node_gib": 16,
+            },
+            "strategies": ["min-gpu"], "candidate_scope": "all",
+        })
+        result = solve_plan(evaluated, request.model_dump(mode="json"))
+        self.assertEqual(result["plans"][0]["workloads"], ["cpu-only-job"])
+
+    def test_zero_gpu_target_requires_cpu_or_memory(self):
+        with self.assertRaisesRegex(ValueError, "zero-GPU target must request CPU or memory"):
+            PlanRequest.model_validate({
+                "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 0},
+            })
+
     def test_exact_target_node_restricts_the_solution(self):
         evaluated = apply_policy(snapshot(
             [node("n1", 1), node("n2", 1)],
@@ -1525,7 +1552,7 @@ class PlannerTests(unittest.TestCase):
         }
         result = solve_plan(evaluated, request)
         self.assertEqual(result["resolved_target"]["cpus_per_node"], 112)
-        self.assertEqual(result["resolved_target"]["memory_per_node_gib"], 1920)
+        self.assertEqual(result["resolved_target"]["memory_per_node_gib"], 960)
         self.assertEqual(result["defaults_applied"], ["cpus_per_node", "memory_per_node_gib"])
         newer = self.policy.model_copy(update={
             "planning": self.policy.planning.model_copy(update={
@@ -2333,7 +2360,11 @@ class StoreAndTelemetryTests(unittest.TestCase):
                 ]}},
             }],
         }
-        jobs, complete = _pending_workloads(cluster, "queue")
+        with mock.patch(
+            "clusterx_monitor.collector._pending_workspace_resources",
+            return_value=([], True),
+        ):
+            jobs, complete = _pending_workloads(cluster, "queue")
         self.assertTrue(complete)
         item = jobs[0]
         self.assertEqual(item["num_nodes"], 4)
@@ -2387,12 +2418,16 @@ class StoreAndTelemetryTests(unittest.TestCase):
         old_timestamp = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         cluster.client.list_training_jobs.return_value = {
             "training_jobs": [{
-                "name": "old-shape",
+                "name": "old-shape", "ownership": {"creator_name": "Alice"},
                 "metadata": {"created_at": old_timestamp},
                 "create_time": old_timestamp,
             }],
         }
-        jobs, complete = _pending_workloads(cluster, "queue")
+        with mock.patch(
+            "clusterx_monitor.collector._pending_workspace_resources",
+            return_value=([], True),
+        ):
+            jobs, complete = _pending_workloads(cluster, "queue")
         self.assertTrue(complete)
         self.assertIsNone(jobs[0]["create_time"])
         self.assertIsNone(jobs[0]["resource_create_time"])
