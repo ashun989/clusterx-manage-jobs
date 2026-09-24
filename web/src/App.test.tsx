@@ -164,7 +164,7 @@ describe("Clusterx monitor dashboard", () => {
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "2.1.2", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "2.1.3", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       if (path.includes("/history?")) return { ok: true, status: 200, json: async () => ({ retained_snapshots: 2, history_capacity: 2880, window_started_at: "2026-08-14T00:59:30Z", newest_at: "2026-08-14T01:00:00Z", points: [
         { snapshot_id: "snapshot-0", generated_at: "2026-08-14T00:59:30Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: { fragmented: 1, "gpu-full": 1 } },
         { snapshot_id: "snapshot-1", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 12, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: { fragmented: 1, "gpu-full": 1 } },
@@ -233,12 +233,12 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
 
-    fireEvent.click(screen.getByLabelText("查看 v2.1.2 更新内容"));
+    fireEvent.click(screen.getByLabelText("查看 v2.1.3 更新内容"));
 
     expect(screen.getByText("本版更新")).toBeInTheDocument();
-    expect(screen.getByText(/所有运行中的跨组节点使用/)).toBeInTheDocument();
-    expect(screen.getByText(/quota 足够归为 outside_owned_pool/)).toBeInTheDocument();
-    expect(screen.getByText(/新增 quota 剩余、外组 GPU/)).toBeInTheDocument();
+    expect(screen.getByText(/Pending workload 覆盖 training job、开发机和部署任务/)).toBeInTheDocument();
+    expect(screen.getByText(/冷启动节点分配建议考虑已知 pending GPU、CPU 和内存总需求/)).toBeInTheDocument();
+    expect(screen.getByText(/CPU-only 与 memory-only 运行任务/)).toBeInTheDocument();
   });
 
   it("provides an operational overview and global entity search", async () => {
@@ -346,7 +346,7 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.click(document.body);
     expect(menu).toHaveProperty("open", false);
 
-    const versionSummary = screen.getByLabelText("查看 v2.1.2 更新内容");
+    const versionSummary = screen.getByLabelText("查看 v2.1.3 更新内容");
     const versionMenu = versionSummary.closest("details")!;
     fireEvent.click(versionSummary);
     expect(versionMenu).toHaveProperty("open", true);
@@ -432,7 +432,7 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     await screen.findByText("Queue Observatory");
     fireEvent.click(screen.getByRole("button", { name: "groups" }));
-    expect(screen.getByText("v2.1.2")).toBeInTheDocument();
+    expect(screen.getByText("v2.1.3")).toBeInTheDocument();
     const table = screen.getByRole("table");
     const gpuSort = within(table).getByRole("button", { name: "排序 GPU" });
     fireEvent.click(gpuSort);

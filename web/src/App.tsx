@@ -23,6 +23,11 @@ const dateTime = (value: string | null | undefined) => {
   return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
 };
 const releaseNotes: Record<string, string[]> = {
+  "2.1.3": [
+    "Pending workload 覆盖 training job、开发机和部署任务；来源或队列归属不完整时，排队压力明确显示为 unknown。",
+    "冷启动节点分配建议考虑已知 pending GPU、CPU 和内存总需求，并报告资源规格或容量缺失。",
+    "组节点分配建议将 CPU-only 与 memory-only 运行任务纳入受影响任务统计。",
+  ],
   "2.1.2": [
     "所有运行中的跨组节点使用都会产生 placement finding，并按剩余 GPU quota 能否覆盖外组 GPU 统一分类。",
     "quota 足够归为 outside_owned_pool，quota 余量不足归为 quota_borrowed；两类在 owner 组有排队压力时升级为 violation。",

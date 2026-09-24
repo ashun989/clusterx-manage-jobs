@@ -56,7 +56,7 @@ RULE_CATALOG = [
     {"code": "node.fragmented", "category": "node-classification", "applies_to": "node", "title": "Fragmented node", "description": "The node is partially allocated and its free GPU capacity remains usable for the configured standard planning profile."},
     {"code": "node.cpu_memory_blocked", "category": "node-classification", "applies_to": "node", "title": "CPU/memory-blocked node", "description": "Raw free GPUs exceed the number usable for the configured standard planning profile; smaller explicit requests may still fit."},
     {"code": "attribution.resource_excess", "category": "attribution", "applies_to": "node", "title": "Inconsistent resource attribution", "description": "Pod-attributed resources exceed node allocated resources; the node and touching workloads are excluded from planning."},
-    {"code": "quota.pending_pressure", "category": "quota", "applies_to": "queue", "title": "Pending pressure", "description": "Pressure becomes active when the configured number of pending training jobs individually reach the wait threshold; 0-GPU jobs count. Missing queue timestamps make pressure unknown."},
+    {"code": "quota.pending_pressure", "category": "quota", "applies_to": "queue", "title": "Pending pressure", "description": "Pressure becomes active when the configured number of queue-scoped pending workloads individually reach the wait threshold; 0-GPU jobs count. Missing source coverage or queue timestamps make pressure unknown."},
     {"code": "placement.outside_owned_pool", "category": "placement", "applies_to": "running workload", "title": "Outside owned node pool", "description": "A running workload uses another group's node while its remaining GPU quota can cover all GPU placed on foreign nodes; the finding becomes a violation when the owner group has active pending pressure."},
     {"code": "placement.quota_borrowed", "category": "placement", "applies_to": "running workload", "title": "Insufficient-quota borrowed node", "description": "A running workload uses another group's node while its remaining GPU quota cannot cover all GPU placed on foreign nodes; the finding becomes a violation when the owner group has active pending pressure, and borrowing does not waive quota findings."},
     {"code": "placement.owner_unknown", "category": "placement", "applies_to": "running workload", "title": "Node owner unknown", "description": "At least one running placement references a node without an effective owner while node allocation is enabled."},
@@ -1035,7 +1035,7 @@ def apply_policy(raw_snapshot: dict[str, Any], policy: PolicyConfig) -> dict[str
         pending_user = str(pending_item.get("user") or "unknown").strip().lower()
         pending_item["user"] = pending_user
         pending_item["group"] = "unattributed" if pending_user == "unknown" else user_groups.get(pending_user, "default")
-        pending_item["type"] = "trainingJob"
+        pending_item.setdefault("type", "trainingJob")
         pending_item["policy_status"] = "pending"
         pending_item["policy_findings"] = []
         pending_item["placement_context"] = {

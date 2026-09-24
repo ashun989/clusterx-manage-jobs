@@ -692,7 +692,7 @@ def _running_training_lifecycle(
 
 
 def _workspace_resource_lifecycle(
-    cluster: Any, *, api_prefix: str, resource_name: str,
+    cluster: Any, *, api_prefix: str, resource_name: str, state: str = "RUNNING",
 ) -> tuple[list[dict[str, Any]], bool]:
     client = cluster.client
     base_path = client._get_base_path().rstrip("/")
@@ -709,7 +709,7 @@ def _workspace_resource_lifecycle(
             params={
                 "page_size": 1000,
                 **({"page_token": page_token} if page_token is not None else {}),
-                "filter": 'state="RUNNING"',
+                "filter": f'state="{state}"',
             },
         )
         if not isinstance(response, dict):
@@ -767,6 +767,201 @@ def _running_aid_lifecycle(cluster: Any) -> tuple[dict[str, dict[str, Any]], boo
                 "resource_create_time": _iso_time(row.get("create_time")),
                 "priority": _resource_priority(row),
             }
+    return result, complete
+
+
+def _pending_workspace_resources(
+    cluster: Any, queue: str, *, api_prefix: str, resource_name: str,
+    workload_type: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read queue-scoped pending AID/AIR resources from their resource APIs.
+
+    These APIs are workspace scoped. Filter by the documented lifecycle state,
+    then require queue identity on each row before attributing it to this
+    queue. Missing queue identity leaves the source incomplete.
+    """
+    queue_id = cluster._get_queue_id(queue)
+    try:
+        rows, complete = _workspace_resource_lifecycle(
+            cluster, api_prefix=api_prefix, resource_name=resource_name,
+            state="PENDING",
+        )
+    except Exception:
+        return [], False
+
+    # Do not count workspace-level rows whose queue cannot be established.
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        spec = row.get("spec") or {}
+        if not isinstance(spec, dict):
+            spec = {}
+        vc_job = spec.get("vc_job") or {}
+        if not isinstance(vc_job, dict):
+            vc_job = {}
+        queue_values = [
+            row.get("queue_id"), row.get("queue"), spec.get("queue_id"),
+            spec.get("queue"), vc_job.get("queue_id"), vc_job.get("queue"),
+        ]
+        cluster_scope = spec.get("cluster") or {}
+        if isinstance(cluster_scope, dict):
+            queue_values.extend((cluster_scope.get("queue_id"), cluster_scope.get("queue")))
+        normalized_queues = set()
+        for value in queue_values:
+            if isinstance(value, dict):
+                value = value.get("id") or value.get("name")
+            if value not in (None, ""):
+                normalized_queues.add(str(value))
+        if not normalized_queues:
+            complete = False
+            continue
+        expected_queues = {str(queue_id), str(queue)}
+        if not normalized_queues.intersection(expected_queues):
+            continue
+        if not normalized_queues.issubset(expected_queues):
+            complete = False
+            continue
+        ownership = row.get("ownership") or {}
+        if not isinstance(ownership, dict):
+            ownership = {}
+        status = row.get("status") or {}
+        if not isinstance(status, dict):
+            status = {}
+        tasks = (vc_job.get("tasks") or spec.get("tasks") or [])
+        task_resources = []
+        for index, task in enumerate(tasks if isinstance(tasks, list) else []):
+            if not isinstance(task, dict):
+                continue
+            resource = task.get("resource_spec") or task.get("resources") or {}
+            if not isinstance(resource, dict):
+                resource = {}
+            replicas = max(0, int(task.get("replicas") or 0))
+            gpu = resource.get("accelerate_device_count", resource.get("gpu_count"))
+            task_resources.append({
+                "name": str(task.get("name") or f"task-{index + 1}"),
+                "role": str(task.get("role") or ""),
+                "replicas": replicas,
+                "gpu_per_replica": _optional_number(gpu),
+                "cpu_per_replica": _optional_resource_number(
+                    resource.get("cpu_count", resource.get("cpu")),
+                ),
+                "memory_gib_per_replica": _optional_resource_number(
+                    resource.get("memory_gib", resource.get("memory")), memory=True,
+                ),
+            })
+        if not task_resources:
+            resource = spec.get("resource_spec") or spec.get("resources") or {}
+            if isinstance(resource, dict) and any(
+                key in resource for key in (
+                    "accelerate_device_count", "gpu_count", "cpu_count", "cpu",
+                    "memory_gib", "memory",
+                )
+            ):
+                replicas = max(0, int(spec.get("replicas") or spec.get("num_nodes") or 1))
+                task_resources.append({
+                    "name": "replica",
+                    "role": "",
+                    "replicas": replicas,
+                    "gpu_per_replica": _optional_number(
+                        resource.get("accelerate_device_count", resource.get("gpu_count")),
+                    ),
+                    "cpu_per_replica": _optional_resource_number(
+                        resource.get("cpu_count", resource.get("cpu")),
+                    ),
+                    "memory_gib_per_replica": _optional_resource_number(
+                        resource.get("memory_gib", resource.get("memory")), memory=True,
+                    ),
+                })
+        if not task_resources:
+            template = spec.get("template") or {}
+            if not isinstance(template, dict):
+                template = {}
+            template_spec = template.get("spec") or {}
+            if not isinstance(template_spec, dict):
+                template_spec = {}
+            containers = template_spec.get("containers") or []
+            if isinstance(containers, list) and containers:
+                gpu_values: list[float] = []
+                cpu_values: list[float] = []
+                memory_values: list[float] = []
+                for container in containers:
+                    if not isinstance(container, dict):
+                        continue
+                    resources = container.get("resources") or {}
+                    if not isinstance(resources, dict):
+                        resources = {}
+                    limits = resources.get("limits") or {}
+                    requested = resources.get("requests") or {}
+                    if not isinstance(limits, dict):
+                        limits = {}
+                    if not isinstance(requested, dict):
+                        requested = {}
+                    gpu_value = requested.get(
+                        "nvidia.com/gpu",
+                        requested.get("accelerate_device_count", limits.get(
+                            "nvidia.com/gpu", limits.get("accelerate_device_count"),
+                        )),
+                    )
+                    cpu_value = requested.get("cpu", limits.get("cpu"))
+                    memory_value = requested.get("memory", limits.get("memory"))
+                    if gpu_value is not None:
+                        parsed = _optional_number(gpu_value)
+                        if parsed is not None:
+                            gpu_values.append(float(parsed))
+                    if cpu_value is not None:
+                        parsed = _optional_resource_number(cpu_value)
+                        if parsed is not None:
+                            cpu_values.append(float(parsed))
+                    if memory_value is not None:
+                        parsed = _optional_resource_number(memory_value, memory=True)
+                        if parsed is not None:
+                            memory_values.append(float(parsed))
+                replicas = max(0, int(spec.get("replicas") or 1))
+                task_resources.append({
+                    "name": "replica",
+                    "role": "",
+                    "replicas": replicas,
+                    "gpu_per_replica": _clean(sum(gpu_values)),
+                    "cpu_per_replica": _clean(sum(cpu_values)) if cpu_values else None,
+                    "memory_gib_per_replica": _clean(sum(memory_values)) if memory_values else None,
+                })
+        active_tasks = [item for item in task_resources if item["replicas"] > 0]
+
+        def requested_total(key: str) -> int | float | None:
+            if not active_tasks or any(item[key] is None for item in active_tasks):
+                return None
+            return _clean(sum(float(item[key]) * item["replicas"] for item in active_tasks))
+
+        created = _parse_time(status.get("create_time") or row.get("create_time"))
+        resource_id = str(row.get("id") or "")
+        resource_name_value = str(row.get("name") or "")
+        user = str(ownership.get("creator_name") or "unknown").lower()
+        if user == "unknown" or not (row.get("uid") or resource_name_value or resource_id):
+            complete = False
+        item = {
+            "workload_id": f"{workload_type}:{row.get('uid') or row.get('name') or resource_id}",
+            "workload_name": str(row.get("display_name") or row.get("name") or resource_id),
+            "resource_name": resource_name_value,
+            "user": user,
+            "type": workload_type,
+            "status": "PENDING",
+            "create_time": created.isoformat() if created else None,
+            "resource_create_time": created.isoformat() if created else None,
+            "queue_age_seconds": max(0, (datetime.now(timezone.utc) - created).total_seconds()) if created else None,
+            "priority": _resource_priority(row),
+            "num_nodes": sum(item["replicas"] for item in task_resources),
+            "total_gpu": requested_total("gpu_per_replica"),
+            "total_cpu": requested_total("cpu_per_replica"),
+            "total_memory_gib": requested_total("memory_gib_per_replica"),
+            "resource_basis": "requested",
+            "task_resources": task_resources,
+        }
+        console_url = _workload_console_url(
+            cluster, workload_type, resource_id=resource_id or None,
+            resource_name=resource_name_value,
+        )
+        if console_url:
+            item["console_url"] = console_url
+        result.append(item)
     return result, complete
 
 
@@ -970,11 +1165,15 @@ def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], 
 
         status = job.get("status") or {}
         created = _parse_time(status.get("create_time"))
+        pending_user = str((job.get("ownership") or {}).get("creator_name") or "unknown").lower()
+        if pending_user == "unknown" or not job.get("name"):
+            complete = False
         item = {
             "workload_id": str(job.get("name") or ""),
             "workload_name": str(job.get("display_name") or job.get("name") or ""),
             "resource_name": str(job.get("name") or ""),
-            "user": str((job.get("ownership") or {}).get("creator_name") or "unknown").lower(),
+            "user": pending_user,
+            "type": "trainingJob",
             "status": "PENDING",
             "create_time": created.isoformat() if created else None,
             "resource_create_time": created.isoformat() if created else None,
@@ -999,6 +1198,21 @@ def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], 
         if console_url:
             item["console_url"] = console_url
         result.append(item)
+
+    # AID and AIR resources are listed through their workspace resource APIs.
+    # Include them in pressure accounting even when their request shape is not
+    # exposed; the node allocation planner separately treats unknown shapes as
+    # incomplete demand evidence.
+    for api_prefix, resource_name, workload_type in (
+        ("/aid/v1", "aids", "aid"),
+        ("/air/data/v1", "airs", "air"),
+    ):
+        rows, source_complete = _pending_workspace_resources(
+            cluster, queue, api_prefix=api_prefix,
+            resource_name=resource_name, workload_type=workload_type,
+        )
+        result.extend(rows)
+        complete = complete and source_complete
     return result, complete
 
 

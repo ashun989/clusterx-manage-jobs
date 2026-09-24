@@ -149,8 +149,11 @@ a hostname when the IP is missing or invalid.
   that the access scope is `all`; no user name is required in that mode.
 - Workload views expose resource creation time and normalized priority when the
   Clusterx resource API provides them. Pending TrainingJob creation time is the
-  initial queue-age anchor; it is not a later retry/requeue transition. Missing
-  priorities remain unknown and must not be inferred from submission defaults.
+  initial queue-age anchor; it is not a later retry/requeue transition. Pending
+  AID and AIR resources are included when their queue-scoped resource APIs
+  return them. Pressure is unknown if any pending source is incomplete or a
+  pending queue-age timestamp is unavailable. Missing priorities remain unknown
+  and must not be inferred from submission defaults.
 - With Clusterx 2026.8.19, monitor collection follows `next_page_token` to read
   the complete bound-node inventory. Repeated cursors, duplicate node identity,
   changing totals, truncated pages, or a changed before/after node signature
@@ -194,7 +197,13 @@ a hostname when the IP is missing or invalid.
   workload-first, GPU-first, or user-first alternatives pinned to a snapshot
   and group revision. Each feasible proposal assigns every current queue node
   to exactly one group and matches every finite numeric GPU quota exactly with
-  aggregate node capacity; heterogeneous node sizes may be combined. A
+  aggregate node capacity; heterogeneous node sizes may be combined. The
+  proposal minimizes impact to running workloads and compares known aggregate
+  pending GPU, CPU, and memory demand with each group's assigned node capacity.
+  Pending demand gaps are aggregate indicators, not proof that each per-node
+  task shape will fit. Incomplete pending sources or unknown request shapes
+  must be surfaced with the proposal. CPU-only and memory-only running
+  workloads also count toward workload impact. A
   remainder quota is resolved against the current queue snapshot; if its
   resolved value is not a multiple of 8, all proposals are infeasible with a
   diagnostic;

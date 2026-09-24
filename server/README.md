@@ -44,13 +44,26 @@ group. No invalid request is silently broadened to all nodes or all Workloads.
 The evaluated snapshot/API schema is version `2`; Server, Web, CLI and Skill
 version `3.x` must be deployed together and are not compatible with 2.x clients.
 
+Pending pressure includes queue-scoped pending TrainingJobs, development AIDs,
+and deployment AIRs. AID/AIR rows must expose queue identity so workspace-level
+resources from another queue are not counted. The pending inventory is marked
+incomplete if a source cannot be read completely or a pending row cannot be
+scoped to the queue; queue and group pressure then remains unknown rather than
+being inferred from the sources that happened to respond. Pending resources are
+not assigned node placements.
+
 The administrator endpoint `POST /api/v1/admin/node-allocation/plans` accepts a
 retained `snapshot_id` and the current group-file revision, then returns three
 preview alternatives. Each alternative assigns every current queue node to
 exactly one group, requires every finite numeric GPU quota to match assigned
 node capacity exactly, and reports the running workloads, GPUs, and users affected by
-changing ownership. Unknown or unattributed workloads are reported as context
-but do not influence the objective. The result is never written automatically;
+changing ownership. It also weighs known aggregate pending GPU, CPU, and memory
+demand for each group against the capacity assigned to that group. Pending
+resource gaps are aggregate indicators and do not prove per-replica placement
+feasibility. Missing pending sources or resource shapes are reported, and only
+known demand influences the objective. Unknown or unattributed running workloads
+are reported as context but do not influence the objective. CPU-only and
+memory-only running workloads contribute to workload impact. The result is never written automatically;
 the Web administrator must select a feasible proposal, review the draft, and
 save it through the normal revision-checked endpoint. A changed snapshot or
 group revision invalidates application of the preview.
