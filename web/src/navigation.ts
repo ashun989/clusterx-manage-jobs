@@ -6,7 +6,7 @@ export type MonitorTab = TableTab | "overview" | "nodes" | "planner" | "rules";
 /** Trend range is stored as an integer number of seconds. */
 export type TrendRange = number;
 export type NodeSortKey = "allocated_gpu" | "effective_free_gpu" | "stranded_gpu" | "gpu_util" | "gpu_mem" | "power";
-export type NodeViewState = { classifications: string[]; states: string[]; sort: NodeSortKey | null; direction: "asc" | "desc" };
+export type NodeViewState = { groups: string[]; classifications: string[]; states: string[]; sort: NodeSortKey | null; direction: "asc" | "desc" };
 export type PlannerIntent = {
   sourceKind: DetailKind;
   sourceId: string;
@@ -138,7 +138,7 @@ export const emptyNavigationState = (tab: MonitorTab = "overview"): NavigationSt
     workloads: emptyTableState(),
     alerts: emptyTableState(),
   },
-  nodeState: { classifications: [], states: [], sort: null, direction: "desc" },
+  nodeState: { groups: [], classifications: [], states: [], sort: null, direction: "desc" },
   plannerIntent: null,
   trendRange: DEFAULT_TREND_RANGE_SECONDS,
 });
@@ -220,6 +220,7 @@ export function readNavigationState(fallbackTab: MonitorTab = "overview", previo
     details: readDetails(params),
     tableStates: Object.fromEntries(tableTabs.map((name) => [name, readTableState(params, name, previous?.tableStates[name])])) as Record<TableTab, TableState>,
     nodeState: {
+      groups: params.getAll("node.group"),
       classifications: params.getAll("node.class"),
       states: params.getAll("node.state"),
       sort: sort && nodeSortKeys.includes(sort) ? sort : null,
@@ -243,6 +244,7 @@ export function navigationUrl(state: NavigationState): string {
       [...values].sort().forEach((value) => params.append(`f.${tab}.${key}`, value));
     }
   }
+  state.nodeState.groups.slice().sort().forEach((value) => params.append("node.group", value));
   state.nodeState.classifications.slice().sort().forEach((value) => params.append("node.class", value));
   state.nodeState.states.slice().sort().forEach((value) => params.append("node.state", value));
   if (state.nodeState.sort) params.set("node.sort", `${state.nodeState.sort}:${state.nodeState.direction}`);

@@ -190,8 +190,8 @@ const alertColumns = (nodes: NodeSummary[]): ColumnDef<Alert>[] => [
   { key: "message", label: "说明", kind: "text", value: (row) => row.message },
 ];
 
-function MultiFilter({ label, options, selected, onChange }: { label: string; options: string[]; selected: string[]; onChange: (values: string[]) => void }) {
-  return <DismissibleDetails className="filter-menu" summary={<>{label}{selected.length > 0 && <span>{selected.length}</span>}</>}><div className="filter-popover">{options.map((option) => <label key={`${label}:${option}`}><input type="checkbox" checked={selected.includes(option)} onChange={(event) => onChange(event.target.checked ? [...selected, option] : selected.filter((item) => item !== option))} /><span>{option}</span></label>)}</div></DismissibleDetails>;
+function MultiFilter({ label, options, selected, onChange, disabledHint }: { label: string; options: string[]; selected: string[]; onChange: (values: string[]) => void; disabledHint?: string }) {
+  return <DismissibleDetails className={`filter-menu${disabledHint ? " filter-menu-disabled" : ""}`} summaryProps={disabledHint ? { title: disabledHint, "aria-disabled": true, onClick: (event) => event.preventDefault() } : undefined} summary={<>{label}{selected.length > 0 && <span>{selected.length}</span>}</>}><div className="filter-popover">{options.map((option) => <label key={`${label}:${option}`}><input type="checkbox" checked={selected.includes(option)} onChange={(event) => onChange(event.target.checked ? [...selected, option] : selected.filter((item) => item !== option))} /><span>{option}</span></label>)}</div></DismissibleDetails>;
 }
 
 function nodeSortValue(node: NodeSummary, key: NodeSortKey) {
@@ -201,18 +201,20 @@ function nodeSortValue(node: NodeSummary, key: NodeSortKey) {
   return node[key];
 }
 
-function NodeHeatmap({ nodes, state, onState, onNode }: { nodes: NodeSummary[]; state: NodeViewState; onState: (value: NodeViewState) => void; onNode: (node: NodeSummary) => void }) {
+function NodeHeatmap({ nodes, allocationEnabled, state, onState, onNode }: { nodes: NodeSummary[]; allocationEnabled: boolean; state: NodeViewState; onState: (value: NodeViewState) => void; onNode: (node: NodeSummary) => void }) {
+  const groups = useMemo(() => [...new Set(nodes.map((node) => node.assigned_group).filter((group): group is string => Boolean(group)))].sort(), [nodes]);
   const classifications = useMemo(() => [...new Set(nodes.map((node) => node.classification).filter(Boolean))].sort(), [nodes]);
   const states = useMemo(() => [...new Set(nodes.map((node) => node.state).filter(Boolean))].sort(), [nodes]);
+  const validGroups = allocationEnabled ? state.groups.filter((item) => groups.includes(item)) : [];
   const validClassifications = state.classifications.filter((item) => classifications.includes(item));
   const validStates = state.states.filter((item) => states.includes(item));
-  const nodeOptionSignature = `${classifications.join("\u0000")}|${states.join("\u0000")}`;
-  const nodeFilterSignature = `${state.classifications.join("\u0000")}|${state.states.join("\u0000")}`;
+  const nodeOptionSignature = `${groups.join("\u0000")}|${classifications.join("\u0000")}|${states.join("\u0000")}|${allocationEnabled}`;
+  const nodeFilterSignature = `${state.groups.join("\u0000")}|${state.classifications.join("\u0000")}|${state.states.join("\u0000")}`;
   useEffect(() => {
-    if (validClassifications.length !== state.classifications.length || validStates.length !== state.states.length) onState({ ...state, classifications: validClassifications, states: validStates });
+    if (validGroups.length !== state.groups.length || validClassifications.length !== state.classifications.length || validStates.length !== state.states.length) onState({ ...state, groups: validGroups, classifications: validClassifications, states: validStates });
   }, [nodeOptionSignature, nodeFilterSignature]);
   const visibleNodes = useMemo(() => {
-    const filtered = nodes.filter((node) => (!validClassifications.length || validClassifications.includes(node.classification)) && (!validStates.length || validStates.includes(node.state)));
+    const filtered = nodes.filter((node) => (!validGroups.length || validGroups.includes(node.assigned_group ?? "")) && (!validClassifications.length || validClassifications.includes(node.classification)) && (!validStates.length || validStates.includes(node.state)));
     if (!state.sort) return filtered;
     return filtered.map((node, index) => ({ node, index })).sort((left, right) => {
       const a = nodeSortValue(left.node, state.sort!);
@@ -222,11 +224,11 @@ function NodeHeatmap({ nodes, state, onState, onNode }: { nodes: NodeSummary[]; 
       if (aMissing || bMissing) return aMissing === bMissing ? left.index - right.index : aMissing ? 1 : -1;
       return (Number(a) - Number(b)) * (state.direction === "asc" ? 1 : -1) || left.index - right.index;
     }).map(({ node }) => node);
-  }, [nodes, state, validClassifications.join("\u0000"), validStates.join("\u0000")]);
-  const reset = () => onState({ classifications: [], states: [], sort: null, direction: "desc" });
-  const hasControls = state.classifications.length > 0 || state.states.length > 0 || state.sort;
+  }, [nodes, state, validGroups.join("\u0000"), validClassifications.join("\u0000"), validStates.join("\u0000")]);
+  const reset = () => onState({ groups: [], classifications: [], states: [], sort: null, direction: "desc" });
+  const hasControls = state.groups.length > 0 || state.classifications.length > 0 || state.states.length > 0 || state.sort;
   return <>
-    <div className="table-tools node-tools"><div className="filter-list"><MultiFilter label="负载状态" options={classifications} selected={validClassifications} onChange={(values) => onState({ ...state, classifications: values })} /><MultiFilter label="节点状态" options={states} selected={validStates} onChange={(values) => onState({ ...state, states: values })} /><label className="sort-select"><span>排序</span><select aria-label="节点排序字段" value={state.sort ?? ""} onChange={(event) => onState({ ...state, sort: event.target.value ? event.target.value as NodeSortKey : null })}><option value="">默认顺序</option><option value="allocated_gpu">GPU 已用</option><option value="effective_free_gpu">有效空闲 GPU</option><option value="stranded_gpu">受阻 GPU</option><option value="gpu_util">GPU Util</option><option value="gpu_mem">GPU Mem</option><option value="power">功率占比</option></select></label>{state.sort && <button type="button" className="direction-button" onClick={() => onState({ ...state, direction: state.direction === "asc" ? "desc" : "asc" })}>{state.direction === "asc" ? "升序 ↑" : "降序 ↓"}</button>}</div><div className="result-count"><span>{visibleNodes.length}/{nodes.length}</span>{hasControls && <button type="button" onClick={reset}>重置</button>}</div></div>
+    <div className="table-tools node-tools"><div className="filter-list"><MultiFilter label="分组" options={groups} selected={validGroups} onChange={(values) => onState({ ...state, groups: values })} disabledHint={!allocationEnabled ? "节点归属约束未启用" : undefined} /><MultiFilter label="负载状态" options={classifications} selected={validClassifications} onChange={(values) => onState({ ...state, classifications: values })} /><MultiFilter label="节点状态" options={states} selected={validStates} onChange={(values) => onState({ ...state, states: values })} /><label className="sort-select"><span>排序</span><select aria-label="节点排序字段" value={state.sort ?? ""} onChange={(event) => onState({ ...state, sort: event.target.value ? event.target.value as NodeSortKey : null })}><option value="">默认顺序</option><option value="allocated_gpu">GPU 已用</option><option value="effective_free_gpu">有效空闲 GPU</option><option value="stranded_gpu">受阻 GPU</option><option value="gpu_util">GPU Util</option><option value="gpu_mem">GPU Mem</option><option value="power">功率占比</option></select></label>{state.sort && <button type="button" className="direction-button" onClick={() => onState({ ...state, direction: state.direction === "asc" ? "desc" : "asc" })}>{state.direction === "asc" ? "升序 ↑" : "降序 ↓"}</button>}{!allocationEnabled && <small className="node-filter-hint">分组筛选不可用：节点归属约束未启用</small>}</div><div className="result-count"><span>{visibleNodes.length}/{nodes.length}</span>{hasControls && <button type="button" onClick={reset}>重置</button>}</div></div>
     <div className="node-grid">{visibleNodes.map((node) => {
       const ratio = node.total_gpu > 0 ? Math.min(100, node.allocated_gpu / node.total_gpu * 100) : 0;
       const open = () => onNode(node);
@@ -629,7 +631,7 @@ export default function App() {
       {tab === "overview" && <Overview snapshot={snapshot} history={history} historyRefreshing={historyRefreshing} range={trendRange} onRange={updateTrendRange} open={open} navigate={navigateTab} />}
       {tab === "groups" && <DataTable rows={snapshot.groups} columns={groupColumns} state={tableStates.groups} onState={(state) => updateTable("groups", state)} rowKey={(row) => row.group} rowLabel={(row) => row.group} onRow={(row) => open({ kind: "group", id: row.group, label: row.group })} />}
       {tab === "users" && <DataTable rows={snapshot.users} columns={userColumns} state={tableStates.users} onState={(state) => updateTable("users", state)} rowKey={(row) => row.user} rowLabel={(row) => row.user} onRow={(row) => open({ kind: "user", id: row.user, label: row.user })} />}
-      {tab === "nodes" && <NodeHeatmap nodes={snapshot.nodes} state={nodeState} onState={updateNodeState} onNode={(row) => open({ kind: "node", id: row.node, label: row.node })} />}
+      {tab === "nodes" && <NodeHeatmap nodes={snapshot.nodes} allocationEnabled={snapshot.node_allocation?.enabled === true} state={nodeState} onState={updateNodeState} onNode={(row) => open({ kind: "node", id: row.node, label: row.node })} />}
       {tab === "workloads" && <DataTable rows={workloads} columns={workloadColumns} state={tableStates.workloads} onState={(state) => updateTable("workloads", state)} rowKey={(row) => row.workload_id} rowLabel={(row) => row.workload_name} onRow={(row) => open(workloadRef(row))} />}
       {tab === "alerts" && <DataTable rows={snapshot.alerts} columns={alertColumns(snapshot.nodes)} state={tableStates.alerts} onState={(state) => updateTable("alerts", state)} rowKey={(row, index) => `${alertIdentity(row)}:${index}`} rowLabel={(row) => row.subject_type === "node" ? nodeNameWithInternal(snapshot.nodes, row.subject) : row.subject} onRow={(row) => open({ kind: "alert", id: alertIdentity(row), label: row.subject_type === "node" ? nodeNameWithInternal(snapshot.nodes, row.subject) : row.subject })} />}
       {tab === "planner" && <SchedulerPanel snapshot={snapshot} plan={plan} onResult={setPlan} onWorkload={(workload) => open(workloadRef(workload))} intent={plannerIntent} clearIntent={clearPlannerIntent} />}

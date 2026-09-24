@@ -159,6 +159,9 @@ nav button.active { color: var(--accent-strong); border-bottom: 2px solid var(--
 .filter-menu summary::-webkit-details-marker { display: none; }
 .filter-menu summary::after { content: "⌄"; color: var(--text-faint); }
 .filter-menu summary span { min-width: 17px; padding: 1px 5px; border-radius: 9px; color: var(--text-on-accent); background: var(--accent); text-align: center; font-weight: 800; }
+.filter-menu-disabled summary { color: var(--text-faint); cursor: not-allowed; opacity: .72; }
+.filter-menu-disabled summary::after { content: ""; }
+.node-filter-hint { align-self: center; color: var(--muted); font-size: 11px; }
 .filter-popover { position: absolute; top: calc(100% + 6px); left: 0; z-index: 10; min-width: 190px; max-width: min(320px, calc(100vw - 24px)); max-height: min(280px, calc(100vh - 32px)); padding: 7px; overflow: auto; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface-raised); box-shadow: var(--popover-shadow); }
 .filter-popover label { display: flex; gap: 8px; align-items: center; padding: 7px; border-radius: 5px; color: var(--text-soft); font-size: 12px; cursor: pointer; }
 .filter-popover label:hover { background: var(--surface-hover); }

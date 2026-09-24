@@ -329,6 +329,11 @@ describe("Clusterx monitor dashboard", () => {
     const state = emptyNavigationState("overview");
     state.trendRange = 123_456;
     expect(new URL(navigationUrl(state), window.location.origin).searchParams.get("range")).toBe("123456");
+    state.nodeState.groups = ["group-b", "group-a"];
+    const nodeUrl = new URL(navigationUrl(state), window.location.origin);
+    expect(nodeUrl.searchParams.getAll("node.group")).toEqual(["group-a", "group-b"]);
+    window.history.replaceState({}, "", nodeUrl);
+    expect(readNavigationState().nodeState.groups).toEqual(["group-a", "group-b"]);
     expect(sliderPositionFromTrendRange(604_800)).toBeGreaterThan(sliderPositionFromTrendRange(86_400));
   });
 
@@ -725,6 +730,44 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByRole("dialog", { name: "node-a 详情" })).toHaveTextContent("不参与调度模拟");
     expect(screen.getByRole("dialog", { name: "node-a 详情" })).toHaveTextContent("Clusterx hostnamehost-10-0-0-1");
     expect(screen.getByRole("dialog", { name: "node-a 详情" })).toHaveTextContent("ECP 节点名node-a");
+  });
+
+  it("filters nodes by multiple assigned groups and disables the group filter when allocation is off", async () => {
+    latestSnapshot.node_allocation = { enabled: true, access_scope: "group-owned" };
+    latestSnapshot.nodes[0].assigned_group = "group-a";
+    latestSnapshot.nodes[1].assigned_group = "group-b";
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "nodes" }));
+
+    fireEvent.click(screen.getByText("分组", { selector: "summary" }));
+    const groupMenu = screen.getByText("分组", { selector: "summary" }).closest("details")!;
+    fireEvent.click(within(groupMenu).getByRole("checkbox", { name: "group-a" }));
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看 node-a 详情" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "查看 node-b 详情" })).not.toBeInTheDocument();
+    expect(new URL(window.location.href).searchParams.getAll("node.group")).toEqual(["group-a"]);
+
+    fireEvent.click(screen.getByText("负载状态", { selector: "summary" }));
+    const classificationMenu = screen.getByText("负载状态", { selector: "summary" }).closest("details")!;
+    fireEvent.click(within(classificationMenu).getByRole("checkbox", { name: "fragmented" }));
+    fireEvent.click(within(groupMenu).getByRole("checkbox", { name: "group-b" }));
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    fireEvent.click(within(classificationMenu).getByRole("checkbox", { name: "fragmented" }));
+    expect(screen.getByText("2/2")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重置" }));
+    expect(screen.getByText("2/2")).toBeInTheDocument();
+
+    latestSnapshot.node_allocation = { enabled: false, access_scope: "all" };
+    cleanup();
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+    fireEvent.click(screen.getByRole("button", { name: "nodes" }));
+    expect(screen.getByText("分组筛选不可用：节点归属约束未启用")).toBeInTheDocument();
+    const disabledGroupMenu = screen.getByText("分组", { selector: "summary" }).closest("details")!;
+    fireEvent.click(screen.getByText("分组", { selector: "summary" }));
+    expect(disabledGroupMenu).toHaveProperty("open", false);
+    expect(screen.getByText("2/2")).toBeInTheDocument();
   });
 
   it("falls back to the ECP node name when hostname is unavailable", async () => {
