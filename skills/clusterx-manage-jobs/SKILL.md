@@ -90,18 +90,20 @@ warnings.
 2. For SSP, require a non-empty job name of at most 32 Unicode characters.
    Shorten it before previewing; the service rejects longer names before job
    creation.
-3. Enforce the training CPU policy from `assets/resource-policy.json` before
-   preview and submission. `cpu_per_gpu` is the inclusive per-task/per-node
-   CPU limit for GPU jobs: CPUs must be no greater than GPUs multiplied by
-   `cpu_per_gpu`. A 0-GPU task instead uses the inclusive
-   `zero_gpu_max_cpu_per_node` limit. With the shipped policy this permits
-   0 GPU / 14 CPU, 1 GPU / 14 CPU, and 8 GPU / 112 CPU. Never multiply the
-   per-node limit by `--num-nodes`. The wrapper hard-blocks violations before
-   invoking Clusterx.
-   When `--resource-policy` or `CLUSTERX_RESOURCE_POLICY` points to the
-   monitor-managed local resource policy, use that file instead of the built-in
-   template. This keeps Web policy edits and submission validation aligned
-   without making submission depend on the monitor HTTP service.
+3. Resolve the public resource policy before previewing a training submission.
+   If `CLUSTERX_MONITOR_URL` is set, run `clusterx-monitor-cli policy --format
+   json` and use its `policy` object when `valid` or `using_last_known_good` is
+   true. The Monitor's effective training CPU and memory limits are then the
+   Skill's current source of truth. If the endpoint is unset, unavailable, or
+   has no effective policy, use a per-command `--resource-policy` file first,
+   then `CLUSTERX_RESOURCE_POLICY`, then the bundled `assets/resource-policy.json`.
+   An explicit `--resource-policy` always wins over Monitor policy.
+   `clusterx-exec` applies the same precedence and hard-blocks training CPU or
+   memory violations before invoking Clusterx. GPU tasks use inclusive
+   `cpu_per_gpu` and `memory_gib_per_gpu` per-task limits; 0-GPU tasks use
+   `zero_gpu_max_cpu_per_node` and `zero_gpu_max_memory_gib_per_node`. Never
+   multiply per-node limits by `--num-nodes`. If local fallback is used because
+   Monitor policy could not be read, report that source to the user.
 4. Validate mounts. Accept the simple `TYPE:ID:PATH[:SUBDIR]` form or a JSON
    object. Keep JSON quoted as one shell argument.
    When a smoke manifest declares `target_source: clusterx_config`, resolve

@@ -2379,10 +2379,13 @@ class SkillCliTests(unittest.TestCase):
         self.assertNotIn("SSPCluster", source)
         response = mock.Mock(status_code=200)
         response.json.return_value = {"service": "clusterx-monitor", "snapshot": {"stale": False}}
-        with mock.patch.object(self.module.requests, "request", return_value=response), mock.patch.object(
+        with mock.patch.object(self.module.requests, "request", return_value=response) as request, mock.patch.object(
             sys, "argv", ["monitor_cli.py", "status", "--format", "json"]
         ), mock.patch("sys.stdout"):
             self.assertEqual(self.module.main(), 0)
+        self.assertEqual(
+            request.call_args.kwargs["proxies"], {"http": "", "https": ""},
+        )
 
     def test_cli_endpoint_precedence_supports_shared_environment(self):
         with mock.patch.dict(

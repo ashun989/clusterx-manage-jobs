@@ -383,6 +383,11 @@ class ConfigResolverTests(unittest.TestCase):
             ["--gpus-per-task", "1", "--cpus-per-task", "14"],
             ["--gpus-per-task=8", "--cpus-per-task=112"],
             ["-N", "4", "--gpus-per-task", "8", "--cpus-per-task", "112"],
+            ["--gpus-per-task", "1", "--memory-per-task", "120"],
+            ["--gpus-per-task", "1", "--memory-per-task", "120GB"],
+            ["--gpus-per-task", "1", "--memory-per-task", "120GiB"],
+            ["--gpus-per-task", "1", "--memory-per-task", "128849018880B"],
+            ["--gpus-per-task", "2", "--memory-per-task", "240"],
         )
         rejected = (
             ["--gpus-per-task", "0", "--cpus-per-task", "15"],
@@ -390,6 +395,9 @@ class ConfigResolverTests(unittest.TestCase):
             ["--gpus-per-task=8", "--cpus-per-task=113"],
             ["--gpus-per-task", "1.5", "--cpus-per-task", "4"],
             ["--gpus-per-task", "1", "--cpus-per-task", "nan"],
+            ["--gpus-per-task", "1", "--memory-per-task", "120.1"],
+            ["--gpus-per-task", "0", "--memory-per-task", "240.1"],
+            ["--gpus-per-task", "1", "--memory-per-task", "not-a-size"],
         )
         cases = [(item, 0) for item in allowed] + [(item, 2) for item in rejected]
         for resource_args, expected in cases:
@@ -404,6 +412,8 @@ class ConfigResolverTests(unittest.TestCase):
                 env = os.environ.copy()
                 env["PATH"] = f"{temp}{os.pathsep}{env.get('PATH', '')}"
                 env["WRAPPER_INVOKED"] = str(invoked)
+                env.pop("CLUSTERX_MONITOR_URL", None)
+                env.pop("CLUSTERX_RESOURCE_POLICY", None)
                 run = subprocess.run(
                     [
                         sys.executable, str(MODULE_ROOT / "clusterx_exec.py"),
@@ -424,13 +434,19 @@ class ConfigResolverTests(unittest.TestCase):
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
             restrictive = temp / "restrictive.json"
             permissive = temp / "permissive.json"
-            base = {"training": {"cpu_per_gpu": 1, "zero_gpu_max_cpu_per_node": 1}}
+            base = {"training": {
+                "cpu_per_gpu": 1, "memory_gib_per_gpu": 120,
+                "zero_gpu_max_cpu_per_node": 1,
+                "zero_gpu_max_memory_gib_per_node": 240,
+            }}
             restrictive.write_text(json.dumps(base), encoding="utf-8")
-            base["training"] = {"cpu_per_gpu": 2, "zero_gpu_max_cpu_per_node": 2}
+            base["training"]["cpu_per_gpu"] = 2
+            base["training"]["zero_gpu_max_cpu_per_node"] = 2
             permissive.write_text(json.dumps(base), encoding="utf-8")
             env = os.environ.copy()
             env["PATH"] = f"{temp}{os.pathsep}{env.get('PATH', '')}"
             env["CLUSTERX_RESOURCE_POLICY"] = str(restrictive)
+            env.pop("CLUSTERX_MONITOR_URL", None)
             command = [
                 sys.executable, str(MODULE_ROOT / "clusterx_exec.py"),
                 "--cwd", str(project), "--resource-policy", str(permissive), "--",
@@ -443,6 +459,87 @@ class ConfigResolverTests(unittest.TestCase):
                 text=True, capture_output=True, env=env,
             )
             self.assertEqual(environment.returncode, 2)
+
+    def test_monitor_resource_policy_precedes_environment_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            local = Path(directory) / "local.json"
+            local.write_text(json.dumps({"training": {
+                "cpu_per_gpu": 1, "memory_gib_per_gpu": 1,
+                "zero_gpu_max_cpu_per_node": 1,
+                "zero_gpu_max_memory_gib_per_node": 1,
+            }}), encoding="utf-8")
+            response = mock.Mock()
+            response.raise_for_status.return_value = None
+            response.json.return_value = {"valid": True, "policy": {"training": {
+                "cpu_per_gpu": 12, "memory_gib_per_gpu": 120,
+                "zero_gpu_max_cpu_per_node": 8,
+                "zero_gpu_max_memory_gib_per_node": 240,
+            }}}
+            with mock.patch.object(clusterx_exec.requests, "get", return_value=response) as get:
+                limits, source = clusterx_exec._resolve_training_policy(
+                    None,
+                    environment={
+                        "CLUSTERX_MONITOR_URL": "https://monitor.test",
+                        "CLUSTERX_RESOURCE_POLICY": str(local),
+                    },
+                )
+            self.assertEqual(source, "Monitor")
+            self.assertEqual(limits, (12, 120, 8, 240))
+            get.assert_called_once_with(
+                "https://monitor.test/api/v1/policy", timeout=(3, 5),
+                proxies={"http": "", "https": ""},
+            )
+
+    def test_monitor_last_known_good_is_effective_and_explicit_policy_stays_first(self):
+        with tempfile.TemporaryDirectory() as directory:
+            explicit = Path(directory) / "explicit.json"
+            explicit.write_text(json.dumps({"training": {
+                "cpu_per_gpu": 5, "memory_gib_per_gpu": 50,
+                "zero_gpu_max_cpu_per_node": 6,
+                "zero_gpu_max_memory_gib_per_node": 60,
+            }}), encoding="utf-8")
+            response = mock.Mock()
+            response.raise_for_status.return_value = None
+            response.json.return_value = {"valid": False, "using_last_known_good": True, "policy": {"training": {
+                "cpu_per_gpu": 12, "memory_gib_per_gpu": 120,
+                "zero_gpu_max_cpu_per_node": 8,
+                "zero_gpu_max_memory_gib_per_node": 240,
+            }}}
+            with mock.patch.object(clusterx_exec.requests, "get", return_value=response):
+                remote, source = clusterx_exec._resolve_training_policy(
+                    None, environment={"CLUSTERX_MONITOR_URL": "https://monitor.test"},
+                )
+            self.assertEqual(source, "Monitor")
+            self.assertEqual(remote, (12, 120, 8, 240))
+
+            with mock.patch.object(clusterx_exec.requests, "get") as get:
+                local, source = clusterx_exec._resolve_training_policy(
+                    str(explicit),
+                    environment={"CLUSTERX_MONITOR_URL": "https://monitor.test"},
+                )
+            self.assertEqual(source, "explicit --resource-policy")
+            self.assertEqual(local, (5, 50, 6, 60))
+            get.assert_not_called()
+
+    def test_failed_monitor_policy_uses_environment_then_bundled_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            local = Path(directory) / "local.json"
+            local.write_text(json.dumps({"training": {
+                "cpu_per_gpu": 3, "memory_gib_per_gpu": 30,
+                "zero_gpu_max_cpu_per_node": 4,
+                "zero_gpu_max_memory_gib_per_node": 40,
+            }}), encoding="utf-8")
+            env = {"CLUSTERX_MONITOR_URL": "https://monitor.test", "CLUSTERX_RESOURCE_POLICY": str(local)}
+            with mock.patch.object(clusterx_exec.requests, "get", side_effect=clusterx_exec.requests.ConnectionError):
+                limits, source = clusterx_exec._resolve_training_policy(None, environment=env)
+            self.assertEqual(source, "CLUSTERX_RESOURCE_POLICY")
+            self.assertEqual(limits, (3, 30, 4, 40))
+            with mock.patch.object(clusterx_exec.requests, "get", side_effect=clusterx_exec.requests.ConnectionError):
+                limits, source = clusterx_exec._resolve_training_policy(
+                    None, environment={"CLUSTERX_MONITOR_URL": "https://monitor.test"},
+                )
+            self.assertEqual(source, "bundled default")
+            self.assertEqual(limits, (14, 120, 14, 240))
 
     def test_cluster_user_precedence_uses_environment_without_falling_back_to_user(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -70,12 +70,13 @@ clusterx-exec --cwd <project-dir> -- log <job-id> --hours 6
 
 包装器只报告配置来源和路径，不输出配置值。
 
-训练任务提交还读取不含用户或分组信息的
-`assets/resource-policy.json`。有 GPU 时 CPU 上限为
-`GPU × cpu_per_gpu`，0 GPU 时使用 `zero_gpu_max_cpu_per_node`。可在包装器的
-`--` 之前传 `--resource-policy <path>`，也可设置
-`CLUSTERX_RESOURCE_POLICY`；显式参数优先于环境变量，环境变量优先于 Skill
-内置策略。该校验不依赖 monitor 服务。
+训练任务提交使用不含用户或分组信息的公开资源策略。设置
+`CLUSTERX_MONITOR_URL` 后，Skill 与包装器优先读取 Monitor 当前有效策略；查询不可用或没有有效策略时，依次回退到包装器显式参数
+`--resource-policy <path>`、`CLUSTERX_RESOURCE_POLICY` 和随包策略
+`assets/resource-policy.json`。显式 `--resource-policy` 始终优先于 Monitor。
+有 GPU 时 CPU/内存上限分别为 `GPU × cpu_per_gpu` 和
+`GPU × memory_gib_per_gpu`；0 GPU 时使用对应的每节点上限。包装器在调用
+Clusterx 前硬阻断超限请求。
 
 队列监控和调度模拟只访问配置的 `clusterx-monitor` 服务缓存，不读取上述
 Clusterx 配置，也不会在服务不可用时回退到实时采集。Monitor 可以部署在一台
@@ -152,6 +153,6 @@ groups:
 转换为 `host-10-140-62-215`；分组文件中的 `nodes` 仍保持 ECP 节点名。
 
 公共策略中的 `planning.default_cpu_per_gpu` 与
-`planning.default_memory_gib_per_gpu` 是标准调度画像。方案未显式给出 CPU/内存
+`planning.default_memory_gib_per_gpu` 是标准调度画像（内置策略默认为 120 GiB/GPU）。方案未显式给出 CPU/内存
 时由快照内画像推导；节点的 `effective_free_gpu`、`stranded_gpu` 和
 `cpu-memory-blocked` 也相对于该画像，不表示更小的显式任务一定无法调度。

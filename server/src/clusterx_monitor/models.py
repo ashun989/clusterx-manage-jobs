@@ -30,14 +30,14 @@ class DevelopmentConfig(FrozenModel):
 
 class TrainingConfig(FrozenModel):
     cpu_per_gpu: float = Field(default=14, gt=0, le=1024)
-    memory_gib_per_gpu: float = Field(default=240, gt=0, le=16384)
+    memory_gib_per_gpu: float = Field(default=120, gt=0, le=16384)
     zero_gpu_max_cpu_per_node: float = Field(default=14, gt=0, le=4096)
     zero_gpu_max_memory_gib_per_node: float = Field(default=240, gt=0, le=65536)
 
 
 class PlanningConfig(FrozenModel):
     default_cpu_per_gpu: float = Field(default=14, gt=0, le=1024)
-    default_memory_gib_per_gpu: float = Field(default=240, gt=0, le=16384)
+    default_memory_gib_per_gpu: float = Field(default=120, gt=0, le=16384)
 
 
 class LowUtilizationConfig(FrozenModel):

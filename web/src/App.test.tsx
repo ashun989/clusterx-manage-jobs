@@ -1089,6 +1089,15 @@ describe("Clusterx monitor dashboard", () => {
     fireEvent.change(screen.getByLabelText("密码"), { target: { value: "a-strong-test-password" } });
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
     const editor = await screen.findByLabelText("资源策略 JSON") as HTMLTextAreaElement;
+    for (const label of [
+      "0 GPU 开发机 CPU 上限", "0 GPU 开发机内存上限", "1 GPU 开发机 CPU 上限",
+      "1 GPU 开发机内存上限", "开发机最大 GPU 数", "每用户开发机数量上限",
+      "1 GPU 开发机最长运行时间", "0 GPU 训练 CPU 上限", "0 GPU 训练内存上限",
+      "规则刷新间隔",
+    ]) expect(screen.getByLabelText(new RegExp(label))).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/0 GPU 开发机 CPU 上限/), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText(/0 GPU 训练内存上限/), { target: { value: "300" } });
+    fireEvent.change(screen.getByLabelText(/规则刷新间隔/), { target: { value: "10" } });
     expect(screen.getByLabelText("功率阈值换算")).toHaveTextContent("功率判定已关闭");
     fireEvent.change(screen.getByLabelText(/功率阈值（留空关闭）/), { target: { value: "25" } });
     expect(screen.getByLabelText("功率阈值换算")).toHaveTextContent("100 W/卡");
@@ -1105,7 +1114,10 @@ describe("Clusterx monitor dashboard", () => {
     const request = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).endsWith("/admin/config/resource") && init?.method === "PUT");
     expect(request?.[1]?.headers).toMatchObject({ "X-CSRF-Token": "csrf-token" });
     expect(JSON.parse(String(request?.[1]?.body)).revision).toBe("resource-r1");
-    expect(JSON.parse(JSON.parse(String(request?.[1]?.body)).text).low_utilization).toMatchObject({ gpu_power_threshold_pct: 25, gpu_power_limit_w: 300 });
+    const savedResource = JSON.parse(JSON.parse(String(request?.[1]?.body)).text);
+    expect(savedResource.development.zero_gpu_max_cpu_per_node).toBe(10);
+    expect(savedResource.training.zero_gpu_max_memory_gib_per_node).toBe(300);
+    expect(savedResource.low_utilization).toMatchObject({ gpu_power_threshold_pct: 25, gpu_power_limit_w: 300, refresh_minutes: 10 });
     expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
   });
 

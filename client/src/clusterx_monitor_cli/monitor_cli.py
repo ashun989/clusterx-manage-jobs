@@ -52,7 +52,10 @@ def _url(endpoint: str, path: str) -> str:
 
 def _request(endpoint: str, method: str, path: str, **kwargs: Any) -> Any:
     try:
-        response = requests.request(method, _url(endpoint, path), timeout=(5, 20), **kwargs)
+        response = requests.request(
+            method, _url(endpoint, path), timeout=(5, 20),
+            proxies={"http": "", "https": ""}, **kwargs,
+        )
     except requests.RequestException as error:
         raise ApiError(str(error)) from error
     if response.status_code >= 400:
@@ -344,7 +347,10 @@ def _run_watch(args: argparse.Namespace) -> int:
     backoff = 0.5
     while args.count is None or emitted < args.count:
         try:
-            with requests.get(_url(args.endpoint, "/api/v1/events"), stream=True, timeout=(5, 90)) as response:
+            with requests.get(
+                _url(args.endpoint, "/api/v1/events"), stream=True, timeout=(5, 90),
+                proxies={"http": "", "https": ""},
+            ) as response:
                 if response.status_code >= 400:
                     raise ApiError(f"HTTP {response.status_code}", status=response.status_code)
                 backoff = 0.5

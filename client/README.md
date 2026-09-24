@@ -89,6 +89,12 @@ the environment and mapping. The wrapper never rewrites explicit
 group-node pool suggests a different placement. When the allocation policy is
 disabled, it does not add node restrictions.
 
+Training resource checks use the effective Monitor policy when
+`CLUSTERX_MONITOR_URL` is configured and the public policy is available. An
+explicit `--resource-policy` always wins; otherwise the local environment
+policy and then the bundled policy are used when Monitor is unavailable. The
+wrapper hard-checks both CPU and memory per task before invoking Clusterx.
+
 Clusterx placement values are lowercase hostnames derived from node IPv4
 addresses, such as `host-10-140-62-215`; they are not ECP node names. The
 wrapper compares explicit placement values with the `hostname` returned by
