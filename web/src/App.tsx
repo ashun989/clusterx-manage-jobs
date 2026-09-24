@@ -23,6 +23,9 @@ const dateTime = (value: string | null | undefined) => {
   return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
 };
 const releaseNotes: Record<string, string[]> = {
+  "2.2.1": [
+    "从 Pending Workload 进入调度模拟时，资源候选默认覆盖满 GPU 节点；默认返回 3 个备选方案，便于比较跨组占用的协调方式。",
+  ],
   "2.2.0": [
     "调度模拟将节点归属分组与候选 Workload 分组分开筛选；模拟 Pending Workload 时默认考虑所选组节点上的跨组占用。",
     "API 和 CLI 新增独立节点归属分组条件；结果中分别展示节点归属组和 Workload 候选组。",
@@ -364,7 +367,9 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
     setMemory(intent.memoryTotalGib == null ? String(intent.nodes * intent.gpusPerNode * snapshot.planning_profile.default_memory_gib_per_gpu) : String(intent.memoryTotalGib));
     setCpusUseDefault(intent.cpusTotal == null);
     setMemoryUsesDefault(intent.memoryTotalGib == null);
-    setScope(intent.scope);
+    const pendingWorkloadIntent = intent.sourceKind === "workload"
+      && (snapshot.pending_workloads ?? []).some((workload) => workload.workload_id === intent.sourceId);
+    setScope(pendingWorkloadIntent && intent.scope === "fragmented" ? "all" : intent.scope);
     setFilters({ ...emptyPlannerFilters(), types: intent.workloadTypes, groups: intent.groups, users: intent.users, workloads: intent.workloads });
     setNodeGroups(intent.nodeGroups);
     setCandidateNodeScope(nodeAllocationEnabled && intent.sourceKind === "workload" && intent.nodeGroups.length > 0 ? "selected_group_nodes" : "all");
@@ -414,7 +419,7 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
       <label>资源候选范围<select name="scope" value={scope} onChange={(event) => setScope(event.target.value as typeof scope)}><option value="fragmented">碎片节点</option><option value="full">满 GPU 节点</option><option value="all">全部</option></select></label>
       <PlannerMultiSelect label="节点归属分组" options={filterOptions.groups} selected={nodeGroups} onChange={setNodeGroups} disabled={!nodeAllocationEnabled} />
       <label>候选节点范围<select aria-label="候选节点范围" name="candidateNodeScope" value={candidateNodeScope} disabled={!nodeAllocationEnabled} onChange={(event) => setCandidateNodeScope(event.target.value as CandidateNodeScope)}><option value="all">全部节点</option><option value="selected_group_nodes">所选分组节点</option><option value="other_group_nodes">其他分组节点</option></select><small>{!nodeAllocationEnabled ? "节点归属约束未启用，当前所有 queue 节点可用。" : ownershipError || "范围基于节点归属分组计算。"}</small></label>
-      <label>备选数<input name="alternatives" type="number" min="1" max="10" defaultValue="1" required /></label>
+      <label>备选数<input name="alternatives" type="number" min="1" max="10" defaultValue="3" required /></label>
       <label>总求解预算（秒）<input name="searchSeconds" type="number" min="1" max="30" defaultValue="10" required /></label>
       <fieldset><legend>策略</legend>{[["min-gpu", "最少 GPU"], ["min-workloads", "最少任务"], ["min-users", "最少用户"]].map(([value, label]) => <label className="check" key={value}><input name="strategy" value={value} type="checkbox" defaultChecked />{label}</label>)}</fieldset>
     </section>
@@ -606,6 +611,7 @@ export default function App() {
       return {
         ...defaults, sourceLabel: workload.workload_name, nodes, gpusPerNode,
         cpusTotal: workload.total_cpu ?? null, memoryTotalGib: workload.total_memory_gib ?? null,
+        scope: pending ? "all" : defaults.scope,
         note: pending ? `目标资源按该 Pending Workload 的请求画像预填；已预填节点归属分组 ${workload.group}，默认使用该组节点；模拟会寻找可释放的协调方案。` : `目标资源按该运行中 Workload 的画像预填；已预填节点归属分组 ${workload.group}，默认使用该组节点；候选限定为它，用于验证协调后的释放效果。`,
         groups: [], nodeGroups: group, workloads: pending ? [] : [workload.workload_id], workloadTypes: pending ? [] : [workload.type],
       };

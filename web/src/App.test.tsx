@@ -974,6 +974,29 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByRole("combobox", { name: "候选节点范围" })).toHaveValue("selected_group_nodes");
     expect(screen.getByText("指定 Workload", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
     expect(screen.getByText("类型", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
+    expect(screen.getByRole("combobox", { name: "资源候选范围" })).toHaveValue("all");
+    expect(screen.getByRole("spinbutton", { name: "备选数" })).toHaveValue(3);
+  });
+
+  it("defaults URL-opened pending workload plans to all node occupancy", async () => {
+    const pending: Workload = {
+      ...workload("pending-a", "pending-a", "charlie", "group-a", 3, "unused"),
+      policy_status: "pending", placements: [], gpus: [], telemetry: telemetry(0, null, null),
+      total_gpu: 3, total_cpu: null, total_memory_gib: 700, resource_basis: "requested",
+    };
+    latestSnapshot = { ...latestSnapshot, pending_workloads: [pending] };
+    latestSnapshot.node_allocation = {
+      enabled: true, access_scope: "group-owned",
+      assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+      configured_assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
+    };
+    window.history.replaceState({}, "", "/?view=planner&plan.source=workload%3Apending-a&plan.nodes=1&plan.gpus=3&plan.node-group=group-a");
+    render(<App />);
+    await screen.findByText("Queue Observatory");
+
+    expect(screen.getByRole("combobox", { name: "资源候选范围" })).toHaveValue("all");
+    expect(screen.getByRole("combobox", { name: "候选节点范围" })).toHaveValue("selected_group_nodes");
+    expect(screen.getByText("Workload 分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
   });
 
   it("filters array-valued finding facets and renders finding details", async () => {
