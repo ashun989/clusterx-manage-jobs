@@ -89,7 +89,8 @@ clusterx-monitor-cli groups --violations-only
 clusterx-monitor-cli plan --nodes 2 --gpus-per-node 8 \
   --strategy min-gpu --strategy min-workloads \
   --candidate-scope all --candidate-node-scope other_group_nodes \
-  --group research --placement-relation foreign_only --alternatives 3
+  --node-group research --group research \
+  --placement-relation foreign_only --alternatives 3
 clusterx-monitor-cli watch --view alerts --count 10 --format jsonl
 ```
 
@@ -111,7 +112,7 @@ the Skill package or repository.
 
 调度模拟的 `--candidate-scope` 仍表示资源负载形态；节点归属范围单独由
 `--candidate-node-scope all|selected_group_nodes|other_group_nodes` 控制，后两者
-要求重复的 `--group` 参数。Workload 的节点使用关系由
+要求重复的 `--node-group` 参数；`--group` 独立筛选候选 Workload。Workload 的节点使用关系由
 `--placement-relation any|owned_only|foreign_only|mixed|includes_foreign` 控制。
 这些条件都基于固定快照的有效公开节点归属。节点归属约束关闭时，服务端拒绝
 非默认节点归属筛选，不会静默改成全部节点。

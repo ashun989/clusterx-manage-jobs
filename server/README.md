@@ -37,10 +37,11 @@ identity and exposes the authoritative `host_ip` plus a nullable Clusterx
 `host-10-140-62-215`). Group configuration and planner payloads continue to
 use the ECP node name; `clusterx run --include/--exclude` uses `hostname`.
 
-The planning API keeps resource candidate scope separate from node ownership
-and Workload placement relation. Non-default ownership filters are rejected
-when allocation is disabled, and group-relative node scopes require an explicit
-group. No invalid request is silently broadened to all nodes or all Workloads.
+The planning API keeps resource candidate scope, Workload group filters, node
+owner group filters, and Workload placement relation independent. Non-default
+ownership filters are rejected when allocation is disabled, and group-relative
+node scopes require `node_owner_groups`. No invalid request is silently
+broadened to all nodes or all Workloads.
 The evaluated snapshot/API schema is version `2`; Server, Web, CLI and Skill
 version `3.x` must be deployed together and are not compatible with 2.x clients.
 

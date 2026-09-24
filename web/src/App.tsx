@@ -23,6 +23,10 @@ const dateTime = (value: string | null | undefined) => {
   return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
 };
 const releaseNotes: Record<string, string[]> = {
+  "2.2.0": [
+    "调度模拟将节点归属分组与候选 Workload 分组分开筛选；模拟 Pending Workload 时默认考虑所选组节点上的跨组占用。",
+    "API 和 CLI 新增独立节点归属分组条件；结果中分别展示节点归属组和 Workload 候选组。",
+  ],
   "2.1.3": [
     "Pending workload 覆盖 training job、开发机和部署任务；来源或队列归属不完整时，排队压力明确显示为 unknown。",
     "冷启动节点分配建议考虑已知 pending GPU、CPU 和内存总需求，并报告资源规格或容量缺失。",
@@ -257,7 +261,7 @@ const plannerFilterKeys: PlannerFilterKey[] = ["types", "groups", "users", "work
 const emptyPlannerFilters = (): PlannerFilters => ({ types: [], groups: [], users: [], workloads: [], excludeWorkloads: [], excludeUsers: [], findingCategories: [], findingCodes: [], findingTags: [] });
 const simpleOptions = (values: string[]): PlannerOption[] => [...new Set(values.filter(Boolean))].sort((left, right) => left.localeCompare(right)).map((value) => ({ value, label: value }));
 
-function PlannerMultiSelect({ label, options, selected, onChange, emptyLabel = "不限" }: { label: string; options: PlannerOption[]; selected: string[]; onChange: (values: string[]) => void; emptyLabel?: string }) {
+function PlannerMultiSelect({ label, options, selected, onChange, emptyLabel = "不限", disabled = false }: { label: string; options: PlannerOption[]; selected: string[]; onChange: (values: string[]) => void; emptyLabel?: string; disabled?: boolean }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const ref = useDismissibleMenu<HTMLDetailsElement>(open, () => setOpen(false));
@@ -266,8 +270,8 @@ function PlannerMultiSelect({ label, options, selected, onChange, emptyLabel = "
   const selectedLabels = selected.map((value) => options.find((option) => option.value === value)?.label ?? value);
   const selectionLabel = selectedLabels.length === 0 ? emptyLabel : selectedLabels.length <= 2 ? selectedLabels.join("、") : `${selectedLabels[0]} 等 ${selectedLabels.length} 项`;
   return <details ref={ref} className="planner-multi" open={open}>
-    <summary onClick={(event) => { event.preventDefault(); setOpen((value) => !value); }}><span>{label}</span><em title={selectedLabels.join("、")}>{selectionLabel}</em></summary>
-    {open && <div className="planner-multi-popover">
+    <summary aria-disabled={disabled} onClick={(event) => { event.preventDefault(); if (!disabled) setOpen((value) => !value); }}><span>{label}</span><em title={selectedLabels.join("、")}>{selectionLabel}</em></summary>
+    {open && !disabled && <div className="planner-multi-popover">
       {options.length > 5 && <input aria-label={`搜索${label}`} type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${label}候选`} />}
       <div className="planner-multi-actions"><small>{visible.length}/{options.length} 个候选</small>{selected.length > 0 && <button type="button" onClick={() => onChange([])}>清空</button>}</div>
       <div className="planner-multi-options">{visible.map((option) => <label key={option.value}>
@@ -292,6 +296,7 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
   const [cpusUseDefault, setCpusUseDefault] = useState(true);
   const [memoryUsesDefault, setMemoryUsesDefault] = useState(true);
   const [filters, setFilters] = useState<PlannerFilters>(emptyPlannerFilters);
+  const [nodeGroups, setNodeGroups] = useState<string[]>([]);
   const [scope, setScope] = useState<"fragmented" | "full" | "all">("fragmented");
   const [candidateNodeScope, setCandidateNodeScope] = useState<CandidateNodeScope>("all");
   const [placementRelationScope, setPlacementRelationScope] = useState<PlacementRelationScope>("any");
@@ -341,11 +346,14 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
       }
       return changed ? next : current;
     });
+    const allowedGroups = new Set(filterOptions.groups.map((option) => option.value));
+    setNodeGroups((current) => current.filter((group) => allowedGroups.has(group)));
   }, [filterOptions]);
   const intentSignature = JSON.stringify(intent);
   useEffect(() => {
     if (!intent) {
       setFilters(emptyPlannerFilters());
+      setNodeGroups([]);
       setCandidateNodeScope("all");
       setPlacementRelationScope("any");
       return;
@@ -358,13 +366,14 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
     setMemoryUsesDefault(intent.memoryTotalGib == null);
     setScope(intent.scope);
     setFilters({ ...emptyPlannerFilters(), types: intent.workloadTypes, groups: intent.groups, users: intent.users, workloads: intent.workloads });
-    setCandidateNodeScope(nodeAllocationEnabled && intent.sourceKind === "workload" && intent.groups.length > 0 ? "selected_group_nodes" : "all");
+    setNodeGroups(intent.nodeGroups);
+    setCandidateNodeScope(nodeAllocationEnabled && intent.sourceKind === "workload" && intent.nodeGroups.length > 0 ? "selected_group_nodes" : "all");
     setPlacementRelationScope("any");
     setError("");
   }, [intentSignature, nodeAllocationEnabled, snapshot.planning_profile.default_cpu_per_gpu, snapshot.planning_profile.default_memory_gib_per_gpu]);
   const changeFilter = (key: PlannerFilterKey) => (values: string[]) => setFilters((current) => ({ ...current, [key]: values }));
-  const ownershipError = nodeAllocationEnabled && candidateNodeScope !== "all" && filters.groups.length === 0
-    ? "选择该候选节点范围前，请先选择至少一个分组。"
+  const ownershipError = nodeAllocationEnabled && candidateNodeScope !== "all" && nodeGroups.length === 0
+    ? "选择该候选节点范围前，请先选择至少一个节点归属分组。"
     : "";
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -384,7 +393,7 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
         target: { nodes: nodeCount, gpus_per_node: Number(data.get("gpus")), cpus_per_node: totalAsPerNode("cpus"), memory_per_node_gib: totalAsPerNode("memory") },
         strategies: strategies.length ? strategies : ["min-gpu"], candidate_scope: data.get("scope"), alternatives: Number(data.get("alternatives")), search_seconds: Number(data.get("searchSeconds")),
         filters: {
-          workload_types: filters.types, groups: filters.groups, users: filters.users, workloads: filters.workloads,
+          workload_types: filters.types, groups: filters.groups, node_owner_groups: nodeAllocationEnabled ? nodeGroups : [], users: filters.users, workloads: filters.workloads,
           exclude_workloads: filters.excludeWorkloads, exclude_users: filters.excludeUsers, over_quota_only: data.get("overQuota") === "on",
           candidate_node_scope: nodeAllocationEnabled ? candidateNodeScope : "all",
           placement_relation_scope: nodeAllocationEnabled ? placementRelationScope : "any",
@@ -403,13 +412,14 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
     </section>
     <section className="planner-section"><h3>求解设置</h3>
       <label>资源候选范围<select name="scope" value={scope} onChange={(event) => setScope(event.target.value as typeof scope)}><option value="fragmented">碎片节点</option><option value="full">满 GPU 节点</option><option value="all">全部</option></select></label>
-      <PlannerMultiSelect label="分组" options={filterOptions.groups} selected={filters.groups} onChange={changeFilter("groups")} />
-      <label>候选节点范围<select aria-label="候选节点范围" name="candidateNodeScope" value={candidateNodeScope} disabled={!nodeAllocationEnabled} onChange={(event) => setCandidateNodeScope(event.target.value as CandidateNodeScope)}><option value="all">全部节点</option><option value="selected_group_nodes">所选分组节点</option><option value="other_group_nodes">其他分组节点</option></select><small>{!nodeAllocationEnabled ? "节点归属约束未启用，当前所有 queue 节点可用。" : ownershipError || "范围基于已选分组的节点归属计算。"}</small></label>
+      <PlannerMultiSelect label="节点归属分组" options={filterOptions.groups} selected={nodeGroups} onChange={setNodeGroups} disabled={!nodeAllocationEnabled} />
+      <label>候选节点范围<select aria-label="候选节点范围" name="candidateNodeScope" value={candidateNodeScope} disabled={!nodeAllocationEnabled} onChange={(event) => setCandidateNodeScope(event.target.value as CandidateNodeScope)}><option value="all">全部节点</option><option value="selected_group_nodes">所选分组节点</option><option value="other_group_nodes">其他分组节点</option></select><small>{!nodeAllocationEnabled ? "节点归属约束未启用，当前所有 queue 节点可用。" : ownershipError || "范围基于节点归属分组计算。"}</small></label>
       <label>备选数<input name="alternatives" type="number" min="1" max="10" defaultValue="1" required /></label>
       <label>总求解预算（秒）<input name="searchSeconds" type="number" min="1" max="30" defaultValue="10" required /></label>
       <fieldset><legend>策略</legend>{[["min-gpu", "最少 GPU"], ["min-workloads", "最少任务"], ["min-users", "最少用户"]].map(([value, label]) => <label className="check" key={value}><input name="strategy" value={value} type="checkbox" defaultChecked />{label}</label>)}</fieldset>
     </section>
     <section className="planner-section"><h3>候选筛选</h3>
+      <PlannerMultiSelect label="Workload 分组" options={filterOptions.groups} selected={filters.groups} onChange={changeFilter("groups")} />
       <PlannerMultiSelect label="类型" options={filterOptions.types} selected={filters.types} onChange={changeFilter("types")} />
       <PlannerMultiSelect label="用户" options={filterOptions.users} selected={filters.users} onChange={changeFilter("users")} /><PlannerMultiSelect label="指定 Workload" options={filterOptions.workloads} selected={filters.workloads} onChange={changeFilter("workloads")} />
       <PlannerMultiSelect label="排除 Workload" options={filterOptions.excludeWorkloads} selected={filters.excludeWorkloads} onChange={changeFilter("excludeWorkloads")} emptyLabel="不排除" /><PlannerMultiSelect label="排除用户" options={filterOptions.excludeUsers} selected={filters.excludeUsers} onChange={changeFilter("excludeUsers")} emptyLabel="不排除" />
@@ -417,7 +427,7 @@ function Planner({ snapshot, onResult, intent, clearIntent }: { snapshot: Snapsh
       <PlannerMultiSelect label="策略发现标签" options={filterOptions.findingTags} selected={filters.findingTags} onChange={changeFilter("findingTags")} />
       <label>Workload 节点使用关系<select aria-label="Workload 节点使用关系" name="placementRelation" value={placementRelationScope} disabled={!nodeAllocationEnabled} onChange={(event) => setPlacementRelationScope(event.target.value as PlacementRelationScope)}><option value="any">不限</option><option value="owned_only">仅本组节点</option><option value="foreign_only">仅其他组节点</option><option value="mixed">本组与其他组混合</option><option value="includes_foreign">包含其他组节点</option></select></label>
       <label className="check planner-check-card"><input name="overQuota" type="checkbox" />仅超 quota 分组</label>
-      <p className="planner-filter-note">筛选候选来自当前快照；快照更新后，不再存在的选项会自动移除。{nodeAllocationEnabled ? "候选节点范围使用上面选择的分组；Workload 节点关系按快照中的 owner 计算。" : "节点归属约束未启用，所有节点可用，节点关系筛选不可用。"}</p>
+      <p className="planner-filter-note">筛选候选来自当前快照；快照更新后，不再存在的选项会自动移除。{nodeAllocationEnabled ? "节点归属分组只限制候选节点；Workload 分组只限制协调任务。Workload 节点关系按快照中的 owner 计算。" : "节点归属约束未启用，所有节点可用，节点关系筛选不可用。"}</p>
     </section>
     <button disabled={busy || Boolean(ownershipError)}>{busy ? "计算中…" : "计算方案"}</button>{error && <p className="error planner-error">{error}</p>}
   </form>;
@@ -443,7 +453,7 @@ function PlanResults({ plan, currentSnapshotId, nodes, onWorkload }: { plan: Pla
   return <div className="plan-results">
     <div className="plan-result-heading"><div><h3>{plan.optimality}</h3><span>{plan.solver.backend} · {plan.search_elapsed_seconds}s · snapshot {plan.snapshot_id.slice(0, 12)}</span></div>{superseded && <span className="status status-warning">快照已更新</span>}</div>
     <p className="plan-timestamp">快照时间 {new Date(plan.snapshot_generated_at).toLocaleString()}{plan.cache_hit ? " · cache hit" : ""}</p>
-    {plan.candidate_selection && <p className="plan-filter-summary">资源候选：{resourceScopeLabels[plan.candidate_selection.resource_scope] ?? plan.candidate_selection.resource_scope} · 分组：{plan.candidate_selection.groups.join("、") || "未限定"} · 候选节点范围：{nodeScopeLabels[plan.candidate_selection.node_ownership_scope] ?? plan.candidate_selection.node_ownership_scope} · Workload 节点使用关系：{placementScopeLabels[plan.candidate_selection.placement_relation_scope] ?? plan.candidate_selection.placement_relation_scope} · 策略发现筛选：{findingFilterLabel} · 节点归属约束：{plan.candidate_selection.node_allocation_enabled ? "已启用" : "未启用"}</p>}
+    {plan.candidate_selection && <p className="plan-filter-summary">资源候选：{resourceScopeLabels[plan.candidate_selection.resource_scope] ?? plan.candidate_selection.resource_scope} · Workload 分组：{plan.candidate_selection.groups.join("、") || "未限定"} · 节点归属分组：{plan.candidate_selection.node_owner_groups.join("、") || "未限定"} · 候选节点范围：{nodeScopeLabels[plan.candidate_selection.node_ownership_scope] ?? plan.candidate_selection.node_ownership_scope} · Workload 节点使用关系：{placementScopeLabels[plan.candidate_selection.placement_relation_scope] ?? plan.candidate_selection.placement_relation_scope} · 策略发现筛选：{findingFilterLabel} · 节点归属约束：{plan.candidate_selection.node_allocation_enabled ? "已启用" : "未启用"}</p>}
     {plan.strategy_results.length > 0 && <div className="tag-list">{plan.strategy_results.map((result) => <span key={result.strategy}>{result.strategy}: {result.status} · {result.returned_alternatives}/{result.requested_alternatives}{result.top_k_complete ? "" : " · partial"}</span>)}</div>}
     <div className="plan-resolved"><b>实际资源画像</b><span>{number(plan.resolved_target.nodes)} 节点 ×（每节点 {number(plan.resolved_target.gpus_per_node)} GPU / {number(plan.resolved_target.cpus_per_node)} CPU / {number(plan.resolved_target.memory_per_node_gib)} GiB）</span>{plan.defaults_applied.length > 0 && <small>已应用默认值：{plan.defaults_applied.join(", ")}</small>}<small>排除 {plan.planning_exclusions.node_count} 节点 / {plan.planning_exclusions.workload_count} Workload{plan.planning_exclusions.reasons.length ? ` · ${plan.planning_exclusions.reasons.join(", ")}` : ""}</small>{plan.planning_exclusions.nodes?.map((item) => <small key={`node:${item.node}`}>节点 {nodeNameWithInternal(nodes, item.node)}: {item.reasons.join(", ")}</small>)}{plan.planning_exclusions.workloads?.map((item) => <small key={`workload:${item.workload_id}`}>Workload {item.workload_id}: {item.reasons.join(", ")} ({item.nodes.map((node) => nodeNameWithInternal(nodes, node)).join(", ")})</small>)}</div>
     {plan.plans.length === 0 ? plan.optimality === "not-needed" ? <div className="plan-notice"><b>无需协调 Workload</b><p>当前可调度节点：{plan.currently_schedulable_nodes?.map((node) => nodeNameWithInternal(nodes, node)).join(", ") || "—"}</p></div> : <div className="plan-notice"><b>没有可行方案</b><p>{reasonLabels[plan.no_plan_reason ?? ""] ?? "当前候选范围不足以释放目标资源。"}</p></div> : plan.plans.map((item) => {
@@ -576,7 +586,7 @@ export default function App() {
     const defaults: PlannerIntent = {
       sourceKind: ref.kind, sourceId: ref.id, sourceLabel: ref.label, note: "已从当前问题预填模拟条件，请核对后再计算。",
       nodes: 2, gpusPerNode: 8, cpusTotal: null, memoryTotalGib: null, targetNodes: [], scope: "fragmented",
-      groups: [], users: [], workloads: [], workloadTypes: [],
+      groups: [], nodeGroups: [], users: [], workloads: [], workloadTypes: [],
     };
     if (ref.kind === "node") {
       const node = snapshot.nodes.find((item) => item.node === ref.id);
@@ -596,8 +606,8 @@ export default function App() {
       return {
         ...defaults, sourceLabel: workload.workload_name, nodes, gpusPerNode,
         cpusTotal: workload.total_cpu ?? null, memoryTotalGib: workload.total_memory_gib ?? null,
-        note: pending ? `目标资源按该 Pending Workload 的请求画像预填；已预填分组 ${workload.group}，默认使用该组节点；模拟会寻找可释放的协调方案。` : `目标资源按该运行中 Workload 的画像预填；已预填分组 ${workload.group}，默认使用该组节点；候选限定为它，用于验证协调后的释放效果。`,
-        groups: group, workloads: pending ? [] : [workload.workload_id], workloadTypes: pending ? [] : [workload.type],
+        note: pending ? `目标资源按该 Pending Workload 的请求画像预填；已预填节点归属分组 ${workload.group}，默认使用该组节点；模拟会寻找可释放的协调方案。` : `目标资源按该运行中 Workload 的画像预填；已预填节点归属分组 ${workload.group}，默认使用该组节点；候选限定为它，用于验证协调后的释放效果。`,
+        groups: [], nodeGroups: group, workloads: pending ? [] : [workload.workload_id], workloadTypes: pending ? [] : [workload.type],
       };
     }
     if (ref.kind === "alert") {

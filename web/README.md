@@ -70,7 +70,9 @@ are not counted because they have no node placement.
 When node allocation is enabled, the simulator keeps resource candidate scope
 (`fragmented`, `full`, `all`) separate from node ownership scope and placement
 relationship. Candidate node scope is `all`, `selected_group_nodes`, or
-`other_group_nodes`; the two group-relative values require a selected group.
+`other_group_nodes`; the two group-relative values require a selected node-owner
+group. Candidate Workload group filters are independent, and default to
+unrestricted when simulating a Pending Workload.
 The scope control remains usable before group selection and displays an inline
 validation error instead of silently changing the request. Workload relation is
 `any`, `owned_only`, `foreign_only`, `mixed`, or `includes_foreign`. When node

@@ -328,6 +328,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for option in ("type", "group", "user", "workload", "exclude-workload", "exclude-user"):
         plan.add_argument(f"--{option}", action="append", default=[])
+    plan.add_argument(
+        "--node-group", action="append", default=[],
+        help="node owner group for group-relative candidate node scopes; independent of --group",
+    )
     plan.add_argument("--over-quota-only", action="store_true")
     plan.add_argument("--finding-category", action="append", default=[])
     plan.add_argument("--finding-code", action="append", default=[])
@@ -404,8 +408,8 @@ def main() -> int:
                 parser.error("alternatives must be between 1 and 10")
             if not 1 <= args.search_seconds <= 30:
                 parser.error("search seconds must be between 1 and 30")
-            if args.candidate_node_scope != "all" and not args.group:
-                parser.error("--group is required when --candidate-node-scope is not all")
+            if args.candidate_node_scope != "all" and not args.node_group:
+                parser.error("--node-group is required when --candidate-node-scope is not all")
             body = {
                 "snapshot_id": args.snapshot,
                 "target": {
@@ -419,6 +423,7 @@ def main() -> int:
                 "search_seconds": args.search_seconds,
                 "filters": {
                     "workload_types": args.type, "groups": args.group,
+                    "node_owner_groups": args.node_group,
                     "users": args.user, "workloads": args.workload,
                     "exclude_workloads": args.exclude_workload,
                     "exclude_users": args.exclude_user,

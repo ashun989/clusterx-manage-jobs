@@ -107,7 +107,7 @@ const planResult: PlanResult = {
   resolved_target: { nodes: 1, gpus_per_node: 8, cpus_per_node: 112, memory_per_node_gib: 1920 },
   defaults_applied: ["cpus_per_node", "memory_per_node_gib"],
   planning_profile: { default_cpu_per_gpu: 14, default_memory_gib_per_gpu: 240 },
-  candidate_selection: { resource_scope: "fragmented", node_ownership_scope: "all", placement_relation_scope: "any", groups: [], finding_categories: [], finding_codes: [], finding_tags: [], node_allocation_enabled: false },
+  candidate_selection: { resource_scope: "fragmented", node_ownership_scope: "all", placement_relation_scope: "any", groups: [], node_owner_groups: [], finding_categories: [], finding_codes: [], finding_tags: [], node_allocation_enabled: false },
   planning_exclusions: { node_count: 0, workload_count: 0, reasons: [] },
   no_plan_reason: null,
   solver: { backend: "cp-sat", model_version: 3, status: "OPTIMAL", time_limit_seconds: 10, wall_time_seconds: 0.2, candidate_node_count: 2, candidate_workload_count: 2 },
@@ -334,6 +334,19 @@ describe("Clusterx monitor dashboard", () => {
     expect(nodeUrl.searchParams.getAll("node.group")).toEqual(["group-a", "group-b"]);
     window.history.replaceState({}, "", nodeUrl);
     expect(readNavigationState().nodeState.groups).toEqual(["group-a", "group-b"]);
+
+    state.tab = "planner";
+    state.plannerIntent = {
+      sourceKind: "workload", sourceId: "pending-a", sourceLabel: "pending-a", note: "",
+      nodes: 1, gpusPerNode: 8, cpusTotal: null, memoryTotalGib: null,
+      targetNodes: [], scope: "fragmented", groups: ["candidate-group"],
+      nodeGroups: ["owner-group"], users: [], workloads: [], workloadTypes: [],
+    };
+    const plannerUrl = new URL(navigationUrl(state), window.location.origin);
+    expect(plannerUrl.searchParams.getAll("plan.workload-group")).toEqual(["candidate-group"]);
+    expect(plannerUrl.searchParams.getAll("plan.node-group")).toEqual(["owner-group"]);
+    window.history.replaceState({}, "", plannerUrl);
+    expect(readNavigationState().plannerIntent).toMatchObject({ groups: ["candidate-group"], nodeGroups: ["owner-group"] });
     expect(sliderPositionFromTrendRange(604_800)).toBeGreaterThan(sliderPositionFromTrendRange(86_400));
   });
 
@@ -811,8 +824,8 @@ describe("Clusterx monitor dashboard", () => {
     expect(memoryInput).toHaveValue(3840);
     fireEvent.click(screen.getByText("类型", { selector: ".planner-multi > summary > span" }));
     fireEvent.click(screen.getByLabelText("类型：trainingJob"));
-    fireEvent.click(screen.getByText("分组", { selector: ".planner-multi > summary > span" }));
-    fireEvent.click(screen.getByLabelText("分组：group-a"));
+    fireEvent.click(screen.getByText("Workload 分组", { selector: ".planner-multi > summary > span" }));
+    fireEvent.click(screen.getByLabelText("Workload 分组：group-a"));
     fireEvent.click(screen.getByText("用户", { selector: ".planner-multi > summary > span" }));
     fireEvent.click(screen.getByLabelText("用户：alice"));
     fireEvent.click(screen.getByText("指定 Workload", { selector: ".planner-multi > summary > span" }));
@@ -844,6 +857,7 @@ describe("Clusterx monitor dashboard", () => {
     expect(payload.target).toEqual({ nodes: 4, gpus_per_node: 4, cpus_per_node: 56, memory_per_node_gib: 960 });
     expect(payload.filters.workload_types).toEqual(["trainingJob"]);
     expect(payload.filters.groups).toEqual(["group-a"]);
+    expect(payload.filters.node_owner_groups).toEqual([]);
     expect(payload.filters.users).toEqual(["alice"]);
     expect(payload.filters.workloads).toEqual(["workload-a"]);
     expect(payload.filters.exclude_users).toEqual(["bob"]);
@@ -863,10 +877,10 @@ describe("Clusterx monitor dashboard", () => {
     const nodeScope = screen.getByRole("combobox", { name: "候选节点范围" });
     expect(nodeScope).not.toBeDisabled();
     fireEvent.change(nodeScope, { target: { value: "selected_group_nodes" } });
-    expect(screen.getByText("选择该候选节点范围前，请先选择至少一个分组。")).toBeInTheDocument();
+    expect(screen.getByText("选择该候选节点范围前，请先选择至少一个节点归属分组。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "计算方案" })).toBeDisabled();
-    fireEvent.click(screen.getByText("分组", { selector: ".planner-multi > summary > span" }));
-    fireEvent.click(screen.getByLabelText("分组：group-a"));
+    fireEvent.click(screen.getByText("节点归属分组", { selector: ".planner-multi > summary > span" }));
+    fireEvent.click(screen.getByLabelText("节点归属分组：group-a"));
     expect(nodeScope).not.toBeDisabled();
     expect(screen.getByRole("button", { name: "计算方案" })).not.toBeDisabled();
     fireEvent.change(nodeScope, { target: { value: "other_group_nodes" } });
@@ -875,7 +889,7 @@ describe("Clusterx monitor dashboard", () => {
     await screen.findByRole("button", { name: /min-gpu #1/ });
     const call = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).endsWith("/plans") && init?.method === "POST");
     const payload = JSON.parse(String(call?.[1]?.body));
-    expect(payload.filters).toMatchObject({ groups: ["group-a"], candidate_node_scope: "other_group_nodes", placement_relation_scope: "foreign_only" });
+    expect(payload.filters).toMatchObject({ groups: [], node_owner_groups: ["group-a"], candidate_node_scope: "other_group_nodes", placement_relation_scope: "foreign_only" });
   });
 
   it("explains why ownership filters are unavailable when allocation is disabled", async () => {
@@ -912,7 +926,7 @@ describe("Clusterx monitor dashboard", () => {
     expect(payload.target).toEqual({ nodes: 1, gpus_per_node: 8, cpus_per_node: 112, memory_per_node_gib: 1920 });
   });
 
-  it("prefills workload group and owned node scope in the planner", async () => {
+  it("prefills a workload's node-owner group without restricting candidate groups", async () => {
     latestSnapshot.node_allocation = {
       enabled: true, access_scope: "group-owned",
       assignments: { "group-a": ["node-a"], "group-b": ["node-b"] },
@@ -925,13 +939,14 @@ describe("Clusterx monitor dashboard", () => {
     const drawer = screen.getByRole("dialog", { name: "train-a 详情" });
     fireEvent.click(within(drawer).getByRole("button", { name: "进入调度模拟" }));
 
-    const groupFilter = screen.getByText("分组", { selector: ".planner-multi > summary > span" }).closest("details")!;
+    const groupFilter = screen.getByText("节点归属分组", { selector: ".planner-multi > summary > span" }).closest("details")!;
     expect(groupFilter.querySelector("summary")).toHaveTextContent("group-a");
+    expect(screen.getByText("Workload 分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
     expect(screen.getByRole("combobox", { name: "候选节点范围" })).toHaveValue("selected_group_nodes");
-    expect(screen.getByText("范围基于已选分组的节点归属计算。")).toBeInTheDocument();
+    expect(screen.getByText("范围基于节点归属分组计算。")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "清除上下文" }));
-    expect(screen.getByText("分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
+    expect(screen.getByText("节点归属分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
     expect(screen.getByRole("combobox", { name: "候选节点范围" })).toHaveValue("all");
   });
 
@@ -954,7 +969,8 @@ describe("Clusterx monitor dashboard", () => {
     const drawer = screen.getByRole("dialog", { name: "pending-a 详情" });
     fireEvent.click(within(drawer).getByRole("button", { name: "进入调度模拟" }));
 
-    expect(screen.getByText("分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("group-a");
+    expect(screen.getByText("节点归属分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("group-a");
+    expect(screen.getByText("Workload 分组", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
     expect(screen.getByRole("combobox", { name: "候选节点范围" })).toHaveValue("selected_group_nodes");
     expect(screen.getByText("指定 Workload", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");
     expect(screen.getByText("类型", { selector: ".planner-multi > summary > span" }).closest("summary")).toHaveTextContent("不限");

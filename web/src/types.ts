@@ -344,6 +344,7 @@ export type PlanResult = {
     node_ownership_scope: "all" | "selected_group_nodes" | "other_group_nodes" | string;
     placement_relation_scope: "any" | "owned_only" | "foreign_only" | "mixed" | "includes_foreign" | string;
     groups: string[];
+    node_owner_groups: string[];
     finding_categories: string[];
     finding_codes: string[];
     finding_tags: string[];

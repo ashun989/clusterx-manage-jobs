@@ -18,7 +18,10 @@ export type PlannerIntent = {
   memoryTotalGib: number | null;
   targetNodes: string[];
   scope: "fragmented" | "full" | "all";
+  /** Candidate Workload's attributed group filter. */
   groups: string[];
+  /** Effective owner groups used for group-relative node scopes. */
+  nodeGroups: string[];
   users: string[];
   workloads: string[];
   workloadTypes: string[];
@@ -168,7 +171,8 @@ function readPlannerIntent(params: URLSearchParams): PlannerIntent | null {
     memoryTotalGib: positiveNumber(params, "plan.memory"),
     targetNodes: params.getAll("plan.target"),
     scope: requestedScope === "full" || requestedScope === "all" ? requestedScope : "fragmented",
-    groups: params.getAll("plan.group"),
+    groups: params.getAll("plan.workload-group"),
+    nodeGroups: params.getAll("plan.node-group"),
     users: params.getAll("plan.user"),
     workloads: params.getAll("plan.workload"),
     workloadTypes: params.getAll("plan.type"),
@@ -259,7 +263,8 @@ export function navigationUrl(state: NavigationState): string {
     if (intent.memoryTotalGib != null) params.set("plan.memory", String(intent.memoryTotalGib));
     if (intent.scope !== "fragmented") params.set("plan.scope", intent.scope);
     intent.targetNodes.forEach((value) => params.append("plan.target", value));
-    intent.groups.forEach((value) => params.append("plan.group", value));
+    intent.groups.forEach((value) => params.append("plan.workload-group", value));
+    intent.nodeGroups.forEach((value) => params.append("plan.node-group", value));
     intent.users.forEach((value) => params.append("plan.user", value));
     intent.workloads.forEach((value) => params.append("plan.workload", value));
     intent.workloadTypes.forEach((value) => params.append("plan.type", value));

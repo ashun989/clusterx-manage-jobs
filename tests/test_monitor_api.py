@@ -338,6 +338,7 @@ class MonitorApiTests(unittest.TestCase):
             "target": {"nodes": 1, "gpus_per_node": 8},
             "filters": {
                 "groups": ["example-team"],
+                "node_owner_groups": ["example-team"],
                 "candidate_node_scope": "selected_group_nodes",
                 "placement_relation_scope": "foreign_only",
             },

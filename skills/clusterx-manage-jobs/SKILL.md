@@ -220,7 +220,8 @@ a hostname when the IP is missing or invalid.
   all|selected_group_nodes|other_group_nodes`, `--placement-relation
   any|owned_only|foreign_only|mixed|includes_foreign`, `--alternatives 1..10`,
   and workload, user, group, or over-quota filters as requested. The two
-  group-relative node scopes require repeated `--group` filters. To restrict
+  group-relative node scopes require repeated `--node-group` filters. `--group`
+  filters candidate Workloads independently. To restrict
   coordination candidates by structured warnings or violations, add repeated
   `--finding-category`, `--finding-code`, or `--finding-tag`. Every result is based on an
   identified cached snapshot and is a coordination candidate, never permission

@@ -213,7 +213,8 @@ Candidate filters include repeated `--type`, `--group`, `--user`, `--workload`,
 `--finding-code`, `--finding-tag`, and `--over-quota-only`. Plan node
 candidate scope is controlled independently with
 `--candidate-node-scope all|selected_group_nodes|other_group_nodes`; the two
-group-relative values require selected repeated `--group` filters. Workload
+group-relative values require repeated `--node-group` options. `--group` filters
+candidate Workloads independently. Workload
 placement scope is controlled with
 `--placement-relation any|owned_only|foreign_only|mixed|includes_foreign`.
 List views use

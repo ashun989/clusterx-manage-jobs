@@ -31,7 +31,8 @@ clusterx-monitor-cli nodes --mine --format json
 clusterx-monitor-cli groups --violations-only
 clusterx-monitor-cli plan --nodes 2 --gpus-per-node 8 \
   --candidate-scope all --candidate-node-scope other_group_nodes \
-  --group research --placement-relation foreign_only --alternatives 3
+  --node-group research --group research \
+  --placement-relation foreign_only --alternatives 3
 ```
 
 Node ownership is public for the configured queue. `nodes --mine` uses `--user`
@@ -58,7 +59,8 @@ explicitly assigned by the CLI or configuration.
 The plan command keeps the resource candidate range (`fragmented`, `full`, or
 `all`) separate from node ownership. `--candidate-node-scope` accepts `all`,
 `selected_group_nodes`, or `other_group_nodes`; the latter two require repeated
-`--group` filters. `--placement-relation` accepts `any`, `owned_only`,
+`--node-group` options. `--node-group` selects node owners, while `--group`
+filters candidate Workloads by their attributed group. `--placement-relation` accepts `any`, `owned_only`,
 `foreign_only`, `mixed`, or `includes_foreign`. Plan finding filters use
 `--finding-category`, `--finding-code`, and `--finding-tag` and match warnings
 as well as violations. These filters use the pinned snapshot's public node

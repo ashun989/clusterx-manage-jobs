@@ -1378,7 +1378,11 @@ class PlannerTests(unittest.TestCase):
         request = {
             "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
             "target_nodes": ["other"], "strategies": ["min-gpu"], "candidate_scope": "fragmented",
-            "filters": {"groups": ["example-team"], "candidate_node_scope": "other_group_nodes"},
+            "filters": {
+                "groups": ["example-team"],
+                "node_owner_groups": ["example-team"],
+                "candidate_node_scope": "other_group_nodes",
+            },
         }
         result = solve_plan(evaluated, request)
         self.assertEqual(result["plans"][0]["workloads"], ["borrowed-job"])
@@ -1394,6 +1398,38 @@ class PlannerTests(unittest.TestCase):
         result = solve_plan(evaluated, request)
         self.assertEqual(result["no_plan_reason"], "target-node-outside-ownership-scope")
 
+    def test_planner_includes_foreign_group_workloads_on_selected_group_nodes(self):
+        payload = self.policy.model_dump(mode="json")
+        payload["node_allocation"] = {"enabled": True}
+        payload["groups"]["example-team"]["nodes"] = ["owned"]
+        payload["groups"]["default"]["nodes"] = ["other"]
+        policy = PolicyConfig.model_validate(payload)
+        evaluated = apply_policy(snapshot(
+            [node("owned", 8, 4, 10), node("other", 0)],
+            [workload("xujing-job", "xujing", "trainingJob", [placement("owned", 8, 4, 10)])],
+        ), policy)
+        request = {
+            "snapshot_id": "s1",
+            "target": {
+                "nodes": 1, "gpus_per_node": 8,
+                "cpus_per_node": 4, "memory_per_node_gib": 10,
+            },
+            "target_nodes": ["owned"], "strategies": ["min-gpu"],
+            "candidate_scope": "all",
+            "filters": {
+                "node_owner_groups": ["example-team"],
+                "candidate_node_scope": "selected_group_nodes",
+            },
+        }
+        result = solve_plan(evaluated, request)
+        self.assertEqual(result["plans"][0]["workloads"], ["xujing-job"])
+        self.assertEqual(result["candidate_selection"]["groups"], [])
+        self.assertEqual(result["candidate_selection"]["node_owner_groups"], ["example-team"])
+
+        request["filters"]["groups"] = ["example-team"]
+        filtered = solve_plan(evaluated, request)
+        self.assertEqual(filtered["no_plan_reason"], "no-candidates-after-filters")
+
     def test_planner_rejects_node_scopes_when_node_allocation_is_disabled(self):
         evaluated = apply_policy(
             snapshot([node("n1", 1)], [workload("job", "alice", "trainingJob", [placement("n1", 1)])]),
@@ -1406,13 +1442,13 @@ class PlannerTests(unittest.TestCase):
                 "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
                 "strategies": ["min-gpu"], "candidate_scope": "full",
                 "filters": {
-                    "groups": ["example-team"], "candidate_node_scope": "selected_group_nodes",
+                    "node_owner_groups": ["example-team"], "candidate_node_scope": "selected_group_nodes",
                     "placement_relation_scope": "foreign_only",
                 },
             })
 
-    def test_planner_requires_groups_for_group_node_scope(self):
-        with self.assertRaisesRegex(ValueError, "filters.groups is required"):
+    def test_planner_requires_node_owner_groups_for_group_node_scope(self):
+        with self.assertRaisesRegex(ValueError, "filters.node_owner_groups is required"):
             PlanRequest.model_validate({
                 "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
                 "filters": {"candidate_node_scope": "selected_group_nodes"},
@@ -2553,14 +2589,16 @@ class SkillCliTests(unittest.TestCase):
             self.module, "_request", return_value={"plans": []}
         ) as request, mock.patch.object(
             sys, "argv", [
-                "monitor_cli.py", "plan", "--nodes", "1", "--group", "example-team",
+                "monitor_cli.py", "plan", "--nodes", "1", "--node-group", "example-team",
+                "--group", "candidate-team",
                 "--candidate-node-scope", "other_group_nodes",
                 "--placement-relation", "foreign_only", "--format", "json",
             ]
         ), mock.patch("sys.stdout"):
             self.assertEqual(self.module.main(), 0)
         filters = request.call_args.kwargs["json"]["filters"]
-        self.assertEqual(filters["groups"], ["example-team"])
+        self.assertEqual(filters["groups"], ["candidate-team"])
+        self.assertEqual(filters["node_owner_groups"], ["example-team"])
         self.assertEqual(filters["candidate_node_scope"], "other_group_nodes")
         self.assertEqual(filters["placement_relation_scope"], "foreign_only")
 

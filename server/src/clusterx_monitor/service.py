@@ -348,6 +348,7 @@ class PlanCandidateSelectionResponse(BaseModel):
         "any", "owned_only", "foreign_only", "mixed", "includes_foreign"
     ]
     groups: list[str]
+    node_owner_groups: list[str]
     finding_categories: list[str]
     finding_codes: list[str]
     finding_tags: list[str]
@@ -1087,6 +1088,7 @@ def create_app(
         if not allocation_enabled and (
             request.filters.candidate_node_scope != "all"
             or request.filters.placement_relation_scope != "any"
+            or request.filters.node_owner_groups
         ):
             raise HTTPException(
                 status_code=422,

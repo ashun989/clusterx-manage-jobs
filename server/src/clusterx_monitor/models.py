@@ -158,6 +158,7 @@ class PlanTarget(FrozenModel):
 class PlanFilters(FrozenModel):
     workload_types: tuple[str, ...] = ()
     groups: tuple[str, ...] = ()
+    node_owner_groups: tuple[str, ...] = ()
     users: tuple[str, ...] = ()
     workloads: tuple[str, ...] = ()
     exclude_workloads: tuple[str, ...] = ()
@@ -209,7 +210,7 @@ class PlanRequest(FrozenModel):
 
     @model_validator(mode="after")
     def validate_candidate_size(self) -> "PlanRequest":
-        for field_name in ("workload_types", "groups", "users", "workloads", "exclude_workloads", "exclude_users", "finding_categories", "finding_codes", "finding_tags"):
+        for field_name in ("workload_types", "groups", "node_owner_groups", "users", "workloads", "exclude_workloads", "exclude_users", "finding_categories", "finding_codes", "finding_tags"):
             values = getattr(self.filters, field_name)
             if len(values) > 1000 or any(len(str(value)) > 256 for value in values):
                 raise ValueError(f"filters.{field_name} is too large")
@@ -217,8 +218,8 @@ class PlanRequest(FrozenModel):
 
     @model_validator(mode="after")
     def validate_candidate_node_scope(self) -> "PlanRequest":
-        if self.filters.candidate_node_scope != "all" and not self.filters.groups:
+        if self.filters.candidate_node_scope != "all" and not self.filters.node_owner_groups:
             raise ValueError(
-                "filters.groups is required when candidate_node_scope is not all"
+                "filters.node_owner_groups is required when candidate_node_scope is not all"
             )
         return self
