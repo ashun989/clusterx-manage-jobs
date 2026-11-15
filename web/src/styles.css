@@ -667,3 +667,43 @@ tr.clickable:hover, tr.clickable:focus { background: var(--surface-hover); }
   .data-table td::before { color: var(--muted); content: attr(data-label); text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
   .data-table .telemetry-cell { justify-content: end; white-space: normal; }
 }
+
+.subscription-actions, .subscription-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.subscription-actions { white-space: nowrap; }
+.subscription-toolbar { padding: 9px 12px 0; }
+.subscription-actions button, .subscription-toolbar button, .subscription-dialog button, .subscription-toast button {
+  padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px;
+  background: var(--surface-raised); color: var(--text-soft); cursor: pointer;
+}
+.subscription-actions button:disabled, .subscription-dialog button:disabled { cursor: wait; opacity: .55; }
+.subscription-actions button[aria-pressed="true"], .subscription-toolbar button[aria-pressed="true"] {
+  color: var(--accent); border-color: var(--accent);
+}
+.subscription-backdrop {
+  position: fixed; inset: 0; display: grid; place-items: center; z-index: 120; padding: 14px;
+  background: #060910b3;
+}
+.subscription-dialog {
+  width: min(100%, 460px); max-height: 85dvh; overflow: auto; padding: 18px 20px;
+  border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface);
+  color: var(--text); overflow-wrap: anywhere;
+}
+.subscription-dialog header, .subscription-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.subscription-dialog h2 { margin: 0; }
+.subscription-dialog form, .subscription-dialog fieldset { display: grid; gap: 9px; }
+.subscription-dialog form > label { display: grid; gap: 6px; }
+.subscription-dialog form > button { justify-self: start; }
+.subscription-dialog fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.subscription-dialog input:not([type="checkbox"]), .subscription-dialog select {
+  width: 100%; padding: 7px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface-input); color: var(--text);
+}
+.subscription-checkbox { display: flex; align-items: center; gap: 7px; }
+.subscription-checkbox small { color: var(--muted); }
+.subscription-list { margin: 12px 0 0; padding: 0; display: grid; gap: 6px; }
+.subscription-list li > button { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subscription-toast {
+  position: fixed; bottom: 18px; right: 18px; z-index: 125; display: flex; align-items: center; gap: 8px;
+  max-width: calc(100vw - 36px); padding: 9px 12px; border: 1px solid var(--line-strong); border-radius: 7px;
+  background: var(--surface-raised); color: var(--text); overflow-wrap: anywhere;
+}
+.subscription-error { color: var(--danger, #ef6666); }

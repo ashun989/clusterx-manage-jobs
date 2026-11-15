@@ -939,6 +939,7 @@ def _pending_workspace_resources(
             complete = False
         item = {
             "workload_id": f"{workload_type}:{row.get('uid') or row.get('name') or resource_id}",
+            "workload_uid": row.get("uid") or None,
             "workload_name": str(row.get("display_name") or row.get("name") or resource_id),
             "resource_name": resource_name_value,
             "user": user,
@@ -1170,6 +1171,8 @@ def _pending_workloads(cluster: Any, queue: str) -> tuple[list[dict[str, Any]], 
             complete = False
         item = {
             "workload_id": str(job.get("name") or ""),
+            "workload_uid": job.get("uid") or None,
+            "queue_transition_time": _iso_time(status.get("update_time")),
             "workload_name": str(job.get("display_name") or job.get("name") or ""),
             "resource_name": str(job.get("name") or ""),
             "user": pending_user,
@@ -1450,6 +1453,7 @@ class ClusterCollector:
                 workspace = pod.get("workspace") or {}
                 workload = workloads.setdefault(workload_id, {
                     "workload_id": workload_id,
+                    "workload_uid": raw_workload.get("uid") or None,
                     "workload_name": str(raw_workload.get("display_name") or raw_workload.get("name") or workload_id),
                     "user": str(ownership.get("creator_name") or "unknown").lower(),
                     "type": str(raw_workload.get("type") or "unknown"),
@@ -1462,6 +1466,8 @@ class ClusterCollector:
                     "total_cpu": None, "total_memory_gib": None,
                     "resource_basis": "attributed", "task_resources": [],
                 })
+                if raw_workload.get("uid"):
+                    workload["workload_uid"] = raw_workload["uid"]
                 if raw_workload.get("id"):
                     workload["_resource_id"] = str(raw_workload["id"])
                 if raw_workload.get("name"):

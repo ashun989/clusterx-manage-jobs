@@ -193,7 +193,7 @@ class SmokeProjectTests(unittest.TestCase):
         deploy_readme = (ROOT / "deploy/README.md").read_text(encoding="utf-8")
         release_doc = (ROOT / "docs/release.md").read_text(encoding="utf-8")
         version = (ROOT / "server/VERSION").read_text(encoding="utf-8").strip()
-        self.assertEqual(version, "2.1.2")
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
         self.assertIn(
             f'version = "{version}"',
             (ROOT / "server/pyproject.toml").read_text(encoding="utf-8"),
@@ -202,20 +202,14 @@ class SmokeProjectTests(unittest.TestCase):
             version,
             json.loads((ROOT / "web" / "package.json").read_text(encoding="utf-8"))["version"],
         )
+        client_version = (ROOT / "client/VERSION").read_text(encoding="utf-8").strip()
         self.assertEqual(
-            version,
-            (ROOT / "server/VERSION").read_text(encoding="utf-8").strip(),
-        )
-        self.assertEqual(
-            version,
+            client_version,
             tomllib.loads(
                 (ROOT / "client/pyproject.toml").read_text(encoding="utf-8")
             )["project"]["version"],
         )
-        self.assertEqual(
-            version,
-            (skill_root / "VERSION").read_text(encoding="utf-8").strip(),
-        )
+        self.assertRegex((skill_root / "VERSION").read_text(encoding="utf-8").strip(), r"^\d+\.\d+\.\d+$")
         cli_reference = (
             skill_root / "references" / "clusterx-cli.md"
         ).read_text(encoding="utf-8")

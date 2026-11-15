@@ -30,6 +30,7 @@ export type PlannerIntent = {
 export type NavigationState = {
   tab: MonitorTab;
   details: DetailRef[];
+  onlyFollowed: boolean;
   tableStates: Record<TableTab, TableState>;
   nodeState: NodeViewState;
   plannerIntent: PlannerIntent | null;
@@ -135,6 +136,7 @@ function readTrendRange(raw: string | null): TrendRange {
 export const emptyNavigationState = (tab: MonitorTab = "overview"): NavigationState => ({
   tab,
   details: [],
+  onlyFollowed: false,
   tableStates: {
     groups: emptyTableState(),
     users: emptyTableState(),
@@ -229,6 +231,7 @@ export function readNavigationState(fallbackTab: MonitorTab = "overview", previo
   return {
     tab,
     details: readDetails(params),
+    onlyFollowed: params.get("followed") === "true",
     tableStates: Object.fromEntries(tableTabs.map((name) => [name, readTableState(params, name, previous?.tableStates[name])])) as Record<TableTab, TableState>,
     nodeState: {
       groups: params.getAll("node.group"),
@@ -246,6 +249,9 @@ export function navigationUrl(state: NavigationState): string {
   const url = new URL(window.location.href);
   const params = new URLSearchParams();
   params.set("view", state.tab);
+  if (state.onlyFollowed) params.set("followed", "true");
+  const followTask = url.searchParams.get("followTask");
+  if (followTask) params.set("followTask", followTask);
   if (state.trendRange !== DEFAULT_TREND_RANGE_SECONDS) params.set("range", trendRangeUrlValue(state.trendRange));
   for (const tab of tableTabs) {
     const table = state.tableStates[tab];

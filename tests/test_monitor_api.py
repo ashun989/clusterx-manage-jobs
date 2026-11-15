@@ -77,6 +77,7 @@ if httpx2 is not None:
 else:  # pragma: no cover - dependency installation is tested in CI
     TestClient = None
 
+from clusterx_monitor import __version__
 from clusterx_monitor.auth import AdminAuth, initialize_auth_config
 from clusterx_monitor.policy import PolicyManager, apply_policy, load_policy
 from clusterx_monitor.service import MonitorRuntime, create_app
@@ -150,7 +151,7 @@ class MonitorApiTests(unittest.TestCase):
     def test_status_snapshot_policy_and_read_only_routes(self):
         client = TestClient(self.app)
         status_response = client.get("/api/v1/status")
-        self.assertEqual(status_response.json()["version"], "2.1.2")
+        self.assertEqual(status_response.json()["version"], __version__)
         self.assertTrue(status_response.json()["snapshot"]["ready"])
         self.assertIn("default-src 'self'", status_response.headers["content-security-policy"])
         self.assertEqual(status_response.headers["x-content-type-options"], "nosniff")

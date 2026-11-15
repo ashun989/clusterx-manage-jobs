@@ -174,6 +174,66 @@ describe("Clusterx monitor dashboard", () => {
     }));
   });
 
+  it("follows from the task list, saves individual events, and filters immediately after unfollowing", async () => {
+    window.history.replaceState({}, "", "/?view=workloads");
+    latestSnapshot.workloads.forEach(row => { row.workload_uid = row.workload_id; });
+    const fetchMock = vi.mocked(fetch);
+    const fallback = fetchMock.getMockImplementation()!;
+    let signedIn = false;
+    const followed = new Map<string, { kind: string; uid: string; name: string; events: string[]; queue_minutes: number }>();
+    fetchMock.mockImplementation(async (input, init) => {
+      const path = String(input).split("/subscriptions")[1];
+      if (path === undefined) return fallback(input, init);
+      const ok = (value: unknown) => ({ ok: true, status: 200, json: async () => value }) as Response;
+      const session = () => ({ email_masked: signedIn ? "a***@pjlab.org.cn" : null, csrf: signedIn ? "test-csrf" : null });
+      if (path === "/capabilities") return ok({ enabled: true, queue_minutes: [30, 60, 120], events: [
+        { code: "job.failed", label: "任务失败", kinds: ["trainingJob"], configured: true },
+        { code: "queue.wait", label: "排队超时", kinds: ["trainingJob"], configured: true },
+      ] });
+      if (path === "/session") return ok(session());
+      if (path === "/challenge") return ok({ challenge_id: "fixture" });
+      if (path === "/verify") {
+        signedIn = true;
+        expect(JSON.parse(String(init?.body)).target).toEqual({ kind: "trainingJob", uid: "workload-a" });
+        followed.set("workload-a", { kind: "trainingJob", uid: "workload-a", name: "train-a", events: ["job.failed"], queue_minutes: 60 });
+        return ok(session());
+      }
+      if (path === "") return ok([...followed.values()]);
+      const uid = path.split("/").at(-1)!;
+      expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-csrf");
+      if (init?.method === "DELETE") { followed.delete(uid); return ok({ ok: true }); }
+      const item = { kind: "trainingJob", uid, name: uid === "workload-a" ? "train-a" : "train-b",
+        ...(init?.body ? JSON.parse(String(init.body)) : { events: ["job.failed"], queue_minutes: 60 }) };
+      followed.set(uid, item);
+      return ok(item);
+    });
+
+    render(<App />);
+    const follow = await screen.findByRole("button", { name: /^关注 train-a$/ });
+    await waitFor(() => expect(follow).toBeEnabled());
+    fireEvent.click(follow);
+    fireEvent.change(screen.getByLabelText("PJLab 邮箱"), { target: { value: "alice@pjlab.org.cn" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
+    fireEvent.change(await screen.findByLabelText("邮箱验证码"), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: "验证并关注" }));
+    await screen.findByRole("button", { name: "取消关注 train-a" });
+    fireEvent.click(screen.getByRole("button", { name: "关闭邮箱面板" }));
+    fireEvent.click(screen.getByRole("button", { name: /^关注 train-b$/ }));
+    await screen.findByRole("button", { name: "取消关注 train-b" });
+    fireEvent.click(screen.getByRole("button", { name: "提醒设置 train-b" }));
+    fireEvent.click(screen.getByLabelText("排队超时"));
+    fireEvent.change(screen.getByLabelText("排队时长"), { target: { value: "30" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存提醒设置" }));
+    await screen.findByText("提醒设置已保存。");
+    expect(followed.get("workload-b")).toMatchObject({ events: ["job.failed", "queue.wait"], queue_minutes: 30 });
+    fireEvent.click(screen.getByRole("button", { name: "关闭邮箱面板" }));
+    fireEvent.click(screen.getByRole("button", { name: "只看已关注" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消关注 train-a" }));
+    await waitFor(() => expect(screen.queryByRole("row", { name: "查看 train-a 详情" })).not.toBeInTheDocument());
+    expect(screen.getByRole("row", { name: "查看 train-b 详情" })).toBeInTheDocument();
+    expect(new URLSearchParams(window.location.search).get("followed")).toBe("true");
+  });
+
   it("restores a shareable table view and nested detail from the URL", async () => {
     window.history.replaceState({}, "", "/?view=workloads&q.workloads=train-a&f.workloads.group=group-a&s.workloads.total_gpu=desc&detail=workload:workload-a");
     render(<App />);

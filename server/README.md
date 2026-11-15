@@ -147,3 +147,48 @@ The repository test suite uses simulated Clusterx gateways and does not submit
 jobs to the real cluster. See [docs/development.md](../docs/development.md) and
 [docs/release.md](../docs/release.md) for repository-wide checks and release
 packaging.
+
+## Email subscriptions
+
+The dashboard is anonymous. A verified PJLab mailbox can follow any visible
+workload and manage that mailbox's own subscriptions. The browser gets an
+independent 30-day mailbox session. All routes below are under
+`/api/v1/subscriptions` and documented in the service OpenAPI schema.
+
+| Method and route | Behavior |
+| --- | --- |
+| `GET /capabilities` | Whether following is exposed, the applicable stable event codes and allowed queue thresholds. |
+| `POST /challenge` | Queues an email code and returns `challenge_id`. It expires after 10 minutes and permits five verification attempts. |
+| `POST /verify` | Accepts `challenge_id`, `code` and optional `target: {kind, uid}`. Sets the email session and follows the optional target with defaults. |
+| `GET /session`, `POST /logout` | Read the masked address and the CSRF token, or close this browser session. Existing subscriptions continue. |
+| `GET /` (base path) | List the current mailbox's subscriptions and preferences. |
+| `GET /{kind}/{uid}`, `PUT /{kind}/{uid}`, `DELETE /{kind}/{uid}` | Read its summary, follow or update, or cancel. An empty PUT body uses the preset for a new follow and preserves existing preferences. An explicit body replaces preferences. |
+| `POST /unsubscribe` | Verifies a link token and idempotently cancels its subscription. The browser displays a confirmation page before making this request. |
+
+Write requests require the configured same origin. Session writes also require
+the `X-CSRF-Token` from the email session. Responses are private and use
+`Cache-Control: no-store`. The scoped cookie uses HttpOnly and SameSite Strict,
+with Secure when the configured origin uses HTTPS. On the current isolated PT
+HTTP endpoint, browser codes and sessions travel over plaintext HTTP. SMTP
+always uses certificate-verified TLS.
+
+Use `workload_uid` with `kind` for subscriptions. The optional additive field
+represents the verified Clusterx identity and is consistent across the Pending
+and running views. Preserve existing `workload_id` links. Replace settings
+with a JSON body such as `{"events":["job.failed","queue.wait"],"queue_minutes":30}`.
+An explicit empty events array keeps the task followed.
+
+Training jobs default to platform-confirmed `job.failed`. Running, completed
+and stopped are separate events. Pending alerts accept 30, 60 or 120 minutes
+and require a complete Pending inventory. AID and AIR expose supported policy
+and device signals without a default email event. GPU alerts require enough
+samples and full current GPU attribution for the selected metric; they use PT's
+effective low-activity policy and do not interpret missing data as idle.
+Explicit platform end times and observed rule transitions are delivered only
+after the corresponding preference was enabled. Duplicate events are collapsed,
+and recovered conditions can trigger again.
+
+Run the simulated HTTP, mail, lifecycle and privacy example with
+`python -m pytest -q tests/test_notifications.py`. It uses temporary private
+SQLite data, fake mailbox addresses and simulated SMTP. See the deployment guide
+for running the background worker in simulation mode.

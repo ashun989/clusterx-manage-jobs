@@ -1,3 +1,4 @@
+import { FollowActions, useSubscriptions } from "./Subscriptions";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { monitorApiUrl } from "./api";
 import { nodeByName, nodeNameWithInternal, nodePrimaryLabel, nodeSecondaryLabel } from "./nodeIdentity";
@@ -269,7 +270,7 @@ function WorkloadLogPanel({ workload, snapshotId }: { workload: Workload; snapsh
 function WorkloadDetail({ workload, snapshot, open, planFrom }: { workload: Workload; snapshot: Snapshot; open: (ref: DetailRef) => void; planFrom: (ref: DetailRef) => void }) {
   const pending = workload.policy_status === "pending";
   return <>
-    <span className="eyebrow">{workload.type}</span><h2>{workload.workload_name}</h2><DetailActions detailRef={{ kind: "workload", id: workload.workload_id, label: workload.workload_name }} planFrom={planFrom} consoleUrl={workload.console_url} workload /><p><button className="inline-link" type="button" onClick={() => open({ kind: "user", id: workload.user, label: workload.user })}>{workload.user}</button> · <button className="inline-link" type="button" onClick={() => open({ kind: "group", id: workload.group, label: workload.group })}>{workload.group}</button></p><span className={statusClass(workload.policy_status)}>{workload.policy_status}</span>
+    <span className="eyebrow">{workload.type}</span><h2>{workload.workload_name}</h2><DetailActions detailRef={{ kind: "workload", id: workload.workload_id, label: workload.workload_name }} planFrom={planFrom} consoleUrl={workload.console_url} workload /><FollowActions workload={workload} /><p><button className="inline-link" type="button" onClick={() => open({ kind: "user", id: workload.user, label: workload.user })}>{workload.user}</button> · <button className="inline-link" type="button" onClick={() => open({ kind: "group", id: workload.group, label: workload.group })}>{workload.group}</button></p><span className={statusClass(workload.policy_status)}>{workload.policy_status}</span>
     {workload.planning_eligible === false && <p className="banner">该 Workload 接触归属异常节点，不作为调度释放候选。</p>}
     <section className="detail-section placement-context-card"><h3>节点归属</h3><Metrics>
       <Metric label="节点归属" value={<PlacementBadge workload={workload} showOwner={false} />} />
@@ -363,7 +364,8 @@ function resolvedLabel(ref: DetailRef, value: ReturnType<typeof resolveDetail>) 
 export function DetailDrawer({ stack, snapshot, open, back, close, planFrom }: { stack: DetailRef[]; snapshot: Snapshot; open: (ref: DetailRef) => void; back: () => void; close: () => void; planFrom: (ref: DetailRef) => void }) {
   const ref = stack.at(-1);
   const drawer = useRef<HTMLElement>(null);
-  useDialogFocus(drawer, close, Boolean(ref));
+  const { panelOpen } = useSubscriptions();
+  useDialogFocus(drawer, close, Boolean(ref) && !panelOpen);
   if (!ref) return null;
   const value = resolveDetail(ref, snapshot);
   const label = resolvedLabel(ref, value);

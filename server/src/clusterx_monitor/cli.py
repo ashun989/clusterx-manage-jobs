@@ -95,6 +95,7 @@ def main() -> int:
     )
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--static-dir")
+    serve.add_argument("--notifications-dir", default=os.environ.get("CLUSTERX_MONITOR_NOTIFICATIONS_DIR"))
     args = parser.parse_args()
     if args.command == "admin":
         try:
@@ -136,12 +137,15 @@ def main() -> int:
             history_max_points=args.history_max_points,
             history_max_db_mib=args.history_max_db_mib,
         )
+        if args.notifications_dir:
+            from .notifications.store import Store
+            runtime.notifications = Store(args.notifications_dir)
         auth = AdminAuth(args.auth_config, allow_missing=True)
         app = create_app(
             runtime, static_dir=args.static_dir, auth=auth,
             allowed_hosts=trusted_hosts, allowed_origins=args.allowed_origin,
         )
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info", proxy_headers=False)
         return 0
     except (ImportError, OSError, RuntimeError, ValueError) as error:
         print(f"clusterx monitor failed: {error}", file=sys.stderr)

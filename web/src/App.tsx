@@ -1,3 +1,4 @@
+import { FollowActions, isFollowed, SubscriptionsProvider, useSubscriptions } from "./Subscriptions";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AdminPanel } from "./AdminPanel";
 import { GlobalSearch } from "./GlobalSearch";
@@ -515,6 +516,11 @@ function RulesPage({ response, snapshot, error }: { response: PolicyResponse | n
 }
 
 export default function App() {
+  return <SubscriptionsProvider><Dashboard /></SubscriptionsProvider>;
+}
+
+function Dashboard() {
+  const subs = useSubscriptions();
   const fallbackTab = (() => {
     const saved = import.meta.env.MODE === "test" ? null : window.localStorage.getItem("clusterx-monitor:tab:v1");
     return monitorTabs.includes(saved as Tab) ? saved as Tab : "overview";
@@ -526,7 +532,7 @@ export default function App() {
   const [adminOpen, setAdminOpen] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">(() => import.meta.env.MODE !== "test" && window.localStorage.getItem("clusterx-monitor:theme:v1") === "light" ? "light" : "dark");
-  const { tab, details, tableStates, nodeState, plannerIntent, trendRange } = navigation;
+  const { tab, details, tableStates, nodeState, plannerIntent, trendRange, onlyFollowed } = navigation;
 
   const commitNavigation = useCallback((next: NavigationState, mode: "push" | "replace", nextDetailDepth = detailDepth.current) => {
     detailDepth.current = nextDetailDepth;
@@ -586,6 +592,12 @@ export default function App() {
     const loadingMessages = [error, statusError, historyError, policyError, serviceStatus?.setup_required ? "服务处于 setup-required，请由管理员补全本地配置。" : "", serviceStatus?.snapshot.last_error, serviceStatus?.policy.error, serviceStatus?.policy.audit_error].filter(Boolean);
     return <main className="loading"><Brand compact version={serviceStatus?.version} /><div className="pulse" /><p>{loadingMessages.join(" · ") || "正在等待第一份完整快照…"}</p><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button>{adminOpen && <AdminPanel close={() => setAdminOpen(false)} onConfigured={() => { void refresh(); }} />}</main>;
   }
+  const taskRows = onlyFollowed && subs.enabled ? workloads.filter(workload => isFollowed(subs.following, workload)) : workloads;
+  const taskColumns: ColumnDef<Workload>[] = subs.enabled ? [
+    workloadColumns[0],
+    { key: "follow", label: "关注", kind: "text", sortable: false, value: row => isFollowed(subs.following, row) ? "已关注" : "", format: (_value, row) => <FollowActions workload={row} /> },
+    ...workloadColumns.slice(1),
+  ] : workloadColumns;
   const telemetryCoverage = snapshot.telemetry;
   const coverageMessages = [["compute", telemetryCoverage.compute_reported_gpu_count], ["memory", telemetryCoverage.memory_reported_gpu_count], ["power", telemetryCoverage.power_reported_gpu_count]].filter(([, count]) => Number(count) < telemetryCoverage.allocated_gpu_count).map(([metric, count]) => `${metric} 遥测覆盖 ${count}/${telemetryCoverage.allocated_gpu_count}`);
   const bannerMessages = [error, policyError, statusError, historyError, policy?.error, policy?.audit_error, serviceStatus?.policy.audit_error, serviceStatus?.snapshot.last_error, serviceStatus?.snapshot.history?.last_error ? `本地趋势历史降级：${serviceStatus.snapshot.history.last_error}` : "", serviceStatus?.setup_required ? "服务处于 setup-required" : "", serviceStatus?.skipped_refreshes ? `已跳过 ${serviceStatus.skipped_refreshes} 次刷新` : "", snapshot.policy_config?.error, ...snapshot.warnings, ...coverageMessages, snapshot.historical_telemetry_status === "unavailable" ? "历史 GPU 遥测不可用，低利用率规则本轮未评估" : ""].filter(Boolean);
@@ -643,7 +655,7 @@ export default function App() {
   const clearPlannerIntent = () => commitNavigation({ ...navigation, plannerIntent: null }, "replace");
   const tabLabels: Record<Tab, string> = { overview: "总览", groups: "分组", users: "用户", nodes: "节点", workloads: "Workload", alerts: "告警", planner: "调度模拟", rules: "规则" };
   return <div className="app">
-    <header className="app-header"><div className="brand-block"><Brand version={serviceStatus?.version} onHome={resetNavigation} /><span className="cluster-context">{snapshot.cluster} / {snapshot.queue}</span></div><GlobalSearch snapshot={snapshot} open={open} /><div className="header-actions"><div className={`connection connection-${connection}`}><span />{{ connecting: "正在连接", live: "实时", reconnecting: "重连中", polling: "轮询" }[connection]}</div><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="icon-button" disabled={refreshing} onClick={() => { void refresh(); }} aria-label="获取最新快照" title={lastSuccessfulAt ? `只获取后端已发布的最新快照；上次成功：${new Date(lastSuccessfulAt).toLocaleTimeString()}` : "只获取后端已发布的最新快照，不会触发后端立即采集"}>{refreshing ? "…" : "↻"}</button><button type="button" className="icon-button" onClick={() => { void copyCurrentView(); }} aria-label={linkCopied ? "已复制当前视图链接" : "复制当前视图链接"} title={linkCopied ? "已复制当前视图链接" : "复制当前视图链接"}>{linkCopied ? "✓" : <CopyLinkIcon />}</button><button type="button" className="icon-button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="切换明暗主题">{theme === "dark" ? "☼" : "☾"}</button><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
+    <header className="app-header"><div className="brand-block"><Brand version={serviceStatus?.version} onHome={resetNavigation} /><span className="cluster-context">{snapshot.cluster} / {snapshot.queue}</span></div><GlobalSearch snapshot={snapshot} open={open} /><div className="header-actions"><div className={`connection connection-${connection}`}><span />{{ connecting: "正在连接", live: "实时", reconnecting: "重连中", polling: "轮询" }[connection]}</div><FreshnessBadge snapshotId={snapshot.snapshot_id} freshness={snapshot.freshness} /><button type="button" className="icon-button" disabled={refreshing} onClick={() => { void refresh(); }} aria-label="获取最新快照" title={lastSuccessfulAt ? `只获取后端已发布的最新快照；上次成功：${new Date(lastSuccessfulAt).toLocaleTimeString()}` : "只获取后端已发布的最新快照，不会触发后端立即采集"}>{refreshing ? "…" : "↻"}</button><button type="button" className="icon-button" onClick={() => { void copyCurrentView(); }} aria-label={linkCopied ? "已复制当前视图链接" : "复制当前视图链接"} title={linkCopied ? "已复制当前视图链接" : "复制当前视图链接"}>{linkCopied ? "✓" : <CopyLinkIcon />}</button><button type="button" className="icon-button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="切换明暗主题">{theme === "dark" ? "☼" : "☾"}</button>{subs.enabled && <><button type="button" className="admin-entry" onClick={() => subs.open({ view: subs.email ? "list" : "login" })}>{subs.email ?? "邮箱登录"}</button><button type="button" className="admin-entry" onClick={() => subs.open({ view: "list" })}>我的关注</button></>}<button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button></div></header>
     {tab !== "overview" && <section className="cards"><article><span>绑定容量</span><strong>{number(snapshot.capacity.bound_gpu)}</strong><small>{number(snapshot.capacity.planning_eligible_gpu)} 可参与调度</small></article><article><span>已分配</span><strong>{number(snapshot.capacity.allocated_gpu)}</strong><small>{number(snapshot.capacity.free_gpu)} 空闲</small></article><article><span>Pending 压力</span><strong className={statusClass(snapshot.pending_pressure.state)}>{String(snapshot.pending_pressure.state)}</strong><small>{number(snapshot.pending_pressure.eligible_jobs)} 个有效排队任务</small></article><article><span>GPU 功率占比</span><strong>{formatPowerPercent(snapshot.telemetry.gpu_power_util_avg_pct)}</strong><small>{snapshot.telemetry.power_reported_gpu_count}/{snapshot.telemetry.allocated_gpu_count} 已覆盖 · {snapshot.telemetry_status ?? "unknown"}</small></article></section>}
     {bannerMessages.length > 0 && <div className="banner">{bannerMessages.join(" · ")}</div>}
     <section className="workspace"><div className="main-panel"><nav aria-label="Monitor 主导航">{monitorTabs.map((name) => <button aria-label={name} className={tab === name ? "active" : ""} key={name} onClick={() => navigateTab(name)}>{tabLabels[name]}{name === "alerts" && snapshot.alerts.length > 0 && <span className="nav-count">{snapshot.alerts.length}</span>}</button>)}</nav>
@@ -651,7 +663,16 @@ export default function App() {
       {tab === "groups" && <DataTable rows={snapshot.groups} columns={groupColumns} state={tableStates.groups} onState={(state) => updateTable("groups", state)} rowKey={(row) => row.group} rowLabel={(row) => row.group} onRow={(row) => open({ kind: "group", id: row.group, label: row.group })} />}
       {tab === "users" && <DataTable rows={snapshot.users} columns={userColumns} state={tableStates.users} onState={(state) => updateTable("users", state)} rowKey={(row) => row.user} rowLabel={(row) => row.user} onRow={(row) => open({ kind: "user", id: row.user, label: row.user })} />}
       {tab === "nodes" && <NodeHeatmap nodes={snapshot.nodes} allocationEnabled={snapshot.node_allocation?.enabled === true} state={nodeState} onState={updateNodeState} onNode={(row) => open({ kind: "node", id: row.node, label: row.node })} />}
-      {tab === "workloads" && <DataTable rows={workloads} columns={workloadColumns} state={tableStates.workloads} onState={(state) => updateTable("workloads", state)} rowKey={(row) => row.workload_id} rowLabel={(row) => row.workload_name} onRow={(row) => open(workloadRef(row))} />}
+      {tab === "workloads" && <>
+        {subs.enabled && <div className="subscription-toolbar">
+          <button type="button" aria-pressed={onlyFollowed} onClick={() => {
+            commitNavigation({ ...navigation, onlyFollowed: !onlyFollowed }, "replace");
+            if (!onlyFollowed && subs.ready && !subs.email) subs.open({ view: "login" });
+          }}>只看已关注</button>
+          {onlyFollowed && !subs.email && <span className="muted">{subs.ready ? "登录邮箱后查看已关注的任务。" : "正在读取邮箱会话…"}</span>}
+        </div>}
+        {(!onlyFollowed || !subs.enabled || subs.email) && <DataTable rows={taskRows} columns={taskColumns} state={tableStates.workloads} onState={(state) => updateTable("workloads", state)} rowKey={(row) => row.workload_id} rowLabel={(row) => row.workload_name} onRow={(row) => open(workloadRef(row))} />}
+      </>}
       {tab === "alerts" && <DataTable rows={snapshot.alerts} columns={alertColumns(snapshot.nodes)} state={tableStates.alerts} onState={(state) => updateTable("alerts", state)} rowKey={(row, index) => `${alertIdentity(row)}:${index}`} rowLabel={(row) => row.subject_type === "node" ? nodeNameWithInternal(snapshot.nodes, row.subject) : row.subject} onRow={(row) => open({ kind: "alert", id: alertIdentity(row), label: row.subject_type === "node" ? nodeNameWithInternal(snapshot.nodes, row.subject) : row.subject })} />}
       {tab === "planner" && <SchedulerPanel snapshot={snapshot} plan={plan} onResult={setPlan} onWorkload={(workload) => open(workloadRef(workload))} intent={plannerIntent} clearIntent={clearPlannerIntent} />}
       {tab === "rules" && <RulesPage response={policy} snapshot={snapshot} error={policyError} />}

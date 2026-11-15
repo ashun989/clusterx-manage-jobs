@@ -81,6 +81,7 @@ export type HistoricalTelemetry = {
 
 export type Workload = FindingFacets & {
   workload_id: string;
+  workload_uid?: string | null;
   workload_name: string;
   resource_name?: string;
   user: string;

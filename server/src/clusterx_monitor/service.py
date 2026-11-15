@@ -87,6 +87,7 @@ class MonitorRuntime:
         configured_solver_workers()
         self.collector = collector
         self.policy = policy
+        self.notifications = None
         self.history_init_error: str | None = None
         persistent_history = None
         if history_db is not None:
@@ -176,6 +177,16 @@ class MonitorRuntime:
                 return self.collector.collect(**kwargs)
         return await asyncio.wait_for(asyncio.to_thread(invoke), timeout=self.collection_deadline_seconds)
 
+    async def publish_snapshot(self, snapshot, policy) -> None:
+        await asyncio.to_thread(self.snapshots.publish, snapshot)
+        if self.notifications is not None and self.notifications.advertised:
+            try:
+                await asyncio.to_thread(self.notifications.observe, snapshot, policy)
+            except Exception as error:
+                logger.warning("subscription observation failed: %s", type(error).__name__)
+        async with self.snapshot_event:
+            self.snapshot_event.notify_all()
+
     async def refresh(self) -> None:
         if self.collecting:
             self.skipped_refreshes += 1
@@ -195,10 +206,8 @@ class MonitorRuntime:
                 self.config_changed.set()
                 return
             snapshot = self._apply_policy(raw, policy)
-            await asyncio.to_thread(self.snapshots.publish, snapshot)
+            await self.publish_snapshot(snapshot, policy)
             self.metrics["collection_success_total"] += 1
-            async with self.snapshot_event:
-                self.snapshot_event.notify_all()
         except asyncio.TimeoutError:
             self.metrics["collection_timeout_total"] += 1
             self.metrics["collection_failure_total"] += 1
@@ -217,9 +226,7 @@ class MonitorRuntime:
                     raw.setdefault("warnings", []).append(
                         "node allocation changed during the first collection; one retry was used"
                     )
-                    await asyncio.to_thread(self.snapshots.publish, self._apply_policy(raw, policy))
-                    async with self.snapshot_event:
-                        self.snapshot_event.notify_all()
+                    await self.publish_snapshot(self._apply_policy(raw, policy), policy)
                     self.metrics["collection_success_total"] += 1
                     return
                 except Exception as retry_error:
@@ -381,6 +388,7 @@ class RequestBodyLimitMiddleware:
         method = str(scope.get("method") or "GET").upper()
         limit = (
             1_048_576 if path.startswith("/api/v1/admin/") and method in {"POST", "PUT", "PATCH"}
+            else 4096 if path.startswith("/api/v1/subscriptions") and method in {"POST", "PUT", "DELETE"}
             else 262_144 if path == "/api/v1/plans" and method == "POST"
             else None
         )
@@ -438,6 +446,9 @@ def create_app(
                 pass
 
     app = FastAPI(title="Clusterx Monitor", version=__version__, lifespan=lifespan)
+    if runtime.notifications is not None:
+        from .notifications.http import router as subscription_router
+        app.include_router(subscription_router(runtime.notifications, runtime))
     app.add_middleware(RequestBodyLimitMiddleware)
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.add_middleware(
@@ -510,6 +521,7 @@ def create_app(
         if (
             request.url.path.startswith("/api/v1/admin/")
             or request.url.path.startswith("/api/v1/workloads/")
+            or request.url.path.startswith("/api/v1/subscriptions")
         ):
             response.headers["Cache-Control"] = "no-store"
         if request.url.scheme == "https":
