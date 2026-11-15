@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, Security
 from fastapi.security import APIKeyCookie
 from pydantic import BaseModel, ConfigDict, Field
 
-from .rules import KINDS, QUEUE_MINUTES, RULES, UID, default_events, identity, key_for
+from .rules import QUEUE_MINUTES, RULES, UID, default_events, identity, key_for
 from .store import API, COOKIE, SESSION_TTL, RateLimit, email_address
 
 

@@ -13,7 +13,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Coroutine, Literal
+from typing import Any, AsyncIterator, Callable, Coroutine, Literal, TYPE_CHECKING
 from urllib.parse import unquote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -38,6 +38,9 @@ from .planning.cp_sat import configured_solver_workers
 from .planning.domain import MODEL_VERSION as PLANNER_MODEL_VERSION
 from .policy import ConfigConflictError, PolicyManager, apply_policy
 from .store import PlanCache, SnapshotStore, SQLiteHistoryStore
+
+if TYPE_CHECKING:
+    from .notifications.store import Store as NotificationStore
 
 logger = logging.getLogger("clusterx_monitor")
 
@@ -87,7 +90,7 @@ class MonitorRuntime:
         configured_solver_workers()
         self.collector = collector
         self.policy = policy
-        self.notifications = None
+        self.notifications: NotificationStore | None = None
         self.history_init_error: str | None = None
         persistent_history = None
         if history_db is not None:
