@@ -668,6 +668,13 @@ tr.clickable:hover, tr.clickable:focus { background: var(--surface-hover); }
   .data-table .telemetry-cell { justify-content: end; white-space: normal; }
 }
 
+.workload-follow-actions { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
+.workload-follow-actions .icon-button { width: 27px; height: 27px; border-radius: 6px; background: transparent; }
+.workload-follow-actions .icon-button:hover:not(:disabled) { background: var(--surface-soft); color: var(--text); }
+.workload-follow-actions .icon-button svg { width: 14px; height: 14px; }
+.workload-follow-actions .icon-button[aria-pressed="true"] { color: var(--accent); }
+.workload-follow-actions .icon-button[aria-pressed="true"] svg { fill: currentColor; }
+
 .subscription-actions, .subscription-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .subscription-actions { white-space: nowrap; }
 .subscription-toolbar { padding: 9px 12px 0; }

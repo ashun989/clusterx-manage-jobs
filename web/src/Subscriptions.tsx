@@ -315,10 +315,15 @@ export function FollowActions({ workload }: { workload: Workload }) {
   const target = followTarget(workload);
   if (!target) return <small className="muted">任务 UID 暂不可用</small>;
   const followed = following.has(key(target));
-  return <span className="subscription-actions" onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
-    <button type="button" aria-label={`${followed ? "取消关注" : "关注"} ${target.name}`} aria-pressed={followed} disabled={!ready || busy}
-      onClick={() => toggle(target)}>{followed ? "★ 已关注" : "☆ 关注"}</button>
-    <button type="button" aria-label={`提醒设置 ${target.name}`} disabled={!ready || busy} onClick={() => open({ view: "settings", target })}>提醒设置</button>
+  return <span className="workload-follow-actions" onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
+    <button type="button" className="icon-button" aria-label={`${followed ? "取消关注" : "关注"} ${target.name}`}
+      title={followed ? "已关注，点击取消" : "关注任务"} aria-pressed={followed} disabled={!ready || busy} onClick={() => toggle(target)}>
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3-4.6-4.5 6.3-.9L12 3Z" /></svg>
+    </button>
+    <button type="button" className="icon-button" aria-label={`提醒设置 ${target.name}`} title="提醒设置"
+      disabled={!ready || busy} onClick={() => open({ view: "settings", target })}>
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-2.5 7.5-2.5 9h17C20.5 15.5 18 15 18 8ZM10 20a2 2 0 0 0 4 0" /></svg>
+    </button>
   </span>;
 }
 

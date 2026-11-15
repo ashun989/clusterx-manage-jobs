@@ -212,12 +212,15 @@ describe("Clusterx monitor dashboard", () => {
     render(<App />);
     const follow = await screen.findByRole("button", { name: /^关注 train-a$/ });
     await waitFor(() => expect(follow).toBeEnabled());
+    expect(follow).toHaveAttribute("title", "关注任务");
+    expect(follow.textContent).toBe("");
+    expect(screen.getByRole("button", { name: "提醒设置 train-a" })).toHaveAttribute("title", "提醒设置");
     fireEvent.click(follow);
     fireEvent.change(screen.getByLabelText("PJLab 邮箱"), { target: { value: "alice@pjlab.org.cn" } });
     fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
     fireEvent.change(await screen.findByLabelText("邮箱验证码"), { target: { value: "123456" } });
     fireEvent.click(screen.getByRole("button", { name: "验证并关注" }));
-    await screen.findByRole("button", { name: "取消关注 train-a" });
+    expect(await screen.findByRole("button", { name: "取消关注 train-a" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByRole("button", { name: "关闭邮箱面板" }));
     fireEvent.click(screen.getByRole("button", { name: /^关注 train-b$/ }));
     await screen.findByRole("button", { name: "取消关注 train-b" });
