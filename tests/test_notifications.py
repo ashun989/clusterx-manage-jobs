@@ -122,7 +122,7 @@ class NotificationTests(unittest.TestCase):
         now[0] += 60
         challenge = store.challenge(EMAIL, "127.0.0.1")
         token, _, _ = store.verify(challenge, store.code(challenge), None)
-        restarted = Store(tmp_path, clock=lambda: now[0])
+        restarted = Store(self.folder, clock=lambda: now[0])
         assert restarted.session(token) == EMAIL
         now[0] += 30 * 86400
         assert restarted.session(token) is None
