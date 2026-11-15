@@ -129,6 +129,7 @@ let adminResourceText: string;
 let adminGroupsRevision: string;
 let logContent: string;
 let logError: string;
+let serviceVersion: string;
 const adminGroupsText = "schema_version: 1\ngroups:\n  group-a:\n    gpu_quota: 16\n    members: [alice]\n  default:\n    gpu_quota: remainder\n    members: []\n";
 
 class FakeEventSource {
@@ -148,6 +149,7 @@ describe("Clusterx monitor dashboard", () => {
     adminGroupsRevision = "group-r1";
     logContent = "first log line\nsecond log line";
     logError = "";
+    serviceVersion = "2.1.3";
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -164,7 +166,7 @@ describe("Clusterx monitor dashboard", () => {
         const url = new URL(path, "http://monitor.test");
         return { ok: true, status: 200, json: async () => ({ snapshot_id: url.searchParams.get("snapshot_id"), workload_id: "workload-a", worker: url.searchParams.get("worker"), lines: 200, content: logContent }) };
       }
-      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: "2.1.3", snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
+      if (path.endsWith("/status")) return { ok: true, status: 200, json: async () => ({ service: "clusterx-monitor", version: serviceVersion, snapshot: { available: true, stale: false, age_seconds: 3, last_error: null }, collector: { running: true, skipped_refreshes: 0 }, policy: { valid: true, using_last_known_good: false, error: null, audit_error: null, setup_required: false } }) };
       if (path.includes("/history?")) return { ok: true, status: 200, json: async () => ({ retained_snapshots: 2, history_capacity: 2880, window_started_at: "2026-08-14T00:59:30Z", newest_at: "2026-08-14T01:00:00Z", points: [
         { snapshot_id: "snapshot-0", generated_at: "2026-08-14T00:59:30Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 10, free_gpu: 502, pending_workloads: 1, pending_eligible_jobs: 0, alert_count: 1, critical_alert_count: 0, gpu_compute_util_avg_pct: 65, gpu_memory_util_avg_pct: 60, gpu_power_total_w: 3200, node_classifications: { fragmented: 1, "gpu-full": 1 } },
         { snapshot_id: "snapshot-1", generated_at: "2026-08-14T01:00:00Z", bound_gpu: 512, planning_eligible_gpu: 512, allocated_gpu: 12, free_gpu: 500, pending_workloads: 0, pending_eligible_jobs: 0, alert_count: 2, critical_alert_count: 1, gpu_compute_util_avg_pct: 70, gpu_memory_util_avg_pct: 65, gpu_power_total_w: 3600, node_classifications: { fragmented: 1, "gpu-full": 1 } },
@@ -303,6 +305,22 @@ describe("Clusterx monitor dashboard", () => {
     expect(screen.getByText(/Pending workload 覆盖 training job、开发机和部署任务/)).toBeInTheDocument();
     expect(screen.getByText(/冷启动节点分配建议考虑已知 pending GPU、CPU 和内存总需求/)).toBeInTheDocument();
     expect(screen.getByText(/CPU-only 与 memory-only 运行任务/)).toBeInTheDocument();
+  });
+
+  it("opens and dismisses the v2.3.0 subscription release notes", async () => {
+    serviceVersion = "2.3.0";
+    render(<App />);
+    const summary = await screen.findByLabelText("查看 v2.3.0 更新内容");
+    const disclosure = summary.closest("details");
+    expect(disclosure).not.toHaveAttribute("open");
+
+    fireEvent.click(summary);
+    expect(disclosure).toHaveAttribute("open");
+    expect(within(disclosure!).getByText(/一键关注默认仅提醒明确失败/)).toBeVisible();
+    expect(within(disclosure!).getByText(/点铃铛设置提醒/)).toBeVisible();
+
+    fireEvent.keyDown(summary, { key: "Escape" });
+    expect(disclosure).not.toHaveAttribute("open");
   });
 
   it("provides an operational overview and global entity search", async () => {

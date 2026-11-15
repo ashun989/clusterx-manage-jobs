@@ -24,6 +24,12 @@ const dateTime = (value: string | null | undefined) => {
   return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
 };
 const releaseNotes: Record<string, string[]> = {
+  "2.3.0": [
+    "使用 PJLab 邮箱登录，浏览器记住会话 30 天。看板可直接浏览。",
+    "Workload 列表和详情可通过星标关注或取消关注，点铃铛设置提醒。列表可筛选「只看已关注」。",
+    "一键关注默认仅提醒明确失败。可另外订阅开跑、完成、排队超时及适用的 GPU 和规则提醒。",
+    "邮件提供任务状态摘要和单个任务的确认退订链接。",
+  ],
   "2.2.2": [
     "调度模拟支持 0 GPU 的 Pending Workload，保留 CPU 与内存请求画像并按资源占用生成协调方案。",
   ],
