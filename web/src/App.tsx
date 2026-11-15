@@ -587,7 +587,12 @@ function Dashboard() {
 
   useEffect(() => { if (import.meta.env.MODE !== "test") window.localStorage.setItem("clusterx-monitor:tab:v1", tab); }, [tab]);
   useEffect(() => { document.documentElement.dataset.theme = theme; if (import.meta.env.MODE !== "test") window.localStorage.setItem("clusterx-monitor:theme:v1", theme); }, [theme]);
-  const workloads = useMemo(() => snapshot ? [...snapshot.workloads, ...(snapshot.pending_workloads ?? [])] : [], [snapshot]);
+  const workloads = useMemo(() => {
+    if (!snapshot) return [];
+    const active = new Set(snapshot.workloads.filter(row => row.workload_uid).map(row => `${row.type}:${row.workload_uid}`));
+    const pending = (snapshot.pending_workloads ?? []).filter(row => !row.workload_uid || !active.has(`${row.type}:${row.workload_uid}`));
+    return [...snapshot.workloads, ...pending];
+  }, [snapshot]);
   if (!snapshot) {
     const loadingMessages = [error, statusError, historyError, policyError, serviceStatus?.setup_required ? "服务处于 setup-required，请由管理员补全本地配置。" : "", serviceStatus?.snapshot.last_error, serviceStatus?.policy.error, serviceStatus?.policy.audit_error].filter(Boolean);
     return <main className="loading"><Brand compact version={serviceStatus?.version} /><div className="pulse" /><p>{loadingMessages.join(" · ") || "正在等待第一份完整快照…"}</p><button type="button" className="admin-entry" onClick={() => setAdminOpen(true)}>管理员配置</button>{adminOpen && <AdminPanel close={() => setAdminOpen(false)} onConfigured={() => { void refresh(); }} />}</main>;

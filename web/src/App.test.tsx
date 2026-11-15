@@ -177,6 +177,7 @@ describe("Clusterx monitor dashboard", () => {
   it("follows from the task list, saves individual events, and filters immediately after unfollowing", async () => {
     window.history.replaceState({}, "", "/?view=workloads");
     latestSnapshot.workloads.forEach(row => { row.workload_uid = row.workload_id; });
+    latestSnapshot.pending_workloads = [{ ...latestSnapshot.workloads[0], workload_id: "old-queue-id", policy_status: "pending" }];
     const fetchMock = vi.mocked(fetch);
     const fallback = fetchMock.getMockImplementation()!;
     let signedIn = false;
