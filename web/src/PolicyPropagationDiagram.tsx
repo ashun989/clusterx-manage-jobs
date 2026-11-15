@@ -36,7 +36,7 @@ const nodes: FlowNode[] = [
   { id: "summary-status", x: 670, y: 262, width: 258, height: 100, title: "User / Group summary", detail: ["workload findings → user", "quota findings → group + user", "节点归属 badge 使用同一上下文"], tone: "propagation" },
   { id: "alerts", x: 670, y: 416, width: 258, height: 100, title: "Alerts & filters", detail: ["subject = stable workload_id", "warning / error + finding facets", "category / code / tag 可筛选"], tone: "propagation" },
 
-  { id: "boundary", x: 978, y: 108, width: 232, height: 248, title: "Evaluation boundary", detail: ["Pending Workload", "不产生 placement finding。", "", "foreign 不等于 quota_borrowed：", "有本组余量 → outside_owned_pool；", "quota 满额 → quota_borrowed；", "owner pressure active 时升级 violation。"], tone: "warning" },
+  { id: "boundary", x: 978, y: 108, width: 232, height: 248, title: "Evaluation boundary", detail: ["Pending Workload", "不产生 placement finding。", "", "所有 foreign 都产生 finding：", "quota 可覆盖 → outside_owned_pool；", "quota 不足 → quota_borrowed；", "owner pressure active 时升级 violation。"], tone: "warning" },
 ];
 
 const edges: FlowEdge[] = [

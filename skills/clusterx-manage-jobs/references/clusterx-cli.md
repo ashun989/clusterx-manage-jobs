@@ -68,6 +68,7 @@ The positional argument is the command to run. The verified option surface is:
 | `--image` | Container image | config/default |
 | `--mount`, `--empty-mount` | Repeatable volume mount | config/default |
 | `--shm-size-gib` | Shared memory | `64` |
+| `--storage-ak-id`, `--storage-ak-secret` | Storage credentials | config/default |
 
 When `CLUSTERX_MONITOR_URL` is configured, the Skill wrapper performs an
 advisory group-node check before `run`. Pass `--cluster-user <name>` before the
@@ -78,7 +79,12 @@ name is the caller-supplied Clusterx identity and is never inferred from
 If the Monitor reports node allocation disabled, the wrapper skips node
 recommendations and treats the queue as fully accessible. The wrapper never
 rewrites `--include` or `--exclude`.
-| `--storage-ak-id`, `--storage-ak-secret` | Storage credentials | config/default |
+
+For SSP, these placement filters use the lowercase Kubernetes hostname rather
+than the ECP node name. Monitor exposes it as `hostname`; a valid IPv4 address
+is converted deterministically (`10.140.62.215` → `host-10-140-62-215`). Keep
+ECP node names as Monitor allocation/configuration identities and do not pass
+them to `--include` or `--exclude`.
 
 Clusterx `2026.8.19` joins positional command tokens without shell quoting.
 Never submit `bash -c`, `bash -lc`, `sh -c`, or equivalent command-string forms.
@@ -92,10 +98,17 @@ showing a preview.
 When the user explicitly requested submission and the preview matches that
 request, execute it directly. Do not ask for a redundant confirmation.
 
-### Training CPU policy
+### Training CPU policy and memory
 
-`clusterx-exec` hard-validates the public policy before invoking
-`clusterx run`. For a GPU task, the inclusive per-task limit is:
+When `CLUSTERX_MONITOR_URL` is set, `clusterx-exec` reads the public policy
+from the Monitor and uses its effective values when available. Otherwise it
+falls back to `CLUSTERX_RESOURCE_POLICY` or the bundled policy; an explicit
+`--resource-policy` always takes precedence. A policy response is effective
+when it has a policy object and either `valid` or `using_last_known_good` is
+true. Query failure or an invalid response uses the local fallback and is
+reported on stderr.
+
+For a GPU task, the inclusive per-task CPU limit is:
 
 ```text
 cpus_per_task <= gpus_per_task * cpu_per_gpu
@@ -107,10 +120,12 @@ For a 0-GPU task it is:
 cpus_per_task <= zero_gpu_max_cpu_per_node
 ```
 
-The shipped policy sets both factors to 14, so 0 GPU / 14 CPU, 1 GPU / 14 CPU,
-and 8 GPU / 112 CPU are allowed. Node count never multiplies the per-task
-limit. The wrapper option `--resource-policy` overrides
-`CLUSTERX_RESOURCE_POLICY`, which overrides `assets/resource-policy.json`.
+Memory limits use `memory_gib_per_gpu` for GPU tasks and
+`zero_gpu_max_memory_gib_per_node` for 0-GPU tasks. Unitless
+`--memory-per-task` values are interpreted as GiB by the wrapper; explicit
+memory suffixes are normalized to GiB for comparison. Node count never
+multiplies per-task limits. The wrapper option `--resource-policy` overrides
+Monitor policy, followed by `CLUSTERX_RESOURCE_POLICY` and the bundled policy.
 
 ### A3 logical supernodes
 
@@ -198,7 +213,8 @@ Candidate filters include repeated `--type`, `--group`, `--user`, `--workload`,
 `--finding-code`, `--finding-tag`, and `--over-quota-only`. Plan node
 candidate scope is controlled independently with
 `--candidate-node-scope all|selected_group_nodes|other_group_nodes`; the two
-group-relative values require selected repeated `--group` filters. Workload
+group-relative values require repeated `--node-group` options. `--group` filters
+candidate Workloads independently. Workload
 placement scope is controlled with
 `--placement-relation any|owned_only|foreign_only|mixed|includes_foreign`.
 List views use
@@ -246,7 +262,7 @@ before/after inventories, so a partial or mixed-time node list is never
 published as a snapshot.
 
 When CPU or memory is omitted, the service resolves it from the planning
-profile stored in that exact snapshot (by default 14 CPU and 240 GiB per GPU).
+profile stored in that exact snapshot (by default 14 CPU and 120 GiB per GPU).
 Explicit CPU/memory overrides the profile. The response exposes both requested
 and resolved targets plus the defaults applied. This planning profile is not a
 minimum submission rule: training CPU/memory ratios remain inclusive maxima.

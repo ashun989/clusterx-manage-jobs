@@ -30,14 +30,14 @@ class DevelopmentConfig(FrozenModel):
 
 class TrainingConfig(FrozenModel):
     cpu_per_gpu: float = Field(default=14, gt=0, le=1024)
-    memory_gib_per_gpu: float = Field(default=240, gt=0, le=16384)
+    memory_gib_per_gpu: float = Field(default=120, gt=0, le=16384)
     zero_gpu_max_cpu_per_node: float = Field(default=14, gt=0, le=4096)
     zero_gpu_max_memory_gib_per_node: float = Field(default=240, gt=0, le=65536)
 
 
 class PlanningConfig(FrozenModel):
     default_cpu_per_gpu: float = Field(default=14, gt=0, le=1024)
-    default_memory_gib_per_gpu: float = Field(default=240, gt=0, le=16384)
+    default_memory_gib_per_gpu: float = Field(default=120, gt=0, le=16384)
 
 
 class LowUtilizationConfig(FrozenModel):
@@ -150,14 +150,25 @@ class PolicyConfig(FrozenModel):
 
 class PlanTarget(FrozenModel):
     nodes: int = Field(ge=1, le=1024)
-    gpus_per_node: int = Field(default=8, ge=1, le=1024)
+    gpus_per_node: int = Field(default=8, ge=0, le=1024)
     cpus_per_node: float | None = Field(default=None, gt=0, le=1_000_000)
     memory_per_node_gib: float | None = Field(default=None, gt=0, le=10_000_000)
+
+    @model_validator(mode="after")
+    def validate_nonempty_resource_request(self) -> "PlanTarget":
+        if (
+            self.gpus_per_node == 0
+            and self.cpus_per_node is None
+            and self.memory_per_node_gib is None
+        ):
+            raise ValueError("a zero-GPU target must request CPU or memory")
+        return self
 
 
 class PlanFilters(FrozenModel):
     workload_types: tuple[str, ...] = ()
     groups: tuple[str, ...] = ()
+    node_owner_groups: tuple[str, ...] = ()
     users: tuple[str, ...] = ()
     workloads: tuple[str, ...] = ()
     exclude_workloads: tuple[str, ...] = ()
@@ -209,7 +220,7 @@ class PlanRequest(FrozenModel):
 
     @model_validator(mode="after")
     def validate_candidate_size(self) -> "PlanRequest":
-        for field_name in ("workload_types", "groups", "users", "workloads", "exclude_workloads", "exclude_users", "finding_categories", "finding_codes", "finding_tags"):
+        for field_name in ("workload_types", "groups", "node_owner_groups", "users", "workloads", "exclude_workloads", "exclude_users", "finding_categories", "finding_codes", "finding_tags"):
             values = getattr(self.filters, field_name)
             if len(values) > 1000 or any(len(str(value)) > 256 for value in values):
                 raise ValueError(f"filters.{field_name} is too large")
@@ -217,8 +228,8 @@ class PlanRequest(FrozenModel):
 
     @model_validator(mode="after")
     def validate_candidate_node_scope(self) -> "PlanRequest":
-        if self.filters.candidate_node_scope != "all" and not self.filters.groups:
+        if self.filters.candidate_node_scope != "all" and not self.filters.node_owner_groups:
             raise ValueError(
-                "filters.groups is required when candidate_node_scope is not all"
+                "filters.node_owner_groups is required when candidate_node_scope is not all"
             )
         return self

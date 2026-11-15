@@ -6,7 +6,7 @@ export type MonitorTab = TableTab | "overview" | "nodes" | "planner" | "rules";
 /** Trend range is stored as an integer number of seconds. */
 export type TrendRange = number;
 export type NodeSortKey = "allocated_gpu" | "effective_free_gpu" | "stranded_gpu" | "gpu_util" | "gpu_mem" | "power";
-export type NodeViewState = { classifications: string[]; states: string[]; sort: NodeSortKey | null; direction: "asc" | "desc" };
+export type NodeViewState = { groups: string[]; classifications: string[]; states: string[]; sort: NodeSortKey | null; direction: "asc" | "desc" };
 export type PlannerIntent = {
   sourceKind: DetailKind;
   sourceId: string;
@@ -18,7 +18,10 @@ export type PlannerIntent = {
   memoryTotalGib: number | null;
   targetNodes: string[];
   scope: "fragmented" | "full" | "all";
+  /** Candidate Workload's attributed group filter. */
   groups: string[];
+  /** Effective owner groups used for group-relative node scopes. */
+  nodeGroups: string[];
   users: string[];
   workloads: string[];
   workloadTypes: string[];
@@ -27,6 +30,7 @@ export type PlannerIntent = {
 export type NavigationState = {
   tab: MonitorTab;
   details: DetailRef[];
+  onlyFollowed: boolean;
   tableStates: Record<TableTab, TableState>;
   nodeState: NodeViewState;
   plannerIntent: PlannerIntent | null;
@@ -132,13 +136,14 @@ function readTrendRange(raw: string | null): TrendRange {
 export const emptyNavigationState = (tab: MonitorTab = "overview"): NavigationState => ({
   tab,
   details: [],
+  onlyFollowed: false,
   tableStates: {
     groups: emptyTableState(),
     users: emptyTableState(),
     workloads: emptyTableState(),
     alerts: emptyTableState(),
   },
-  nodeState: { classifications: [], states: [], sort: null, direction: "desc" },
+  nodeState: { groups: [], classifications: [], states: [], sort: null, direction: "desc" },
   plannerIntent: null,
   trendRange: DEFAULT_TREND_RANGE_SECONDS,
 });
@@ -148,14 +153,21 @@ function positiveNumber(params: URLSearchParams, key: string): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+function nonNegativeNumber(params: URLSearchParams, key: string): number | null {
+  const raw = params.get(key);
+  if (raw === null || raw.trim() === "") return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
 function readPlannerIntent(params: URLSearchParams): PlannerIntent | null {
   const source = params.get("plan.source") ?? "";
   const separator = source.indexOf(":");
   const sourceKind = source.slice(0, separator) as DetailKind;
   const sourceId = source.slice(separator + 1);
   const nodes = positiveNumber(params, "plan.nodes");
-  const gpusPerNode = positiveNumber(params, "plan.gpus");
-  if (separator <= 0 || !detailKinds.includes(sourceKind) || !sourceId || !nodes || !gpusPerNode) return null;
+  const gpusPerNode = nonNegativeNumber(params, "plan.gpus");
+  if (separator <= 0 || !detailKinds.includes(sourceKind) || !sourceId || !nodes || gpusPerNode === null) return null;
   const requestedScope = params.get("plan.scope");
   return {
     sourceKind,
@@ -168,7 +180,8 @@ function readPlannerIntent(params: URLSearchParams): PlannerIntent | null {
     memoryTotalGib: positiveNumber(params, "plan.memory"),
     targetNodes: params.getAll("plan.target"),
     scope: requestedScope === "full" || requestedScope === "all" ? requestedScope : "fragmented",
-    groups: params.getAll("plan.group"),
+    groups: params.getAll("plan.workload-group"),
+    nodeGroups: params.getAll("plan.node-group"),
     users: params.getAll("plan.user"),
     workloads: params.getAll("plan.workload"),
     workloadTypes: params.getAll("plan.type"),
@@ -218,8 +231,10 @@ export function readNavigationState(fallbackTab: MonitorTab = "overview", previo
   return {
     tab,
     details: readDetails(params),
+    onlyFollowed: params.get("followed") === "true",
     tableStates: Object.fromEntries(tableTabs.map((name) => [name, readTableState(params, name, previous?.tableStates[name])])) as Record<TableTab, TableState>,
     nodeState: {
+      groups: params.getAll("node.group"),
       classifications: params.getAll("node.class"),
       states: params.getAll("node.state"),
       sort: sort && nodeSortKeys.includes(sort) ? sort : null,
@@ -234,6 +249,9 @@ export function navigationUrl(state: NavigationState): string {
   const url = new URL(window.location.href);
   const params = new URLSearchParams();
   params.set("view", state.tab);
+  if (state.onlyFollowed) params.set("followed", "true");
+  const followTask = url.searchParams.get("followTask");
+  if (followTask) params.set("followTask", followTask);
   if (state.trendRange !== DEFAULT_TREND_RANGE_SECONDS) params.set("range", trendRangeUrlValue(state.trendRange));
   for (const tab of tableTabs) {
     const table = state.tableStates[tab];
@@ -243,6 +261,7 @@ export function navigationUrl(state: NavigationState): string {
       [...values].sort().forEach((value) => params.append(`f.${tab}.${key}`, value));
     }
   }
+  state.nodeState.groups.slice().sort().forEach((value) => params.append("node.group", value));
   state.nodeState.classifications.slice().sort().forEach((value) => params.append("node.class", value));
   state.nodeState.states.slice().sort().forEach((value) => params.append("node.state", value));
   if (state.nodeState.sort) params.set("node.sort", `${state.nodeState.sort}:${state.nodeState.direction}`);
@@ -257,7 +276,8 @@ export function navigationUrl(state: NavigationState): string {
     if (intent.memoryTotalGib != null) params.set("plan.memory", String(intent.memoryTotalGib));
     if (intent.scope !== "fragmented") params.set("plan.scope", intent.scope);
     intent.targetNodes.forEach((value) => params.append("plan.target", value));
-    intent.groups.forEach((value) => params.append("plan.group", value));
+    intent.groups.forEach((value) => params.append("plan.workload-group", value));
+    intent.nodeGroups.forEach((value) => params.append("plan.node-group", value));
     intent.users.forEach((value) => params.append("plan.user", value));
     intent.workloads.forEach((value) => params.append("plan.workload", value));
     intent.workloadTypes.forEach((value) => params.append("plan.type", value));

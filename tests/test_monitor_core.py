@@ -27,6 +27,7 @@ from clusterx_monitor.collector import (
     _attach_telemetry,
     _available_transition,
     _list_queue_nodes,
+    _node_hostname,
     _node_signature,
     _pending_workloads,
     _priority,
@@ -34,6 +35,7 @@ from clusterx_monitor.collector import (
     _running_air_lifecycle,
     _running_training_lifecycle,
     _workload_console_url,
+    normalize_nodes,
     resource_number,
 )
 from clusterx_monitor.auth import AdminAuth, initialize_auth_config
@@ -857,16 +859,21 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(any(item["code"] == "placement.outside_owned_pool" for item in result["alerts"]))
 
         owned_full = apply_policy(snapshot([node("owned", 8), node("other", 1)], [item]), policy)
-        self.assertNotIn("placement.outside_owned_pool", owned_full["workloads"][0]["finding_codes"])
+        owned_full_finding = next(
+            finding for finding in owned_full["workloads"][0]["policy_findings"]
+            if finding["code"] == "placement.outside_owned_pool"
+        )
+        self.assertFalse(owned_full_finding["observed"]["owned_capacity_sufficient"])
 
         owned_cpu_blocked = apply_policy(
             snapshot([node("owned", 0, 112, 0), node("other", 1, 14, 240)], [item]),
             policy,
         )
-        self.assertNotIn(
-            "placement.outside_owned_pool",
-            owned_cpu_blocked["workloads"][0]["finding_codes"],
+        owned_cpu_blocked_finding = next(
+            finding for finding in owned_cpu_blocked["workloads"][0]["policy_findings"]
+            if finding["code"] == "placement.outside_owned_pool"
         )
+        self.assertFalse(owned_cpu_blocked_finding["observed"]["owned_capacity_sufficient"])
 
         mixed_item = workload(
             "mixed", "alice", "trainingJob",
@@ -884,6 +891,89 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "appears in both"):
             PolicyConfig.model_validate(payload)
 
+    def test_cross_group_placement_compares_remaining_quota_with_foreign_gpu(self):
+        for quota, expected_code, expected_remaining in (
+            (8, "placement.quota_borrowed", 0),
+            (16, "placement.outside_owned_pool", 8),
+            (24, "placement.outside_owned_pool", 16),
+        ):
+            with self.subTest(quota=quota):
+                payload = self.policy.model_dump(mode="json")
+                payload["node_allocation"] = {"enabled": True}
+                payload["groups"]["example-team"]["gpu_quota"] = quota
+                payload["groups"]["example-team"]["nodes"] = ["owned"]
+                payload["groups"]["default"]["nodes"] = ["foreign"]
+                policy = PolicyConfig.model_validate(payload)
+                item = workload("cross-group", "alice", "trainingJob", [placement("foreign", 8)])
+                result = apply_policy(
+                    snapshot([node("owned", 8), node("foreign", 8)], [item]), policy,
+                )
+                finding = next(
+                    entry for entry in result["workloads"][0]["policy_findings"]
+                    if entry["category"] == "placement"
+                )
+                self.assertEqual(finding["code"], expected_code)
+                self.assertEqual(finding["status"], "warning")
+                self.assertEqual(finding["observed"]["required_gpu"], 8)
+                self.assertEqual(finding["observed"]["quota_remaining_gpu"], expected_remaining)
+                self.assertEqual(
+                    finding["observed"]["quota_sufficient_for_foreign_gpu"],
+                    expected_code == "placement.outside_owned_pool",
+                )
+
+        payload = self.policy.model_dump(mode="json")
+        payload["node_allocation"] = {"enabled": True}
+        payload["groups"]["example-team"]["gpu_quota"] = None
+        payload["groups"]["example-team"]["nodes"] = ["owned"]
+        payload["groups"]["default"]["nodes"] = ["foreign"]
+        unlimited = apply_policy(
+            snapshot(
+                [node("owned", 8), node("foreign", 8)],
+                [workload("unlimited", "alice", "trainingJob", [placement("foreign", 8)])],
+            ),
+            PolicyConfig.model_validate(payload),
+        )["workloads"][0]
+        unlimited_finding = next(
+            entry for entry in unlimited["policy_findings"] if entry["category"] == "placement"
+        )
+        self.assertEqual(unlimited_finding["code"], "placement.outside_owned_pool")
+        self.assertIsNone(unlimited_finding["observed"]["quota_remaining_gpu"])
+        self.assertTrue(unlimited_finding["observed"]["quota_sufficient_for_foreign_gpu"])
+
+        payload["groups"]["example-team"]["gpu_quota"] = 0
+        zero_gpu = apply_policy(
+            snapshot(
+                [node("owned", 8), node("foreign", 0)],
+                [workload("zero-gpu", "alice", "trainingJob", [placement("foreign", 0)])],
+            ),
+            PolicyConfig.model_validate(payload),
+        )["workloads"][0]
+        zero_gpu_finding = next(
+            entry for entry in zero_gpu["policy_findings"] if entry["category"] == "placement"
+        )
+        self.assertEqual(zero_gpu_finding["code"], "placement.outside_owned_pool")
+        self.assertEqual(zero_gpu_finding["observed"]["required_gpu"], 0)
+        self.assertTrue(zero_gpu_finding["observed"]["quota_sufficient_for_foreign_gpu"])
+
+        payload["groups"]["example-team"]["gpu_quota"] = 16
+        mixed = apply_policy(
+            snapshot(
+                [node("owned", 8), node("foreign", 4)],
+                [workload(
+                    "mixed-quota-boundary", "alice", "trainingJob",
+                    [placement("owned", 8), placement("foreign", 4)],
+                )],
+            ),
+            PolicyConfig.model_validate(payload),
+        )["workloads"][0]
+        mixed_finding = next(
+            entry for entry in mixed["policy_findings"] if entry["category"] == "placement"
+        )
+        self.assertEqual(mixed_finding["code"], "placement.outside_owned_pool")
+        self.assertEqual(mixed_finding["observed"]["workload_gpu"], 12)
+        self.assertEqual(mixed_finding["observed"]["required_gpu"], 4)
+        self.assertEqual(mixed_finding["observed"]["quota_remaining_gpu"], 4)
+
     def test_node_allocation_borrowing_keeps_quota_finding_and_ignores_pending_placement(self):
         payload = self.policy.model_dump(mode="json")
         payload["node_allocation"] = {"enabled": True}
@@ -896,6 +986,12 @@ class PolicyTests(unittest.TestCase):
         finding_codes = result["workloads"][0]["finding_codes"]
         self.assertIn("placement.quota_borrowed", finding_codes)
         self.assertEqual(result["workloads"][0]["placement_context"]["issue"], "quota_borrowed")
+        finding = next(
+            entry for entry in result["workloads"][0]["policy_findings"]
+            if entry["code"] == "placement.quota_borrowed"
+        )
+        self.assertEqual(finding["observed"]["quota_remaining_gpu"], 0)
+        self.assertFalse(finding["observed"]["quota_sufficient_for_foreign_gpu"])
         self.assertIn("quota.gpu", next(item for item in result["groups"] if item["group"] == "example-team")["finding_codes"])
 
         pending = apply_policy(snapshot([node("owned", 0), node("borrowed", 0)], [], [{"workload_id": "pending", "queue_age_seconds": 1}]), policy)
@@ -960,6 +1056,8 @@ class PolicyTests(unittest.TestCase):
             {item["observed"]["owner_group"]: item["status"] for item in findings},
             {"default": "warning", "pressure-team": "violation"},
         )
+        self.assertEqual({item["code"] for item in findings}, {"placement.outside_owned_pool"})
+        self.assertEqual(active["workloads"][0]["policy_status"], "violation")
 
         unknown = apply_policy(
             snapshot(
@@ -1181,6 +1279,33 @@ class PlannerTests(unittest.TestCase):
         })
         self.assertEqual(result["optimality"], "not-needed")
 
+    def test_cpu_only_target_can_be_freed_by_cpu_and_memory_occupancy(self):
+        target_node = node("n1", 0, cpu=16, memory=32)
+        target_node["total_gpu"] = 1
+        target_node["total_cpu"] = 16
+        target_node["total_memory_gib"] = 32
+        running = workload(
+            "cpu-only-job", "alice", "trainingJob",
+            [placement("n1", 0, cpu=8, memory=16)],
+        )
+        evaluated = apply_policy(snapshot([target_node], [running]), self.policy)
+        request = PlanRequest.model_validate({
+            "snapshot_id": "s1",
+            "target": {
+                "nodes": 1, "gpus_per_node": 0,
+                "cpus_per_node": 8, "memory_per_node_gib": 16,
+            },
+            "strategies": ["min-gpu"], "candidate_scope": "all",
+        })
+        result = solve_plan(evaluated, request.model_dump(mode="json"))
+        self.assertEqual(result["plans"][0]["workloads"], ["cpu-only-job"])
+
+    def test_zero_gpu_target_requires_cpu_or_memory(self):
+        with self.assertRaisesRegex(ValueError, "zero-GPU target must request CPU or memory"):
+            PlanRequest.model_validate({
+                "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 0},
+            })
+
     def test_exact_target_node_restricts_the_solution(self):
         evaluated = apply_policy(snapshot(
             [node("n1", 1), node("n2", 1)],
@@ -1280,7 +1405,11 @@ class PlannerTests(unittest.TestCase):
         request = {
             "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
             "target_nodes": ["other"], "strategies": ["min-gpu"], "candidate_scope": "fragmented",
-            "filters": {"groups": ["example-team"], "candidate_node_scope": "other_group_nodes"},
+            "filters": {
+                "groups": ["example-team"],
+                "node_owner_groups": ["example-team"],
+                "candidate_node_scope": "other_group_nodes",
+            },
         }
         result = solve_plan(evaluated, request)
         self.assertEqual(result["plans"][0]["workloads"], ["borrowed-job"])
@@ -1296,6 +1425,38 @@ class PlannerTests(unittest.TestCase):
         result = solve_plan(evaluated, request)
         self.assertEqual(result["no_plan_reason"], "target-node-outside-ownership-scope")
 
+    def test_planner_includes_foreign_group_workloads_on_selected_group_nodes(self):
+        payload = self.policy.model_dump(mode="json")
+        payload["node_allocation"] = {"enabled": True}
+        payload["groups"]["example-team"]["nodes"] = ["owned"]
+        payload["groups"]["default"]["nodes"] = ["other"]
+        policy = PolicyConfig.model_validate(payload)
+        evaluated = apply_policy(snapshot(
+            [node("owned", 8, 4, 10), node("other", 0)],
+            [workload("xujing-job", "xujing", "trainingJob", [placement("owned", 8, 4, 10)])],
+        ), policy)
+        request = {
+            "snapshot_id": "s1",
+            "target": {
+                "nodes": 1, "gpus_per_node": 8,
+                "cpus_per_node": 4, "memory_per_node_gib": 10,
+            },
+            "target_nodes": ["owned"], "strategies": ["min-gpu"],
+            "candidate_scope": "all",
+            "filters": {
+                "node_owner_groups": ["example-team"],
+                "candidate_node_scope": "selected_group_nodes",
+            },
+        }
+        result = solve_plan(evaluated, request)
+        self.assertEqual(result["plans"][0]["workloads"], ["xujing-job"])
+        self.assertEqual(result["candidate_selection"]["groups"], [])
+        self.assertEqual(result["candidate_selection"]["node_owner_groups"], ["example-team"])
+
+        request["filters"]["groups"] = ["example-team"]
+        filtered = solve_plan(evaluated, request)
+        self.assertEqual(filtered["no_plan_reason"], "no-candidates-after-filters")
+
     def test_planner_rejects_node_scopes_when_node_allocation_is_disabled(self):
         evaluated = apply_policy(
             snapshot([node("n1", 1)], [workload("job", "alice", "trainingJob", [placement("n1", 1)])]),
@@ -1308,13 +1469,13 @@ class PlannerTests(unittest.TestCase):
                 "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
                 "strategies": ["min-gpu"], "candidate_scope": "full",
                 "filters": {
-                    "groups": ["example-team"], "candidate_node_scope": "selected_group_nodes",
+                    "node_owner_groups": ["example-team"], "candidate_node_scope": "selected_group_nodes",
                     "placement_relation_scope": "foreign_only",
                 },
             })
 
-    def test_planner_requires_groups_for_group_node_scope(self):
-        with self.assertRaisesRegex(ValueError, "filters.groups is required"):
+    def test_planner_requires_node_owner_groups_for_group_node_scope(self):
+        with self.assertRaisesRegex(ValueError, "filters.node_owner_groups is required"):
             PlanRequest.model_validate({
                 "snapshot_id": "s1", "target": {"nodes": 1, "gpus_per_node": 8},
                 "filters": {"candidate_node_scope": "selected_group_nodes"},
@@ -1391,7 +1552,7 @@ class PlannerTests(unittest.TestCase):
         }
         result = solve_plan(evaluated, request)
         self.assertEqual(result["resolved_target"]["cpus_per_node"], 112)
-        self.assertEqual(result["resolved_target"]["memory_per_node_gib"], 1920)
+        self.assertEqual(result["resolved_target"]["memory_per_node_gib"], 960)
         self.assertEqual(result["defaults_applied"], ["cpus_per_node", "memory_per_node_gib"])
         newer = self.policy.model_copy(update={
             "planning": self.policy.planning.model_copy(update={
@@ -1906,6 +2067,19 @@ class StoreAndTelemetryTests(unittest.TestCase):
         self.assertEqual(history.call_count, 1)
         self.assertIn("historical workload GPU telemetry is unavailable", result["warnings"])
 
+    def test_node_hostname_uses_valid_ipv4_without_changing_internal_identity(self):
+        self.assertEqual(_node_hostname("10.140.62.215"), "host-10-140-62-215")
+        self.assertIsNone(_node_hostname(""))
+        self.assertIsNone(_node_hostname("not-an-ip"))
+        self.assertIsNone(_node_hostname("2001:db8::1"))
+        normalized = normalize_nodes([
+            {"name": "ecp-node-a", "id": "node-id-a", "host_ip": "10.140.62.215"},
+            {"name": "ecp-node-b", "id": "node-id-b", "host_ip": "invalid"},
+        ])
+        self.assertEqual(normalized[0]["node"], "ecp-node-a")
+        self.assertEqual(normalized[0]["hostname"], "host-10-140-62-215")
+        self.assertIsNone(normalized[1]["hostname"])
+
     def test_collector_sums_running_resources_across_placements(self):
         def raw_node(name, node_id, gpu, cpu, memory):
             return {
@@ -1946,9 +2120,9 @@ class StoreAndTelemetryTests(unittest.TestCase):
         self.assertEqual(item["resource_basis"], "attributed")
 
     def test_node_signature_detects_identity_state_totals_and_allocations(self):
-        def raw(*, node_id="id", state="RUNNING", gpu_allocated=1, gpu_total=8):
+        def raw(*, node_id="id", host_ip="10.0.0.1", state="RUNNING", gpu_allocated=1, gpu_total=8):
             return [{
-                "name": "n", "id": node_id, "state": state,
+                "name": "n", "id": node_id, "host_ip": host_ip, "state": state,
                 "summary_data": [
                     {"resource_type": "DEVICE", "allocated": gpu_allocated, "total": gpu_total},
                     {"resource_type": "CPU", "allocated": 4, "total": 112},
@@ -1957,9 +2131,71 @@ class StoreAndTelemetryTests(unittest.TestCase):
             }]
         baseline = _node_signature(raw())
         for changed in (
-            raw(node_id="other"), raw(state="IDLE"), raw(gpu_allocated=2), raw(gpu_total=16),
+            raw(node_id="other"), raw(host_ip="10.0.0.2"), raw(state="IDLE"),
+            raw(gpu_allocated=2), raw(gpu_total=16),
         ):
             self.assertNotEqual(baseline, _node_signature(changed))
+
+    def test_collector_validates_node_mapping_before_optional_queries(self):
+        raw_nodes = [{
+            "name": "n", "id": "id", "state": "RUNNING",
+            "summary_data": [
+                {"resource_type": "DEVICE", "allocated": 1, "total": 8},
+                {"resource_type": "CPU", "allocated": 4, "total": 112},
+                {"resource_type": "MEMORY", "allocated": 10, "total": 1920, "unit": "GiB"},
+            ],
+        }]
+        gateway = mock.Mock()
+        gateway.query_workload_history.return_value = {}
+        gateway.pending_workloads.return_value = ([], True)
+        calls = []
+        gateway.list_queue_nodes.side_effect = lambda *_: calls.append("nodes") or raw_nodes
+        gateway.list_node_pods.side_effect = lambda *_: calls.append("pods") or [{
+            "name": "pod", "workload": {"uid": "workload", "type": "unknown"},
+            "resource": {"accelerate_device_count": 1, "cpu": 4, "memory": "10GiB"},
+        }]
+        gateway.query_gpu_telemetry.side_effect = lambda *_: calls.append("telemetry") or []
+        result = ClusterCollector(mock.Mock(), "q", "c", gateway=gateway).collect()
+        self.assertEqual(calls[:4], ["nodes", "pods", "nodes", "telemetry"])
+        self.assertEqual(result["nodes"][0]["allocated_gpu"], 1)
+
+    def test_collector_rechecks_only_changed_node_pods(self):
+        def raw(name, allocated):
+            return {
+                "name": name, "id": name, "state": "RUNNING",
+                "summary_data": [
+                    {"resource_type": "DEVICE", "allocated": allocated, "total": 8},
+                    {"resource_type": "CPU", "allocated": 0, "total": 112},
+                    {"resource_type": "MEMORY", "allocated": 0, "total": 1920, "unit": "GiB"},
+                ],
+            }
+
+        initial = [raw("changed", 1), raw("stable", 1)]
+        updated = [raw("changed", 2), raw("stable", 1)]
+        gateway = mock.Mock()
+        gateway.list_queue_nodes.side_effect = [initial, updated, updated]
+        pod_calls = []
+
+        def pods(_, __, node_id):
+            pod_calls.append(node_id)
+            allocation = 2 if node_id == "changed" and pod_calls.count(node_id) == 2 else 1
+            return [{
+                "name": f"pod-{node_id}",
+                "workload": {"uid": f"workload-{node_id}-{allocation}", "type": "unknown"},
+                "resource": {"accelerate_device_count": allocation},
+            }]
+
+        gateway.list_node_pods.side_effect = pods
+        gateway.query_gpu_telemetry.return_value = []
+        gateway.query_workload_history.return_value = {}
+        gateway.pending_workloads.return_value = ([], True)
+        result = ClusterCollector(mock.Mock(), "q", "c", gateway=gateway).collect()
+        self.assertEqual(pod_calls.count("changed"), 2)
+        self.assertEqual(pod_calls.count("stable"), 1)
+        self.assertEqual(
+            {item["workload_id"] for item in result["workloads"]},
+            {"workload-changed-2", "workload-stable-1"},
+        )
 
     def test_queue_node_inventory_paginates(self):
         client = mock.Mock()
@@ -2124,7 +2360,11 @@ class StoreAndTelemetryTests(unittest.TestCase):
                 ]}},
             }],
         }
-        jobs, complete = _pending_workloads(cluster, "queue")
+        with mock.patch(
+            "clusterx_monitor.collector._pending_workspace_resources",
+            return_value=([], True),
+        ):
+            jobs, complete = _pending_workloads(cluster, "queue")
         self.assertTrue(complete)
         item = jobs[0]
         self.assertEqual(item["num_nodes"], 4)
@@ -2178,12 +2418,16 @@ class StoreAndTelemetryTests(unittest.TestCase):
         old_timestamp = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         cluster.client.list_training_jobs.return_value = {
             "training_jobs": [{
-                "name": "old-shape",
+                "name": "old-shape", "ownership": {"creator_name": "Alice"},
                 "metadata": {"created_at": old_timestamp},
                 "create_time": old_timestamp,
             }],
         }
-        jobs, complete = _pending_workloads(cluster, "queue")
+        with mock.patch(
+            "clusterx_monitor.collector._pending_workspace_resources",
+            return_value=([], True),
+        ):
+            jobs, complete = _pending_workloads(cluster, "queue")
         self.assertTrue(complete)
         self.assertIsNone(jobs[0]["create_time"])
         self.assertIsNone(jobs[0]["resource_create_time"])
@@ -2206,10 +2450,13 @@ class SkillCliTests(unittest.TestCase):
         self.assertNotIn("SSPCluster", source)
         response = mock.Mock(status_code=200)
         response.json.return_value = {"service": "clusterx-monitor", "snapshot": {"stale": False}}
-        with mock.patch.object(self.module.requests, "request", return_value=response), mock.patch.object(
+        with mock.patch.object(self.module.requests, "request", return_value=response) as request, mock.patch.object(
             sys, "argv", ["monitor_cli.py", "status", "--format", "json"]
         ), mock.patch("sys.stdout"):
             self.assertEqual(self.module.main(), 0)
+        self.assertEqual(
+            request.call_args.kwargs["proxies"], {"http": "", "https": ""},
+        )
 
     def test_cli_endpoint_precedence_supports_shared_environment(self):
         with mock.patch.dict(
@@ -2258,6 +2505,17 @@ class SkillCliTests(unittest.TestCase):
         self.assertIn("cpu_quota", rendered)
         self.assertIn("memory_quota_gib", rendered)
         self.assertIn("不限", rendered)
+
+    def test_node_table_includes_clusterx_hostname_and_host_ip(self):
+        with mock.patch.dict("os.environ", {"COLUMNS": "240"}):
+            rendered = self.module._render_table([{
+                "node": "ecp-node-a", "hostname": "host-10-140-62-215",
+                "host_ip": "10.140.62.215", "state": "RUNNING",
+            }], no_color=True)
+        self.assertIn("hostname", rendered)
+        self.assertIn("host-10-140-62-215", rendered)
+        self.assertIn("host_ip", rendered)
+        self.assertIn("10.140.62.215", rendered)
 
     def test_api_validation_returns_two_and_filtered_stale_uses_snapshot(self):
         with mock.patch.object(
@@ -2366,14 +2624,16 @@ class SkillCliTests(unittest.TestCase):
             self.module, "_request", return_value={"plans": []}
         ) as request, mock.patch.object(
             sys, "argv", [
-                "monitor_cli.py", "plan", "--nodes", "1", "--group", "example-team",
+                "monitor_cli.py", "plan", "--nodes", "1", "--node-group", "example-team",
+                "--group", "candidate-team",
                 "--candidate-node-scope", "other_group_nodes",
                 "--placement-relation", "foreign_only", "--format", "json",
             ]
         ), mock.patch("sys.stdout"):
             self.assertEqual(self.module.main(), 0)
         filters = request.call_args.kwargs["json"]["filters"]
-        self.assertEqual(filters["groups"], ["example-team"])
+        self.assertEqual(filters["groups"], ["candidate-team"])
+        self.assertEqual(filters["node_owner_groups"], ["example-team"])
         self.assertEqual(filters["candidate_node_scope"], "other_group_nodes")
         self.assertEqual(filters["placement_relation_scope"], "foreign_only")
 

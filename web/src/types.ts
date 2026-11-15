@@ -81,6 +81,7 @@ export type HistoricalTelemetry = {
 
 export type Workload = FindingFacets & {
   workload_id: string;
+  workload_uid?: string | null;
   workload_name: string;
   resource_name?: string;
   user: string;
@@ -163,6 +164,7 @@ export type NodeSummary = {
   node: string;
   id: string;
   host_ip: string;
+  hostname?: string | null;
   state: string;
   assigned_group?: string | null;
   allocated_gpu: number;
@@ -343,6 +345,7 @@ export type PlanResult = {
     node_ownership_scope: "all" | "selected_group_nodes" | "other_group_nodes" | string;
     placement_relation_scope: "any" | "owned_only" | "foreign_only" | "mixed" | "includes_foreign" | string;
     groups: string[];
+    node_owner_groups: string[];
     finding_categories: string[];
     finding_codes: string[];
     finding_tags: string[];

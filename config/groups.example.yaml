@@ -5,6 +5,7 @@ groups:
   example-team:
     gpu_quota: 8
     members: [alice]
+    # ECP node identity; clusterx --include uses lowercase host-<dashed-ip>.
     nodes: [node-001]
   example-zero-quota:
     gpu_quota: 0

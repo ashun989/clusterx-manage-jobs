@@ -52,7 +52,10 @@ def _url(endpoint: str, path: str) -> str:
 
 def _request(endpoint: str, method: str, path: str, **kwargs: Any) -> Any:
     try:
-        response = requests.request(method, _url(endpoint, path), timeout=(5, 20), **kwargs)
+        response = requests.request(
+            method, _url(endpoint, path), timeout=(5, 20),
+            proxies={"http": "", "https": ""}, **kwargs,
+        )
     except requests.RequestException as error:
         raise ApiError(str(error)) from error
     if response.status_code >= 400:
@@ -193,7 +196,7 @@ def _render_table(payload: Any, *, no_color: bool = False) -> str:
         if not rows:
             return "No matching rows.\n"
         preferred = [
-            "user", "group", "node", "workload_name", "type", "classification",
+            "user", "group", "node", "hostname", "host_ip", "workload_name", "type", "classification",
             "priority", "status", "policy_status", "gpu_quota", "cpu_quota", "memory_quota_gib",
             "pending_pressure",
             "allocated_gpu", "allocated_cpu", "allocated_memory_gib", "total_gpu",
@@ -325,6 +328,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for option in ("type", "group", "user", "workload", "exclude-workload", "exclude-user"):
         plan.add_argument(f"--{option}", action="append", default=[])
+    plan.add_argument(
+        "--node-group", action="append", default=[],
+        help="node owner group for group-relative candidate node scopes; independent of --group",
+    )
     plan.add_argument("--over-quota-only", action="store_true")
     plan.add_argument("--finding-category", action="append", default=[])
     plan.add_argument("--finding-code", action="append", default=[])
@@ -344,7 +351,10 @@ def _run_watch(args: argparse.Namespace) -> int:
     backoff = 0.5
     while args.count is None or emitted < args.count:
         try:
-            with requests.get(_url(args.endpoint, "/api/v1/events"), stream=True, timeout=(5, 90)) as response:
+            with requests.get(
+                _url(args.endpoint, "/api/v1/events"), stream=True, timeout=(5, 90),
+                proxies={"http": "", "https": ""},
+            ) as response:
                 if response.status_code >= 400:
                     raise ApiError(f"HTTP {response.status_code}", status=response.status_code)
                 backoff = 0.5
@@ -398,8 +408,8 @@ def main() -> int:
                 parser.error("alternatives must be between 1 and 10")
             if not 1 <= args.search_seconds <= 30:
                 parser.error("search seconds must be between 1 and 30")
-            if args.candidate_node_scope != "all" and not args.group:
-                parser.error("--group is required when --candidate-node-scope is not all")
+            if args.candidate_node_scope != "all" and not args.node_group:
+                parser.error("--node-group is required when --candidate-node-scope is not all")
             body = {
                 "snapshot_id": args.snapshot,
                 "target": {
@@ -413,6 +423,7 @@ def main() -> int:
                 "search_seconds": args.search_seconds,
                 "filters": {
                     "workload_types": args.type, "groups": args.group,
+                    "node_owner_groups": args.node_group,
                     "users": args.user, "workloads": args.workload,
                     "exclude_workloads": args.exclude_workload,
                     "exclude_users": args.exclude_user,

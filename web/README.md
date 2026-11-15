@@ -22,6 +22,13 @@ administrator editor for the local resource and group policies.
 The dashboard is a static application. It does not query Clusterx directly.
 The Server remains the source of snapshots and API policy decisions.
 
+Node views use the lowercase Clusterx hostname (for example
+`host-10-140-62-215`) as the primary operational label while retaining the ECP
+node name and Host IP as secondary identity. Group configuration, detail
+routing, placement, and planner requests still use the ECP node name as their
+stable internal key. When hostname derivation is unavailable, the UI falls
+back to that ECP name and labels the hostname as unavailable.
+
 ## Configuration
 
 The generated `dist/config.js` contains the API endpoint configuration. For a
@@ -63,7 +70,9 @@ are not counted because they have no node placement.
 When node allocation is enabled, the simulator keeps resource candidate scope
 (`fragmented`, `full`, `all`) separate from node ownership scope and placement
 relationship. Candidate node scope is `all`, `selected_group_nodes`, or
-`other_group_nodes`; the two group-relative values require a selected group.
+`other_group_nodes`; the two group-relative values require a selected node-owner
+group. Candidate Workload group filters are independent, and default to
+unrestricted when simulating a Pending Workload.
 The scope control remains usable before group selection and displays an inline
 validation error instead of silently changing the request. Workload relation is
 `any`, `owned_only`, `foreign_only`, `mixed`, or `includes_foreign`. When node

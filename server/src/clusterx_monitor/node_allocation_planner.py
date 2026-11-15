@@ -5,8 +5,10 @@ from __future__ import annotations
 This planner is deliberately separate from the scheduling planner.  The
 existing planner selects workloads to release; this one assigns every current
 queue node to exactly one configured group while preserving finite GPU quota
-capacity.  It is a preview-only operation: applying a proposal still goes
-through the normal revision-checked group configuration update.
+capacity. It minimizes impact to attributed running placements and weighs
+known aggregate pending resource demand. It is a preview-only operation:
+applying a proposal still goes through the normal revision-checked group
+configuration update.
 """
 
 import time
@@ -18,7 +20,7 @@ from ortools.sat.python import cp_model
 from .models import PolicyConfig
 from .planning.cp_sat import configured_solver_workers
 
-MODEL_VERSION = 2
+MODEL_VERSION = 3
 STRATEGIES = ("workload-first", "gpu-first", "user-first")
 
 
@@ -27,7 +29,7 @@ class _Workload:
     workload_id: str
     user: str
     group: str
-    placements: tuple[tuple[str, int], ...]
+    placements: tuple[tuple[str, int, int, int], ...]
 
 
 def _gpu(value: Any) -> int:
@@ -35,6 +37,19 @@ def _gpu(value: Any) -> int:
         return max(0, round(float(value or 0)))
     except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def _units(value: Any, scale: int) -> int:
+    try:
+        return max(0, round(float(value or 0) * scale))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _known_units(value: Any, scale: int) -> int | None:
+    if value is None:
+        return None
+    return _units(value, scale)
 
 
 def _nodes(snapshot: dict[str, Any]) -> tuple[tuple[str, int], ...]:
@@ -45,6 +60,18 @@ def _nodes(snapshot: dict[str, Any]) -> tuple[tuple[str, int], ...]:
             continue
         values[name] = _gpu(item.get("total_gpu"))
     return tuple(sorted(values.items()))
+
+
+def _node_resources(snapshot: dict[str, Any]) -> dict[str, tuple[int, int, int]]:
+    return {
+        str(item.get("node") or "").strip(): (
+            _gpu(item.get("total_gpu")),
+            _units(item.get("total_cpu"), 1000),
+            _units(item.get("total_memory_gib"), 1024),
+        )
+        for item in snapshot.get("nodes") or []
+        if str(item.get("node") or "").strip()
+    }
 
 
 def _workloads(
@@ -58,10 +85,18 @@ def _workloads(
         user = str(item.get("user") or "unknown").strip().lower()
         group = str(item.get("group") or "").strip()
         placements = tuple(
-            (str(placement.get("node") or "").strip(), _gpu(placement.get("gpu")))
+            (
+                str(placement.get("node") or "").strip(),
+                _gpu(placement.get("gpu")),
+                _units(placement.get("cpu"), 1000),
+                _units(placement.get("memory_gib"), 1024),
+            )
             for placement in item.get("placements") or []
             if str(placement.get("node") or "").strip() in known_nodes
-            and _gpu(placement.get("gpu")) > 0
+            and any((
+                _gpu(placement.get("gpu")), _units(placement.get("cpu"), 1000),
+                _units(placement.get("memory_gib"), 1024),
+            ))
         )
         # A workload without a known configured owner is still useful context
         # to an administrator, but it must not bias an ownership proposal.
@@ -80,6 +115,44 @@ def _workloads(
     return tuple(usable), {"excluded_workloads": excluded}
 
 
+def _pending_demands(
+    snapshot: dict[str, Any], group_names: set[str],
+) -> tuple[dict[str, dict[str, int]], list[dict[str, str]], list[dict[str, str]], bool]:
+    totals: dict[str, dict[str, int]] = {}
+    excluded: list[dict[str, str]] = []
+    partial: list[dict[str, str]] = []
+    complete = bool(snapshot.get("pending_complete", True))
+    scales = {"gpu": 1, "cpu_millis": 1000, "memory_mib": 1024}
+    fields = {"gpu": "total_gpu", "cpu_millis": "total_cpu", "memory_mib": "total_memory_gib"}
+    for item in snapshot.get("pending_workloads") or []:
+        workload_id = str(item.get("workload_id") or item.get("workload_name") or "unknown")
+        group = str(item.get("group") or "").strip()
+        if group not in group_names:
+            excluded.append({"workload_id": workload_id, "reason": "unknown-user-or-group"})
+            complete = False
+            continue
+        known = False
+        unknown_dimensions = []
+        group_total = totals.setdefault(group, {key: 0 for key in fields})
+        for dimension, field in fields.items():
+            value = _known_units(item.get(field), scales[dimension])
+            if value is None:
+                unknown_dimensions.append(dimension)
+                continue
+            group_total[dimension] += value
+            known = True
+        if unknown_dimensions:
+            partial.append({
+                "workload_id": workload_id,
+                "reason": "unknown-resource-fields:" + ",".join(unknown_dimensions),
+            })
+            complete = False
+        if not known:
+            excluded.append({"workload_id": workload_id, "reason": "resource-request-unknown"})
+            complete = False
+    return totals, excluded, partial, complete
+
+
 def _objective(
     strategy: str,
     affected_workloads: cp_model.LinearExpr,
@@ -89,6 +162,8 @@ def _objective(
     max_workloads: int,
     max_gpu: int,
     max_users: int,
+    pending_shortfall: cp_model.LinearExpr,
+    max_pending_shortfall: int,
     max_tie: int,
 ) -> cp_model.LinearExpr:
     if strategy == "workload-first":
@@ -100,13 +175,15 @@ def _objective(
     else:
         first, second, third = affected_users, affected_workloads, affected_gpu
         first_max, second_max, third_max = max_users, max_workloads, max_gpu
-    third_multiplier = max_tie + 1
+    pending_multiplier = max_tie + 1
+    third_multiplier = (max_pending_shortfall + 1) * pending_multiplier
     second_multiplier = (third_max + 1) * third_multiplier
     first_multiplier = (second_max + 1) * second_multiplier
     maximum = (
         first_max * first_multiplier
         + second_max * second_multiplier
         + third_max * third_multiplier
+        + max_pending_shortfall * pending_multiplier
         + max_tie
     )
     if maximum >= 2**63:
@@ -115,6 +192,7 @@ def _objective(
         first * first_multiplier
         + second * second_multiplier
         + third * third_multiplier
+        + pending_shortfall * pending_multiplier
         + tie_break
     )
 
@@ -177,9 +255,15 @@ def _invalid_quota_proposal(
         "groups": _proposal_template(policy),
         "assignment": [],
         "metrics": {"affected_workloads": None, "affected_gpu": None, "affected_users": None},
+        "pending_demand": [],
+        "pending_demand_complete": bool(context.get("pending_demand_complete", False)),
+        "excluded_pending_workloads": context.get("excluded_pending_workloads", []),
+        "partial_pending_workloads": context.get("partial_pending_workloads", []),
         "capacity_coverage": coverage,
         "capacity_deficits": coverage,
-        "diagnostics": [message],
+        "diagnostics": [message] + ([] if context.get("pending_demand_complete") else [
+            "pending inventory, request shape, or node capacity evidence is incomplete"
+        ]),
         "excluded_workloads": context["excluded_workloads"],
         "solver": {
             "backend": "cp-sat",
@@ -203,6 +287,23 @@ def _solve_strategy(
     nodes = _nodes(snapshot)
     group_names = tuple(sorted(policy.groups))
     workloads, context = _workloads(snapshot, set(group_names))
+    pending_demands, pending_excluded, pending_partial, pending_complete = _pending_demands(
+        snapshot, set(group_names),
+    )
+    dimension_fields = {
+        "gpu": "total_gpu", "cpu_millis": "total_cpu",
+        "memory_mib": "total_memory_gib",
+    }
+    unknown_capacity_dimensions = {
+        dimension for dimension, field in dimension_fields.items()
+        if any(int(values.get(dimension) or 0) > 0 for values in pending_demands.values())
+        and any(node.get(field) is None for node in snapshot.get("nodes") or [])
+    }
+    if unknown_capacity_dimensions:
+        pending_complete = False
+    context["excluded_pending_workloads"] = pending_excluded
+    context["partial_pending_workloads"] = pending_partial
+    context["pending_demand_complete"] = pending_complete
     template = _proposal_template(policy)
     started = time.monotonic()
     effective_quotas, quota_error = _effective_gpu_quotas(nodes, policy)
@@ -235,15 +336,19 @@ def _solve_strategy(
     affected_flags: dict[int, cp_model.IntVar] = {}
     affected_gpu_terms: list[cp_model.LinearExpr] = []
     user_flags: dict[str, cp_model.IntVar] = {}
+    node_resources = _node_resources(snapshot)
+    node_indexes = {name: index for index, (name, _) in enumerate(nodes)}
     for workload_index, workload in enumerate(workloads):
         affected = model.new_bool_var(f"affected-workload:{workload_index}")
         affected_flags[workload_index] = affected
-        for node_name, gpu in workload.placements:
-            node_index = next(index for index, (name, _) in enumerate(nodes) if name == node_name)
+        for node_name, gpu, cpu_millis, memory_mib in workload.placements:
+            node_index = node_indexes[node_name]
             for group_index, group_name in enumerate(group_names):
                 if group_name != workload.group:
-                    model.add(affected >= assignment[node_index, group_index])
-                    affected_gpu_terms.append(gpu * assignment[node_index, group_index])
+                    if gpu or cpu_millis or memory_mib:
+                        model.add(affected >= assignment[node_index, group_index])
+                    if gpu:
+                        affected_gpu_terms.append(gpu * assignment[node_index, group_index])
         user_flag = user_flags.setdefault(
             workload.user,
             model.new_bool_var(f"affected-user:{len(user_flags)}"),
@@ -253,6 +358,34 @@ def _solve_strategy(
     affected_workloads = sum(affected_flags.values())
     affected_gpu = sum(affected_gpu_terms)
     affected_users = sum(user_flags.values())
+
+    pending_shortfall_terms: list[cp_model.LinearExpr] = []
+    pending_capacity: list[tuple[str, str, int, cp_model.LinearExpr, int]] = []
+    node_dimension_indexes = {"gpu": 0, "cpu_millis": 1, "memory_mib": 2}
+    max_pending_shortfall = 0
+    for group_index, group_name in enumerate(group_names):
+        demands = pending_demands.get(group_name) or {}
+        for dimension, node_dimension_index in node_dimension_indexes.items():
+            demand = int(demands.get(dimension) or 0)
+            if demand <= 0:
+                continue
+            if dimension in unknown_capacity_dimensions:
+                continue
+            capacity = sum(
+                node_resources.get(node_name, (0, 0, 0))[node_dimension_index]
+                * assignment[node_index, group_index]
+                for node_index, (node_name, _) in enumerate(nodes)
+            )
+            gap = model.new_int_var(0, demand, f"pending-gap:{group_index}:{dimension}")
+            model.add_max_equality(gap, [demand - capacity, 0])
+            # Scale each resource shortfall to an approximate percentage of
+            # the known group demand so GPU, CPU and memory can share one
+            # lexicographic objective term.
+            weight = max(1, 1_000_000 // demand)
+            pending_shortfall_terms.append(gap * weight)
+            max_pending_shortfall += demand * weight
+            pending_capacity.append((group_name, dimension, demand, capacity, gap))
+    pending_shortfall = sum(pending_shortfall_terms)
     tie_break = sum(
         (node_index * len(group_names) + group_index + 1) * variable
         for (node_index, group_index), variable in assignment.items()
@@ -260,6 +393,7 @@ def _solve_strategy(
     model.minimize(_objective(
         strategy, affected_workloads, affected_gpu, affected_users, tie_break,
         len(workloads), sum(gpu for _, gpu in nodes), len(user_flags),
+        pending_shortfall, max_pending_shortfall,
         max(1, len(nodes) * max(1, len(group_names)) * len(nodes)),
     ))
 
@@ -300,11 +434,39 @@ def _solve_strategy(
         "affected_gpu": round(solver.value(affected_gpu)) if feasible else None,
         "affected_users": round(solver.value(affected_users)) if feasible else None,
     }
+    dimension_scales = {"gpu": 1, "cpu_millis": 1000, "memory_mib": 1024}
+    dimension_labels = {"gpu": "gpu", "cpu_millis": "cpu", "memory_mib": "memory"}
+    pending_demand_result = []
+    for group_name, demands in sorted(pending_demands.items()):
+        for dimension in sorted(unknown_capacity_dimensions):
+            demand = int(demands.get(dimension) or 0)
+            if demand <= 0:
+                continue
+            pending_demand_result.append({
+                "group": group_name,
+                "resource": dimension_labels[dimension],
+                "requested": round(demand / dimension_scales[dimension], 3),
+                "assigned_capacity": None,
+                "shortfall": None,
+            })
+    for group_name, dimension, demand, capacity, gap in pending_capacity:
+        assigned = round(solver.value(capacity)) if feasible else 0
+        shortfall = round(solver.value(gap)) if feasible else demand
+        scale = dimension_scales[dimension]
+        pending_demand_result.append({
+            "group": group_name,
+            "resource": dimension_labels[dimension],
+            "requested": round(demand / scale, 3),
+            "assigned_capacity": round(assigned / scale, 3),
+            "shortfall": round(shortfall / scale, 3),
+        })
     diagnostics = []
     if status_name == "INFEASIBLE":
         diagnostics.append("finite GPU quotas cannot all be covered by a mutually exclusive node assignment")
     elif status_name not in {"OPTIMAL", "FEASIBLE"}:
         diagnostics.append("solver did not return a complete node assignment within the time limit")
+    if not pending_complete:
+        diagnostics.append("pending inventory, request shape, or node capacity evidence is incomplete; only available evidence was optimized")
     return {
         "strategy": strategy,
         "status": status_name,
@@ -316,6 +478,10 @@ def _solve_strategy(
             for node in value["nodes"]
         ],
         "metrics": metrics,
+        "pending_demand": pending_demand_result,
+        "pending_demand_complete": pending_complete,
+        "excluded_pending_workloads": pending_excluded,
+        "partial_pending_workloads": pending_partial,
         "capacity_coverage": coverage_result,
         "capacity_deficits": deficits,
         "diagnostics": diagnostics,

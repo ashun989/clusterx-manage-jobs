@@ -90,18 +90,20 @@ warnings.
 2. For SSP, require a non-empty job name of at most 32 Unicode characters.
    Shorten it before previewing; the service rejects longer names before job
    creation.
-3. Enforce the training CPU policy from `assets/resource-policy.json` before
-   preview and submission. `cpu_per_gpu` is the inclusive per-task/per-node
-   CPU limit for GPU jobs: CPUs must be no greater than GPUs multiplied by
-   `cpu_per_gpu`. A 0-GPU task instead uses the inclusive
-   `zero_gpu_max_cpu_per_node` limit. With the shipped policy this permits
-   0 GPU / 14 CPU, 1 GPU / 14 CPU, and 8 GPU / 112 CPU. Never multiply the
-   per-node limit by `--num-nodes`. The wrapper hard-blocks violations before
-   invoking Clusterx.
-   When `--resource-policy` or `CLUSTERX_RESOURCE_POLICY` points to the
-   monitor-managed local resource policy, use that file instead of the built-in
-   template. This keeps Web policy edits and submission validation aligned
-   without making submission depend on the monitor HTTP service.
+3. Resolve the public resource policy before previewing a training submission.
+   If `CLUSTERX_MONITOR_URL` is set, run `clusterx-monitor-cli policy --format
+   json` and use its `policy` object when `valid` or `using_last_known_good` is
+   true. The Monitor's effective training CPU and memory limits are then the
+   Skill's current source of truth. If the endpoint is unset, unavailable, or
+   has no effective policy, use a per-command `--resource-policy` file first,
+   then `CLUSTERX_RESOURCE_POLICY`, then the bundled `assets/resource-policy.json`.
+   An explicit `--resource-policy` always wins over Monitor policy.
+   `clusterx-exec` applies the same precedence and hard-blocks training CPU or
+   memory violations before invoking Clusterx. GPU tasks use inclusive
+   `cpu_per_gpu` and `memory_gib_per_gpu` per-task limits; 0-GPU tasks use
+   `zero_gpu_max_cpu_per_node` and `zero_gpu_max_memory_gib_per_node`. Never
+   multiply per-node limits by `--num-nodes`. If local fallback is used because
+   Monitor policy could not be read, report that source to the user.
 4. Validate mounts. Accept the simple `TYPE:ID:PATH[:SUBDIR]` form or a JSON
    object. Keep JSON quoted as one shell argument.
    When a smoke manifest declares `target_source: clusterx_config`, resolve
@@ -127,6 +129,12 @@ warnings.
    credentials.
 12. Suggest the relevant `get-job`, `log`, or `stats` follow-up.
 
+For SSP placement, `--include` and `--exclude` accept lowercase Kubernetes
+hostnames, not ECP node names. Derive a valid IPv4 address such as
+`10.140.62.215` as `host-10-140-62-215`. Prefer the Monitor node `hostname`
+field and use `host_ip` only for the same deterministic fallback; never invent
+a hostname when the IP is missing or invalid.
+
 ## Query and stop jobs
 
 - Execute `list`, `get-job`, `get-node`, `log`, and `stats` as read-only
@@ -143,8 +151,11 @@ warnings.
   that the access scope is `all`; no user name is required in that mode.
 - Workload views expose resource creation time and normalized priority when the
   Clusterx resource API provides them. Pending TrainingJob creation time is the
-  initial queue-age anchor; it is not a later retry/requeue transition. Missing
-  priorities remain unknown and must not be inferred from submission defaults.
+  initial queue-age anchor; it is not a later retry/requeue transition. Pending
+  AID and AIR resources are included when their queue-scoped resource APIs
+  return them. Pressure is unknown if any pending source is incomplete or a
+  pending queue-age timestamp is unavailable. Missing priorities remain unknown
+  and must not be inferred from submission defaults.
 - With Clusterx 2026.8.19, monitor collection follows `next_page_token` to read
   the complete bound-node inventory. Repeated cursors, duplicate node identity,
   changing totals, truncated pages, or a changed before/after node signature
@@ -167,15 +178,17 @@ warnings.
   category, status, tags, observed values, limits, and optional history window.
 - Node allocation is queue-wide and advisory. Every live queue node has one
   public effective owner when enabled; an unassigned node belongs to `default`.
-  A running workload with quota headroom on another group's node produces a
-  `placement.outside_owned_pool` warning only when its own pool has sufficient
-  free capacity; a workload at or above quota on another group's node produces
-  a `placement.quota_borrowed` warning. These findings become violations when
-  the owner group reaches group-local pending pressure, computed with the same
-  `min_wait_minutes` and `min_jobs` thresholds as queue pressure. Unknown
-  pressure remains a warning. Borrowing never suppresses quota findings.
-  Pending workloads have no node placement and never receive placement
-  warnings.
+  Every running workload on another group's node produces a placement finding.
+  Compare the group's current remaining GPU quota with the sum of GPU on all
+  foreign placements: sufficient or unlimited quota produces
+  `placement.outside_owned_pool`, while insufficient remaining quota produces
+  `placement.quota_borrowed`. Physical free capacity in the group's own pool is
+  diagnostic evidence and does not change this classification. These findings
+  are warnings by default and become violations when the owner group reaches
+  group-local pending pressure, computed with the same `min_wait_minutes` and
+  `min_jobs` thresholds as queue pressure. Unknown pressure remains a warning.
+  Borrowing never suppresses quota findings. Pending workloads have no node
+  placement and never receive placement warnings.
 - Monitor resource/group editing is an administrator-only service capability,
   not a Clusterx CRUD operation. Never request or transmit the administrator
   password through the Skill. The operator initializes it interactively with
@@ -186,7 +199,13 @@ warnings.
   workload-first, GPU-first, or user-first alternatives pinned to a snapshot
   and group revision. Each feasible proposal assigns every current queue node
   to exactly one group and matches every finite numeric GPU quota exactly with
-  aggregate node capacity; heterogeneous node sizes may be combined. A
+  aggregate node capacity; heterogeneous node sizes may be combined. The
+  proposal minimizes impact to running workloads and compares known aggregate
+  pending GPU, CPU, and memory demand with each group's assigned node capacity.
+  Pending demand gaps are aggregate indicators, not proof that each per-node
+  task shape will fit. Incomplete pending sources or unknown request shapes
+  must be surfaced with the proposal. CPU-only and memory-only running
+  workloads also count toward workload impact. A
   remainder quota is resolved against the current queue snapshot; if its
   resolved value is not a multiple of 8, all proposals are infeasible with a
   diagnostic;
@@ -201,7 +220,8 @@ warnings.
   all|selected_group_nodes|other_group_nodes`, `--placement-relation
   any|owned_only|foreign_only|mixed|includes_foreign`, `--alternatives 1..10`,
   and workload, user, group, or over-quota filters as requested. The two
-  group-relative node scopes require repeated `--group` filters. To restrict
+  group-relative node scopes require repeated `--node-group` filters. `--group`
+  filters candidate Workloads independently. To restrict
   coordination candidates by structured warnings or violations, add repeated
   `--finding-category`, `--finding-code`, or `--finding-tag`. Every result is based on an
   identified cached snapshot and is a coordination candidate, never permission

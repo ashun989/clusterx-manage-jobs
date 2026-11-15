@@ -45,7 +45,11 @@ def _effective_scopes(
     allocation_enabled = bool((snapshot.get("node_allocation") or {}).get("enabled"))
     requested_node_scope = request.filters.candidate_node_scope
     requested_placement_scope = request.filters.placement_relation_scope
-    if not allocation_enabled and (requested_node_scope != "all" or requested_placement_scope != "any"):
+    if not allocation_enabled and (
+        requested_node_scope != "all"
+        or requested_placement_scope != "any"
+        or request.filters.node_owner_groups
+    ):
         raise ValueError("node allocation is disabled; ownership scopes must use their default values")
     return requested_node_scope, requested_placement_scope, _node_owners(snapshot)
 
@@ -294,6 +298,7 @@ def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan
             "node_ownership_scope": request.filters.candidate_node_scope,
             "placement_relation_scope": request.filters.placement_relation_scope,
             "groups": list(request.filters.groups),
+            "node_owner_groups": list(request.filters.node_owner_groups),
             "finding_categories": list(request.filters.finding_categories),
             "finding_codes": list(request.filters.finding_codes),
             "finding_tags": list(request.filters.finding_tags),
@@ -310,7 +315,7 @@ def prepare_plan(snapshot: dict[str, Any], request: PlanRequest) -> PreparedPlan
         return PreparedPlan(None, common, (), "target-node-unavailable")
     ownership_node_ids = set(nodes)
     if node_scope != "all":
-        selected_group_ids = set(request.filters.groups)
+        selected_group_ids = set(request.filters.node_owner_groups)
         ownership_node_ids = {
             node_id for node_id in nodes
             if placement_owners.get(node_id) is not None

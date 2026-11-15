@@ -3,8 +3,8 @@ import type { Placement, Workload } from "./types";
 export type PlacementTone = "owned" | "foreign" | "mixed" | "unknown" | "unmanaged" | "outside" | "quota" | "empty";
 
 const issueLabels: Record<string, string> = {
-  outside_owned_pool: "有本组余量但使用其他组节点",
-  quota_borrowed: "quota 满额借用",
+  outside_owned_pool: "quota 足够但使用其他组节点",
+  quota_borrowed: "quota 余量不足借用",
   unknown: "节点归属未知",
 };
 

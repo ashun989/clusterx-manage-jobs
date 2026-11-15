@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { monitorApiUrl } from "./api";
+import { nodeNameWithInternal, nodePrimaryLabel, nodeSecondaryLabel } from "./nodeIdentity";
 import { useDialogFocus } from "./useDialogFocus";
 
 type AdminSession = {
@@ -33,7 +34,8 @@ type StructuredGroups = { node_allocation: { enabled: boolean }; groups: Record<
 type DraftGroup = GroupDraft & { id: string; name: string };
 type GroupDraftState = { node_allocation: { enabled: boolean }; groups: DraftGroup[] };
 type DraftIssue = { id: string; groupId?: string; message: string };
-type AdminNode = { node: string; id: string; state: string; total_gpu: number; allocated_gpu: number; assigned_group?: string | null };
+type AdminNode = { node: string; id: string; host_ip?: string; hostname?: string | null; state: string; total_gpu: number; allocated_gpu: number; assigned_group?: string | null };
+type PendingDemand = { group: string; resource: string; requested: number; assigned_capacity: number | null; shortfall: number | null };
 type AllocationProposal = {
   strategy: "workload-first" | "gpu-first" | "user-first" | string;
   status: string;
@@ -41,6 +43,10 @@ type AllocationProposal = {
   groups: Record<string, GroupDraft>;
   assignment: Array<{ node: string; group: string }>;
   metrics: { affected_workloads: number | null; affected_gpu: number | null; affected_users: number | null };
+  pending_demand?: PendingDemand[];
+  pending_demand_complete?: boolean;
+  excluded_pending_workloads?: Array<{ workload_id: string; reason: string }>;
+  partial_pending_workloads?: Array<{ workload_id: string; reason: string }>;
   capacity_coverage: Array<{ group: string; quota: number; assigned_gpu: number; deficit: number; covered: boolean }>;
   capacity_deficits: Array<{ group: string; quota: number; assigned_gpu: number; deficit: number; covered: boolean }>;
   diagnostics: string[];
@@ -53,6 +59,8 @@ type AllocationPlanResponse = {
   cache_hit?: boolean;
   proposals: AllocationProposal[];
 };
+const pendingDemandSummary = (item: PendingDemand) =>
+  `${item.group} ${item.resource} ${item.shortfall == null ? `容量未知（需求 ${item.requested}）` : `缺口 ${item.shortfall}/${item.requested}`}`;
 type EditorState = AdminFile & { dirty: boolean };
 const emptyEditor = (format: "json" | "yaml"): EditorState => ({ format, text: "", revision: "", parse_error: null, dirty: false });
 const editorFrom = (value: AdminFile): EditorState => ({ ...value, dirty: false });
@@ -116,9 +124,20 @@ const guidedSections: Array<{ title: string; fields: GuidedField[] }> = [
     { path: "pending_pressure.min_wait_minutes", label: "Pending 压力等待阈值", unit: "分钟", min: 0, max: 1440 },
     { path: "pending_pressure.min_jobs", label: "Pending 压力任务数", unit: "个", min: 1, max: 1000 },
   ] },
+  { title: "开发机限制", fields: [
+    { path: "development.zero_gpu_max_cpu_per_node", label: "0 GPU 开发机 CPU 上限", unit: "CPU/节点", min: 0.1, max: 4096, step: 0.1 },
+    { path: "development.zero_gpu_max_memory_gib_per_node", label: "0 GPU 开发机内存上限", unit: "GiB/节点", min: 0.1, max: 65536, step: 0.1 },
+    { path: "development.one_gpu_max_cpu_per_node", label: "1 GPU 开发机 CPU 上限", unit: "CPU/节点", min: 0.1, max: 4096, step: 0.1 },
+    { path: "development.one_gpu_max_memory_gib_per_node", label: "1 GPU 开发机内存上限", unit: "GiB/节点", min: 0.1, max: 65536, step: 0.1 },
+    { path: "development.max_gpu", label: "开发机最大 GPU 数", unit: "GPU", min: 0, max: 1024 },
+    { path: "development.max_instances_per_user", label: "每用户开发机数量上限", unit: "个", min: 1, max: 1000 },
+    { path: "development.one_gpu_max_runtime_hours", label: "1 GPU 开发机最长运行时间", unit: "小时", min: 0, max: 8760, step: 0.1 },
+  ] },
   { title: "训练与调度画像", fields: [
     { path: "training.cpu_per_gpu", label: "训练每 GPU CPU 上限", unit: "CPU", min: 0.1, max: 1024, step: 0.1 },
     { path: "training.memory_gib_per_gpu", label: "训练每 GPU 内存上限", unit: "GiB", min: 0.1, max: 16384, step: 0.1 },
+    { path: "training.zero_gpu_max_cpu_per_node", label: "0 GPU 训练 CPU 上限", unit: "CPU/节点", min: 0.1, max: 4096, step: 0.1 },
+    { path: "training.zero_gpu_max_memory_gib_per_node", label: "0 GPU 训练内存上限", unit: "GiB/节点", min: 0.1, max: 65536, step: 0.1 },
     { path: "planning.default_cpu_per_gpu", label: "调度默认 CPU/GPU", unit: "CPU", min: 0.1, max: 1024, step: 0.1 },
     { path: "planning.default_memory_gib_per_gpu", label: "调度默认内存/GPU", unit: "GiB", min: 0.1, max: 16384, step: 0.1 },
   ] },
@@ -126,6 +145,7 @@ const guidedSections: Array<{ title: string; fields: GuidedField[] }> = [
     { path: "low_utilization.gpu_power_limit_w", label: "每卡功率上限（计算基准）", unit: "W", min: 0.1, max: Infinity, step: 0.1, defaultValue: 400 },
     { path: "low_utilization.gpu_power_threshold_pct", label: "功率阈值（留空关闭）", unit: "%", min: 0, max: 100, step: 0.1, nullable: true },
     { path: "low_utilization.window_hours", label: "评估窗口", unit: "小时", min: 1, max: 168 },
+    { path: "low_utilization.refresh_minutes", label: "规则刷新间隔", unit: "分钟", min: 1, max: 60 },
     { path: "low_utilization.min_observation_minutes", label: "最短观测时间", unit: "分钟", min: 0, max: 10080 },
     { path: "low_utilization.gpu_compute_threshold_pct", label: "GPU Compute 阈值", unit: "%", min: 0, max: 100, step: 0.1 },
     { path: "low_utilization.gpu_memory_threshold_pct", label: "GPU Memory 阈值", unit: "%", min: 0, max: 100, step: 0.1 },
@@ -266,7 +286,7 @@ function GroupAllocationEditor({
           <label>内存 quota GiB<input type="number" value={activeGroup.memory_quota_gib ?? ""} placeholder="不限" onChange={(event) => updateGroup(activeGroup.id, { memory_quota_gib: event.target.value === "" ? null : Number(event.target.value) })} /></label>
         </div>
         <AssetPicker title="成员" options={memberOptions} selected={activeGroup.name === "default" ? defaultMembers : activeGroup.members} owners={memberOwners} readOnly={activeGroup.name === "default"} onChange={(values) => updateGroup(activeGroup.id, { members: values })} />
-        <AssetPicker title="节点" options={nodeOptions} selected={activeGroup.nodes} owners={nodeOwners} renderOption={(value) => { const node = nodeMap.get(value); return node ? `${value} · ${node.state} · GPU ${node.allocated_gpu}/${node.total_gpu}` : `${value} · 草稿节点`; }} onChange={(values) => updateGroup(activeGroup.id, { nodes: values })} />
+        <AssetPicker title="节点" options={nodeOptions} selected={activeGroup.nodes} owners={nodeOwners} renderOption={(value) => { const node = nodeMap.get(value); return node ? `${nodePrimaryLabel(node)} · ${nodeSecondaryLabel(node)} · ${node.state} · GPU ${node.allocated_gpu}/${node.total_gpu}` : `${value} · hostname 不可用 · 草稿节点`; }} onChange={(values) => updateGroup(activeGroup.id, { nodes: values })} />
         {groupIssues(activeGroup.id).length > 0 && <div className="draft-issues">{groupIssues(activeGroup.id).map((issue) => <p key={issue.id}>{issue.message}</p>)}</div>}
       </article>}
     </div>
@@ -539,7 +559,7 @@ export function AdminPanel({ close, onConfigured }: { close: () => void; onConfi
           {resourceEditor.dirty && <details className="change-preview"><summary>查看变更预览 <span>{resourceChanges.length}</span></summary><div>{resourceChanges.length ? resourceChanges.map((item) => <p key={item.key}><code>{item.key}</code><del>{String(item.before ?? "—")}</del><ins>{String(item.after ?? "—")}</ins></p>) : <p>源码格式发生变化，结构化值未改变。</p>}</div></details>}
           <div className="admin-editor-actions"><button type="button" disabled={busy} onClick={() => reloadEditor("resource")}>重新加载</button><button type="button" disabled={busy || !config.backups?.resource.available} onClick={() => rollback("resource")}>恢复上一版本</button><button type="button" disabled={busy || !resourceEditor.dirty || !parsedResource} onClick={() => save("resource")}>校验并保存资源策略</button></div></section>
         <section><div><h3>组与节点分配</h3><small>先在草稿中编辑组、成员和节点；节点归属信息对所有 Monitor 使用者公开。未显式分配的在线节点有效归属 default。</small>{groupEditor.parse_error && <p className="admin-error">{groupEditor.parse_error}</p>}</div>{groupDraft ? <GroupAllocationEditor draft={groupDraft} nodes={config.node_options ?? []} members={config.member_options ?? []} issues={groupIssues} activeGroupId={activeGroupId} onSelectGroup={setActiveGroupId} onSuggest={requestAllocationPlans} suggestionBusy={allocationBusy} onChange={(value) => { setGroupDraft(value); setGroupDirty(true); setAllocationPlans(null); setApplyErrors([]); }} /> : <p className="muted">当前配置未就绪，请先完成资源和分组配置。</p>}
-          {allocationPlans && <div className="allocation-proposals" aria-label="冷启动分配建议"><header><div><h4>冷启动分配建议</h4><small>快照 {allocationPlans.snapshot_id.slice(0, 12)} · 三种目标均为预览，不会自动写入配置。</small></div><button type="button" onClick={() => setAllocationPlans(null)}>关闭</button></header>{allocationPlans.superseded && <p className="banner">快照已经更新，建议仅供参考；重新加载组配置后再计算。</p>}<div className="allocation-proposal-cards">{allocationPlans.proposals.map((proposal) => <article key={proposal.strategy} className={!proposal.feasible ? "proposal-infeasible" : ""}><h5>{{ "workload-first": "workload 优先", "gpu-first": "GPU 影响优先", "user-first": "用户影响优先" }[proposal.strategy] ?? proposal.strategy}</h5>{proposal.feasible ? <><p>受影响 workload <b>{proposal.metrics.affected_workloads ?? "—"}</b> · GPU <b>{proposal.metrics.affected_gpu ?? "—"}</b> · 用户 <b>{proposal.metrics.affected_users ?? "—"}</b></p><p>节点分配：{proposal.assignment.map((item) => `${item.node}→${item.group}`).join("，") || "无当前节点"}</p>{proposal.capacity_coverage.length > 0 && <p>quota 精确匹配：{proposal.capacity_coverage.filter((item) => item.covered).length}/{proposal.capacity_coverage.length}</p>}<button type="button" disabled={Boolean(allocationPlans.superseded)} onClick={() => applyAllocationProposal(proposal)}>回填此方案</button></> : <><p>不可行：{proposal.diagnostics.join("；") || proposal.status}</p><button type="button" disabled>不能应用</button></>}</article>)}</div></div>}
+          {allocationPlans && <div className="allocation-proposals" aria-label="冷启动分配建议"><header><div><h4>冷启动分配建议</h4><small>快照 {allocationPlans.snapshot_id.slice(0, 12)} · 三种目标均为预览，不会自动写入配置。</small></div><button type="button" onClick={() => setAllocationPlans(null)}>关闭</button></header>{allocationPlans.superseded && <p className="banner">快照已经更新，建议仅供参考；重新加载组配置后再计算。</p>}<p className="muted">Pending 需求按组汇总并与节点总容量比较；这不代表每个任务都能按单节点规格实际放置。</p><div className="allocation-proposal-cards">{allocationPlans.proposals.map((proposal) => <article key={proposal.strategy} className={!proposal.feasible ? "proposal-infeasible" : ""}><h5>{{ "workload-first": "workload 优先", "gpu-first": "GPU 影响优先", "user-first": "用户影响优先" }[proposal.strategy] ?? proposal.strategy}</h5>{proposal.feasible ? <><p>受影响运行 workload <b>{proposal.metrics.affected_workloads ?? "—"}</b> · GPU <b>{proposal.metrics.affected_gpu ?? "—"}</b> · 用户 <b>{proposal.metrics.affected_users ?? "—"}</b></p>{proposal.pending_demand?.length ? <p>Pending 需求 / 节点总量缺口：{proposal.pending_demand.map(pendingDemandSummary).join(" · ")}</p> : <p>无可计算的 Pending 资源需求</p>}{proposal.pending_demand_complete === false && <p className="banner">Pending 来源、资源规格或节点容量数据不完整，建议仅参考已知数据。</p>}{proposal.excluded_pending_workloads?.length ? <details><summary>资源需求未纳入的 Pending workload {proposal.excluded_pending_workloads.length} 个</summary>{proposal.excluded_pending_workloads.map((item) => <p key={`${item.workload_id}:${item.reason}`}><code>{item.workload_id}</code> · {item.reason}</p>)}</details> : null}{proposal.partial_pending_workloads?.length ? <details><summary>资源规格不完整的 Pending workload {proposal.partial_pending_workloads.length} 个</summary>{proposal.partial_pending_workloads.map((item) => <p key={`${item.workload_id}:${item.reason}`}><code>{item.workload_id}</code> · {item.reason}</p>)}</details> : null}<p>节点分配：{proposal.assignment.map((item) => `${nodeNameWithInternal(config.node_options ?? [], item.node)}→${item.group}`).join("，") || "无当前节点"}</p>{proposal.capacity_coverage.length > 0 && <p>quota 精确匹配：{proposal.capacity_coverage.filter((item) => item.covered).length}/{proposal.capacity_coverage.length}</p>}<button type="button" disabled={Boolean(allocationPlans.superseded)} onClick={() => applyAllocationProposal(proposal)}>回填此方案</button></> : <><p>不可行：{proposal.diagnostics.join("；") || proposal.status}</p><button type="button" disabled>不能应用</button></>}</article>)}</div></div>}
           <div className="admin-editor-actions"><button type="button" disabled={busy} onClick={() => reloadEditor("groups")}>重新加载并放弃草稿</button><button type="button" disabled={busy || !config.backups?.groups.available} onClick={() => rollback("groups")}>恢复上一版本</button><button type="button" disabled={busy || !groupDirty || !groupDraft} onClick={openApplyReview}>确认应用组与节点分配</button></div><details className="source-preview"><summary>查看当前持久化 YAML（只读）</summary><pre>{groupEditor.text}</pre></details></section>
         <details className="audit-panel"><summary>配置审计记录 <span>{config.audit?.length ?? 0}</span></summary><div>{config.audit?.map((record) => <article key={`${record.timestamp}:${record.after_revision}`}><span className={record.action === "rollback" ? "status status-warning" : "status status-info"}>{record.action === "rollback" ? "回滚" : "更新"}</span><p><b>{record.kind === "resource" ? "资源策略" : "私有分组"}</b><small>{record.actor} · {new Date(record.timestamp).toLocaleString()}</small></p><code>{record.after_revision.slice(0, 12)}</code></article>)}{!config.audit?.length && <p className="muted">暂无审计记录</p>}</div></details>
       </div>}
@@ -547,7 +567,7 @@ export function AdminPanel({ close, onConfigured }: { close: () => void; onConfi
     {config && applyReviewOpen && groupDraft && <div className="admin-confirm-backdrop" role="presentation" onClick={() => { if (!busy) setApplyReviewOpen(false); }}><section className="admin-confirm-dialog" role="dialog" aria-modal="true" aria-label="确认应用组与节点分配" onClick={(event) => event.stopPropagation()}>
       <header><div><span className="eyebrow">Review draft</span><h3>确认应用组与节点分配</h3></div><button type="button" onClick={() => setApplyReviewOpen(false)} disabled={busy} aria-label="关闭确认面板">×</button></header>
       <p className="muted">提交时将使用 revision <code>{config.groups.revision.slice(0, 12)}</code>，服务端会再次校验并在成功后原子写入。</p>
-      <div className="apply-summary"><p><b>节点归属约束：</b>{groupDraft.node_allocation.enabled ? "启用" : "关闭"}</p><p><b>草稿组：</b>{groupDraft.groups.length} 个</p>{groupDraft.groups.map((group) => <article key={group.id}><b>{group.name || "未命名组"}</b><span>GPU quota：{group.gpu_quota === "remainder" ? "remainder" : group.gpu_quota == null ? "不限" : group.gpu_quota}</span><span>{group.name === "default" ? effectiveDefaultMemberCount : group.members.length} 个成员 · {group.nodes.length} 个节点</span></article>)}</div>
+      <div className="apply-summary"><p><b>节点归属约束：</b>{groupDraft.node_allocation.enabled ? "启用" : "关闭"}</p><p><b>草稿组：</b>{groupDraft.groups.length} 个</p>{groupDraft.groups.map((group) => <article key={group.id}><b>{group.name || "未命名组"}</b><span>GPU quota：{group.gpu_quota === "remainder" ? "remainder" : group.gpu_quota == null ? "不限" : group.gpu_quota}</span><span>{group.name === "default" ? effectiveDefaultMemberCount : group.members.length} 个成员 · {group.nodes.length} 个节点</span>{group.nodes.length > 0 && <span>{group.nodes.map((node) => nodeNameWithInternal(config.node_options ?? [], node)).join("，")}</span>}</article>)}</div>
       {(groupIssues.length > 0 || applyErrors.length > 0) && <div className="draft-issues apply-errors"><strong>应用前校验未通过，草稿仍保留：</strong>{[...groupIssues.map((issue) => issue.message), ...applyErrors].filter((message, index, values) => values.indexOf(message) === index).map((message) => <p key={message}>{message}</p>)}</div>}
       <div className="admin-editor-actions"><button type="button" disabled={busy} onClick={() => setApplyReviewOpen(false)}>返回继续编辑</button><button type="button" disabled={busy} onClick={saveGroupsStructured}>{busy ? "校验并应用中…" : "确认并应用"}</button></div>
     </section></div>}

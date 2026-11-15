@@ -13,11 +13,11 @@
   },
   "training": {
     "cpu_per_gpu": 14,
-    "memory_gib_per_gpu": 240,
+    "memory_gib_per_gpu": 120,
     "zero_gpu_max_cpu_per_node": 14,
     "zero_gpu_max_memory_gib_per_node": 240
   },
-  "planning": {"default_cpu_per_gpu": 14, "default_memory_gib_per_gpu": 240},
+  "planning": {"default_cpu_per_gpu": 14, "default_memory_gib_per_gpu": 120},
   "low_utilization": {
     "window_hours": 24,
     "refresh_minutes": 5,
